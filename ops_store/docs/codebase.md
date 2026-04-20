@@ -94,6 +94,7 @@ pandas 중심 workflow에서는 `bulk_index_dataframe()`이 더 안전하고 메
 
 - `exists()`: index 존재 여부 확인
 - `create()`: optional mapping, settings, aliases와 함께 index 생성
+- `recreate_index()`: 기존 index가 있으면 삭제 후 shard/replica, mapping, alias를 포함해 다시 생성
 - `rollover()`: alias를 다음 backing index로 rollover
 - `delete()`: index 삭제
 - `get_settings()`: 현재 index settings 조회

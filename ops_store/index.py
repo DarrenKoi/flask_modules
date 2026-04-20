@@ -13,6 +13,33 @@ class OSIndex(OSBase):
         result = self.client.indices.exists(index=name)
         return self._log_result("exists", result, index=name)
 
+    def recreate_index(
+        self,
+        index_name: str,
+        shards: int = 1,
+        replica: int = 0,
+        mappings: dict[str, Any] | None = None,
+        aliases: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        deleted_existing = self.exists(index_name)
+        if deleted_existing:
+            self.delete(index_name)
+        result = self.create(
+            index=index_name,
+            mappings=mappings,
+            aliases=aliases,
+            shards=shards,
+            replicas=replica,
+        )
+        return self._log_result(
+            "recreate_index",
+            result,
+            index=index_name,
+            deleted_existing=deleted_existing,
+            shards=shards,
+            replica=replica,
+        )
+
     def create(
         self,
         *,

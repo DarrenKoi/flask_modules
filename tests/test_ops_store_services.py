@@ -387,6 +387,58 @@ class OSIndexTests(unittest.TestCase):
             },
         )
 
+    def test_recreate_index_deletes_existing_index_before_creating(self) -> None:
+        client = Mock()
+        client.indices.exists.return_value = True
+        service = OSIndex(client=client, index="logs")
+
+        service.recreate_index(
+            "logs",
+            shards=3,
+            replica=1,
+            mappings={"properties": {"title": {"type": "text"}}},
+            aliases={"logs": {"is_write_index": True}},
+        )
+
+        self.assertEqual(
+            client.indices.method_calls,
+            [
+                unittest.mock.call.exists(index="logs"),
+                unittest.mock.call.delete(index="logs"),
+                unittest.mock.call.create(
+                    index="logs",
+                    body={
+                        "settings": {
+                            "number_of_shards": 3,
+                            "number_of_replicas": 1,
+                            "refresh_interval": "30s",
+                        },
+                        "mappings": {"properties": {"title": {"type": "text"}}},
+                        "aliases": {"logs": {"is_write_index": True}},
+                    },
+                ),
+            ],
+        )
+
+    def test_recreate_index_creates_when_index_does_not_exist(self) -> None:
+        client = Mock()
+        client.indices.exists.return_value = False
+        service = OSIndex(client=client, index="logs")
+
+        service.recreate_index("logs")
+
+        client.indices.delete.assert_not_called()
+        client.indices.create.assert_called_once_with(
+            index="logs",
+            body={
+                "settings": {
+                    "number_of_shards": 1,
+                    "number_of_replicas": 0,
+                    "refresh_interval": "30s",
+                }
+            },
+        )
+
     def test_rollover_uses_alias_and_conditions(self) -> None:
         client = Mock()
         service = OSIndex(client=client, index="logs")
