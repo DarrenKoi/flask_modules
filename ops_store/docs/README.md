@@ -1,13 +1,13 @@
-# ops_store docs
+# ops_store 문서
 
-This folder explains the `ops_store` package and the small Flask service that
-ships with it.
+이 폴더는 `ops_store` 패키지와 함께 들어 있는 작은 Flask service를
+설명합니다.
 
-Documents in this folder:
+이 폴더의 문서:
 
-- `codebase.md`: repository layout, module responsibilities, and runtime flow
-- `usage.md`: configuration, examples, recommended patterns, and common mistakes
+- `codebase.md`: repository 구조, module 역할, runtime 흐름 설명
+- `usage.md`: 설정 방법, 예제, 권장 사용 패턴, 자주 하는 실수 정리
 
-Start with `codebase.md` if you want to understand how the repository is put
-together. Start with `usage.md` if you want to use the OpenSearch helpers in an
-app or a script right away.
+프로젝트 구조부터 이해하고 싶다면 `codebase.md`부터 읽는 것이 좋습니다.
+바로 OpenSearch helper를 app이나 script에서 사용하고 싶다면 `usage.md`부터
+보면 됩니다.

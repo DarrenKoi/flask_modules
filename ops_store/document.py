@@ -1,6 +1,10 @@
 """Document CRUD and bulk operations."""
 
+import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
+from functools import lru_cache
 from typing import Any
 
 from .base import OSBase
@@ -10,6 +14,101 @@ def _bulk_helper() -> Any:
     from opensearchpy import helpers
 
     return helpers.bulk
+
+
+@lru_cache(maxsize=1)
+def _pandas_module() -> Any | None:
+    try:
+        import pandas as pd
+    except ImportError:
+        return None
+    return pd
+
+
+@lru_cache(maxsize=1)
+def _numpy_module() -> Any | None:
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    return np
+
+
+def _is_missing_scalar(value: Any) -> bool:
+    if value is None:
+        return True
+
+    if isinstance(value, float):
+        return math.isnan(value)
+
+    if isinstance(value, (str, bytes, bytearray, Mapping, list, tuple, set, frozenset)):
+        return False
+
+    pandas = _pandas_module()
+    if pandas is None:
+        return False
+
+    try:
+        result = pandas.isna(value)
+    except Exception:
+        return False
+
+    if isinstance(result, bool):
+        return result
+
+    numpy = _numpy_module()
+    if numpy is not None and isinstance(result, numpy.bool_):
+        return bool(result)
+
+    return False
+
+
+def _normalize_value(value: Any) -> Any:
+    if _is_missing_scalar(value):
+        return None
+
+    numpy = _numpy_module()
+    if numpy is not None:
+        if isinstance(value, numpy.generic):
+            return _normalize_value(value.item())
+        if isinstance(value, numpy.ndarray):
+            if value.ndim == 0:
+                return _normalize_value(value.item())
+            return [_normalize_value(item) for item in value.tolist()]
+
+    if isinstance(value, Mapping):
+        return {str(key): _normalize_value(item) for key, item in value.items()}
+
+    if isinstance(value, (list, tuple)):
+        return [_normalize_value(item) for item in value]
+
+    if isinstance(value, (set, frozenset)):
+        return [_normalize_value(item) for item in value]
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    if isinstance(value, date):
+        return value.isoformat()
+
+    if isinstance(value, time):
+        return value.isoformat()
+
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+
+    if isinstance(value, Decimal):
+        if value.is_nan():
+            return None
+        return float(value)
+
+    return value
+
+
+def normalize_document(document: Mapping[str, Any]) -> dict[str, Any]:
+    """Convert a document into a JSON-safe structure for bulk indexing."""
+
+    return {str(key): _normalize_value(value) for key, value in document.items()}
 
 
 class OSDoc(OSBase):
@@ -141,6 +240,7 @@ class OSDoc(OSBase):
         *,
         index: str | None = None,
         id_field: str | None = None,
+        normalize: bool = False,
         chunk_size: int | None = None,
         refresh: bool = False,
         raise_on_error: bool = False,
@@ -152,9 +252,11 @@ class OSDoc(OSBase):
 
         def iter_actions() -> Iterator[dict[str, Any]]:
             for document in documents:
-                source = dict(document)
+                source = (
+                    normalize_document(document) if normalize else dict(document)
+                )
                 action: dict[str, Any] = {"_index": name, "_source": source}
-                if id_field and id_field in source:
+                if id_field and id_field in source and source[id_field] is not None:
                     action["_id"] = source[id_field]
                 yield action
 
@@ -169,6 +271,59 @@ class OSDoc(OSBase):
             result,
             index=name,
             document_count=len(documents),
+            chunk_size=actual_chunk_size,
+            refresh=refresh,
+        )
+
+    def bulk_index_dataframe(
+        self,
+        dataframe: Any,
+        *,
+        index: str | None = None,
+        id_field: str | None = None,
+        id_from_index: bool = False,
+        chunk_size: int | None = None,
+        refresh: bool = False,
+        raise_on_error: bool = False,
+    ) -> tuple[int, list[Any]]:
+        if id_field is not None and id_from_index:
+            raise ValueError("Use either id_field or id_from_index, not both.")
+
+        name = self._resolve_index(index)
+        actual_chunk_size = chunk_size or (
+            self.config.bulk_chunk if self.config is not None else 500
+        )
+        columns = list(dataframe.columns)
+
+        def iter_actions() -> Iterator[dict[str, Any]]:
+            row_iter = dataframe.itertuples(index=False, name=None)
+            if id_from_index:
+                row_iter = zip(dataframe.index, row_iter)
+            else:
+                row_iter = ((None, row) for row in row_iter)
+
+            for row_id, row in row_iter:
+                source = normalize_document(dict(zip(columns, row)))
+                action: dict[str, Any] = {"_index": name, "_source": source}
+
+                if id_field and id_field in source and source[id_field] is not None:
+                    action["_id"] = str(source[id_field])
+                elif id_from_index and row_id is not None:
+                    action["_id"] = str(_normalize_value(row_id))
+
+                yield action
+
+        result = self._run_bulk(
+            iter_actions(),
+            chunk_size=actual_chunk_size,
+            refresh=refresh,
+            raise_on_error=raise_on_error,
+        )
+        return self._log_result(
+            "bulk_index_dataframe",
+            result,
+            index=name,
+            row_count=len(dataframe),
             chunk_size=actual_chunk_size,
             refresh=refresh,
         )

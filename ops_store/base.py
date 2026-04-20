@@ -21,7 +21,7 @@ class OSConfig:
     """Connection settings for an OpenSearch cluster."""
 
     host: str = "localhost"
-    port: int = 9200
+    port: int = 443
     user: str | None = "admin"
     password: str | None = "admin"
     use_ssl: bool = True

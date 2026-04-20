@@ -19,6 +19,7 @@ class OSIndex(OSBase):
         index: str | None = None,
         mappings: dict[str, Any] | None = None,
         settings: dict[str, Any] | None = None,
+        aliases: dict[str, Any] | None = None,
         shards: int = 1,
         replicas: int = 0,
         refresh_interval: str = "30s",
@@ -32,6 +33,8 @@ class OSIndex(OSBase):
         body: dict[str, Any] = {"settings": index_settings}
         if mappings:
             body["mappings"] = mappings
+        if aliases:
+            body["aliases"] = aliases
 
         result = self.client.indices.create(index=name, body=body)
         return self._log_result("create_index", result, index=name)
@@ -80,3 +83,43 @@ class OSIndex(OSBase):
     def update_aliases(self, actions: list[dict[str, Any]]) -> dict[str, Any]:
         result = self.client.indices.update_aliases(body={"actions": actions})
         return self._log_result("update_aliases", result, action_count=len(actions))
+
+    def rollover(
+        self,
+        *,
+        alias: str | None = None,
+        new_index: str | None = None,
+        conditions: dict[str, Any] | None = None,
+        settings: dict[str, Any] | None = None,
+        mappings: dict[str, Any] | None = None,
+        aliases: dict[str, Any] | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        name = self._resolve_index(alias)
+        body: dict[str, Any] = {}
+        if conditions:
+            body["conditions"] = conditions
+        if settings:
+            body["settings"] = settings
+        if mappings:
+            body["mappings"] = mappings
+        if aliases:
+            body["aliases"] = aliases
+
+        params = {"dry_run": True} if dry_run else None
+        kwargs: dict[str, Any] = {"alias": name}
+        if new_index is not None:
+            kwargs["new_index"] = new_index
+        if body:
+            kwargs["body"] = body
+        if params is not None:
+            kwargs["params"] = params
+
+        result = self.client.indices.rollover(**kwargs)
+        return self._log_result(
+            "rollover",
+            result,
+            alias=name,
+            new_index=new_index,
+            dry_run=dry_run,
+        )

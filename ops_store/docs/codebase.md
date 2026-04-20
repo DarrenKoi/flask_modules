@@ -1,152 +1,168 @@
-# Codebase Guide
+# 코드베이스 가이드
 
-## What this repository contains
+## 이 repository가 담고 있는 것
 
-This repository has two distinct parts:
+이 repository는 크게 두 부분으로 나뉩니다.
 
-1. A very small Flask app used as the HTTP entrypoint.
-2. A reusable `ops_store` package that wraps `opensearch-py` with a small,
-   class-based interface.
+1. HTTP entrypoint 역할을 하는 아주 작은 Flask app
+2. `opensearch-py`를 얇게 감싼 재사용 가능한 `ops_store` 패키지
 
-The Flask app is intentionally thin. Most of the reusable behavior lives in
-`ops_store/`.
+Flask app은 의도적으로 얇게 유지되어 있고, 재사용 가능한 핵심 로직은
+대부분 `ops_store/` 안에 있습니다.
 
-## Repository map
+## Repository 구조
 
-- `index.py`: top-level process entrypoint; creates the Flask app and runs it
-  locally.
-- `config.py`: Flask configuration loaded from environment variables.
-- `api/__init__.py`: application factory and root `/` route registration.
-- `api/routes.py`: API blueprint routes under `/api`.
-- `ops_store/base.py`: connection config, client factory, and shared base class.
-- `ops_store/document.py`: document CRUD and bulk write helpers.
-- `ops_store/index.py`: index settings, mappings, refresh, and alias helpers.
-- `ops_store/search.py`: query helpers for raw, lexical, boolean, vector, and
-  aggregation searches.
-- `ops_store/logging.py`: package logging configuration and result summarizing.
-- `tests/test_ops_store_services.py`: unit tests for config loading, logging,
-  CRUD helpers, and search query construction.
+- `index.py`: 최상위 process entrypoint. Flask app을 만들고 로컬에서 실행합니다.
+- `config.py`: environment variable 기반 Flask 설정
+- `api/__init__.py`: application factory와 루트 `/` route 등록
+- `api/routes.py`: `/api` 아래의 blueprint route
+- `ops_store/base.py`: connection config, client factory, 공통 base class
+- `ops_store/document.py`: document CRUD와 bulk write helper
+- `ops_store/index.py`: index 설정, mapping, refresh, alias, rollover helper
+- `ops_store/search.py`: raw, lexical, boolean, vector, aggregation query helper
+- `ops_store/logging.py`: package logging 설정과 result 요약 처리
+- `tests/test_ops_store_services.py`: config, logging, CRUD, query 구성에 대한
+  unit test
 
-## Runtime flow
+## Runtime 흐름
 
-The request and service flow is simple:
+요청과 service 흐름은 단순합니다.
 
-1. `index.py` imports `create_app()` from `api`.
-2. `api.create_app()` builds the Flask app, loads `Config`, and registers the
-   `/api` blueprint.
-3. Route functions in `api/routes.py` return JSON responses.
-4. When application code wants OpenSearch access, it uses `ops_store`.
-5. `ops_store.base.load_config()` reads connection settings from environment
-   variables into `OSConfig`.
-6. `ops_store.base.create_client()` turns `OSConfig` into an `OpenSearch`
-   client.
-7. `OSDoc`, `OSIndex`, and `OSSearch` inherit from `OSBase`, share the client
-   lifecycle rules, and log summarized operation results through
-   `ops_store.logging.log_result()`.
+1. `index.py`가 `api`에서 `create_app()`을 import 합니다.
+2. `api.create_app()`이 Flask app을 만들고 `Config`를 로드한 뒤 `/api`
+   blueprint를 등록합니다.
+3. `api/routes.py`의 route function이 JSON response를 반환합니다.
+4. application code에서 OpenSearch 접근이 필요하면 `ops_store`를 사용합니다.
+5. `ops_store.base.load_config()`가 environment variable을 읽어 `OSConfig`를
+   만듭니다.
+6. `ops_store.base.create_client()`가 `OSConfig`를 실제 `OpenSearch` client로
+   바꿉니다.
+7. `OSDoc`, `OSIndex`, `OSSearch`는 모두 `OSBase`를 상속하고, 공통 client
+   lifecycle 규칙을 공유하며, 결과는 `ops_store.logging.log_result()`를 통해
+   요약 로그로 남깁니다.
 
-## `ops_store` module responsibilities
+## `ops_store` module별 역할
 
 ### `base.py`
 
-`base.py` is the foundation of the package.
+`base.py`는 패키지의 기반입니다.
 
-- `OSConfig` is a dataclass for OpenSearch connection settings.
-- `OSConfig.from_env()` reads all supported `OPENSEARCH_*` environment
-  variables.
-- `create_client()` instantiates the actual `opensearchpy.OpenSearch` client.
-- `OSBase` stores the client, optional config, and an optional default index.
+- `OSConfig`: OpenSearch connection 설정을 담는 dataclass
+- `OSConfig.from_env()`: 지원되는 모든 `OPENSEARCH_*` environment variable
+  로드
+- `create_client()`: 실제 `opensearchpy.OpenSearch` client 생성
+- `OSBase`: client, optional config, optional default index를 보관하는 공통
+  base class
 
-Important behavior in this module:
+이 module에서 중요한 동작:
 
-- If `user` is set, `password` must also be set, and vice versa.
-- `use_ssl=True` changes the host scheme to `https`.
-- `OSBase._resolve_index()` raises `ValueError` if neither an explicit `index`
-  argument nor `default_index` is available.
-- If you pass an already-created `client`, you cannot also pass client override
-  keyword arguments. That is enforced to avoid ambiguous configuration.
+- `user`를 설정하면 `password`도 반드시 설정해야 하고, 반대도 동일합니다.
+- `use_ssl=True`이면 host scheme이 `https`로 바뀝니다.
+- 기본 connection profile은 HTTPS `443` port, `verify_certs=False`,
+  `ssl_show_warn=False`입니다.
+- `OSBase._resolve_index()`는 명시적인 `index` argument와
+  `default_index`가 모두 없으면 `ValueError`를 발생시킵니다.
+- 이미 생성된 `client`를 넘긴 경우에는 client override keyword argument를
+  함께 넘길 수 없습니다. 모호한 설정 조합을 막기 위한 제약입니다.
 
 ### `document.py`
 
-`OSDoc` handles document-level writes and reads:
+`OSDoc`은 document 단위 read/write를 담당합니다.
 
-- `index()`: create or replace a single document
-- `get()`: fetch a document by id
-- `update()`: partial update using `{"doc": ...}`
-- `upsert()`: update or insert using `doc_as_upsert=True`
-- `delete()`: delete a document by id
-- `bulk()`: send raw bulk actions
-- `bulk_index()`: convert plain document dictionaries into bulk index actions
+- `index()`: 단일 document 생성 또는 교체
+- `get()`: id로 document 조회
+- `update()`: `{"doc": ...}` 형태의 partial update
+- `upsert()`: `doc_as_upsert=True`를 사용하는 update-or-insert
+- `delete()`: id 기준 document 삭제
+- `bulk()`: raw bulk action 전송
+- `bulk_index()`: 일반 document dictionary를 bulk index action으로 변환
+- `bulk_index_dataframe()`: DataFrame row를 stream 형태로 bulk index action으로
+  변환
+- `normalize_document()`: pandas/NumPy 친화적인 값을 JSON-safe document로 변환
 
-`bulk_index()` is intentionally higher level than `bulk()`. It expects a
-sequence of document mappings and can pull `_id` from a document field when
-`id_field` is set.
+`bulk_index()`는 `bulk()`보다 한 단계 높은 수준의 helper입니다.
+document mapping sequence를 입력으로 받고, `id_field`를 지정하면 해당 field를
+`_id`로 사용합니다.
+
+pandas 중심 workflow에서는 `bulk_index_dataframe()`이 더 안전하고 메모리
+효율적입니다. missing value, timestamp, NumPy scalar 같은 JSON 비호환 값을
+정규화한 뒤 OpenSearch bulk serializer로 넘기기 때문입니다.
 
 ### `index.py`
 
-`OSIndex` wraps index-management operations through `client.indices`.
+`OSIndex`는 `client.indices`를 감싼 index 관리 helper입니다.
 
-- `exists()`: check whether an index exists
-- `create()`: create an index with optional mappings and settings
-- `delete()`: delete an index
-- `get_settings()`: inspect current index settings
-- `get_mapping()`: inspect mappings
-- `update_settings()`: change index settings
-- `refresh()`: refresh the index
-- `get_aliases()`: get aliases for a specific index or all aliases if no index
-  is resolved
-- `update_aliases()`: submit alias add/remove actions
+- `exists()`: index 존재 여부 확인
+- `create()`: optional mapping, settings, aliases와 함께 index 생성
+- `rollover()`: alias를 다음 backing index로 rollover
+- `delete()`: index 삭제
+- `get_settings()`: 현재 index settings 조회
+- `get_mapping()`: mapping 조회
+- `update_settings()`: index settings 변경
+- `refresh()`: index refresh
+- `get_aliases()`: 특정 index의 alias 또는 전체 alias 조회
+- `update_aliases()`: alias add/remove action 제출
 
-The `create()` method applies default settings unless you override them:
+`create()`는 별도 override가 없으면 다음 기본값을 적용합니다.
 
 - `number_of_shards=1`
 - `number_of_replicas=0`
 - `refresh_interval="30s"`
 
+data가 계속 쌓이는 time-series 또는 append-heavy workload에서는
+alias + backing index 패턴을 의도한 사용 방식으로 보면 됩니다.
+
+- app이 읽고 쓰는 stable alias 예: `articles`
+- 실제 물리 index 예: `articles-000001`
+- rollover는 concrete backing index가 아니라 alias 기준으로 수행
+
+이렇게 하면 실제 index 개수가 늘어나도 application code는 거의 바뀌지
+않습니다.
+
 ### `search.py`
 
-`OSSearch` wraps query patterns but still returns the raw OpenSearch response.
-That makes it lightweight and predictable.
+`OSSearch`는 query helper를 제공하지만, response는 그대로 OpenSearch 형식을
+반환합니다. 그래서 동작이 가볍고 예측하기 쉽습니다.
 
-- `search_raw()`: send a raw search body directly
-- `count()`: count matching documents
-- `match()`: match query for a single field
+- `search_raw()`: raw search body 직접 전송
+- `count()`: matching document 개수 조회
+- `match()`: 단일 field match query
 - `term()`: exact-value term query
 - `bool()`: boolean query builder
 - `multi_match()`: multi-field full-text query
 - `knn()`: vector k-NN query
-- `hybrid()`: simple lexical plus vector `should` query
-- `aggregate()`: search with aggregations
+- `hybrid()`: lexical + vector `should` query
+- `aggregate()`: aggregation search
 
-The package does not define its own response model. It leaves the response in
-OpenSearch format so the caller can decide how much to extract from `hits`,
-`aggregations`, and metadata.
+패키지는 자체 response model을 만들지 않습니다. `hits`, `aggregations`,
+metadata를 어떻게 추출할지는 caller가 결정하도록 OpenSearch response 형식을
+그대로 유지합니다.
 
 ### `logging.py`
 
-`logging.py` provides package-specific logging helpers.
+`logging.py`는 package 전용 logging helper를 제공합니다.
 
-- `configure_logging()` sets up the logger once.
-- `PIDFileHandler` writes logs to a file named with the current process id.
-- `summarize_result()` trims large OpenSearch responses into smaller summaries.
-- `log_result()` writes a structured log payload and then returns the original
-  result unchanged.
+- `configure_logging()`: logger를 한 번 설정
+- `PIDFileHandler`: 현재 process id 기반 파일명으로 로그 기록
+- `summarize_result()`: 큰 OpenSearch response를 더 작은 summary로 축약
+- `log_result()`: structured log payload를 남기고 원래 result를 그대로 반환
 
-One important detail: the package starts with a `NullHandler`, so importing
-`ops_store` does not produce logs by itself. Logging becomes visible only after
-`configure_logging()` is called or the surrounding application wires handlers in
-another way.
+중요한 점 하나는, 이 패키지가 시작할 때 `NullHandler`를 붙인다는 점입니다.
+즉 `ops_store`를 import 했다고 해서 자동으로 로그가 보이진 않습니다.
+로그는 `configure_logging()`을 호출하거나, 상위 application이 handler를
+구성한 뒤에야 실제로 보이게 됩니다.
 
-## What the tests verify
+## 테스트가 검증하는 내용
 
-`tests/test_ops_store_services.py` covers the key package behaviors:
+`tests/test_ops_store_services.py`는 다음 핵심 동작을 검증합니다.
 
-- environment-driven config loading
-- client creation arguments
-- logging setup and file output
-- bulk action construction
-- query body generation
-- default index settings for index creation
+- environment 기반 config 로딩
+- client 생성 argument 구성
+- logging 설정과 file output
+- bulk action 구성
+- query body 생성
+- index 생성 시 기본 settings 적용
 
-The tests use `unittest.mock` instead of a live OpenSearch cluster, which is
-the right fit for this package because the package is mostly argument shaping
-and delegation around the OpenSearch client.
+테스트는 live OpenSearch cluster 대신 `unittest.mock`을 사용합니다. 이
+패키지가 실제 cluster와의 통신보다는 argument shaping과 delegation이 중심인
+구조이기 때문에, 이런 unit test 방식이 잘 맞습니다.

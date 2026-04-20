@@ -1,7 +1,7 @@
 """Purpose-specific OpenSearch service classes built on top of opensearch-py."""
 
 from .base import OSConfig, create_client, load_config
-from .document import OSDoc
+from .document import OSDoc, normalize_document
 from .index import OSIndex
 from .logging import configure_logging, get_logger
 from .search import OSSearch
@@ -15,4 +15,5 @@ __all__ = [
     "create_client",
     "get_logger",
     "load_config",
+    "normalize_document",
 ]
