@@ -42,6 +42,17 @@ class FakeDataFrame:
         return len(self._rows)
 
 
+class FakeSearchDataFrame:
+    def __init__(self, records: list[dict[str, object]]) -> None:
+        self.records = records
+        self.columns = list(records[0].keys()) if records else []
+
+
+class FakePandasModule:
+    def DataFrame(self, records: list[dict[str, object]]) -> FakeSearchDataFrame:
+        return FakeSearchDataFrame(records)
+
+
 class OSConfigTests(unittest.TestCase):
     def test_load_config_uses_https_defaults(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -464,6 +475,263 @@ class OSSearchTests(unittest.TestCase):
             index="knowledge",
             body={"query": {"match": {"title": "flask"}}, "size": 5},
         )
+
+    def test_to_dataframe_uses_source_fields_by_default(self) -> None:
+        service = OSSearch(client=Mock(), index="knowledge")
+        result = {
+            "hits": {
+                "hits": [
+                    {
+                        "_id": "doc-1",
+                        "_index": "knowledge",
+                        "_score": 1.25,
+                        "_source": {"title": "Flask Guide", "status": "published"},
+                    },
+                    {
+                        "_id": "doc-2",
+                        "_index": "knowledge",
+                        "_score": 0.9,
+                        "_source": {"title": "FastAPI Guide", "status": "draft"},
+                    },
+                ]
+            }
+        }
+
+        with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
+            dataframe = service.to_dataframe(result)
+
+        self.assertEqual(
+            dataframe.records,
+            [
+                {"title": "Flask Guide", "status": "published"},
+                {"title": "FastAPI Guide", "status": "draft"},
+            ],
+        )
+        self.assertEqual(dataframe.columns, ["title", "status"])
+
+    def test_to_dataframe_can_include_hit_metadata(self) -> None:
+        service = OSSearch(client=Mock(), index="knowledge")
+        result = {
+            "hits": {
+                "hits": [
+                    {
+                        "_id": "doc-1",
+                        "_index": "knowledge",
+                        "_score": 1.25,
+                        "_source": {"title": "Flask Guide"},
+                    }
+                ]
+            }
+        }
+
+        with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
+            dataframe = service.to_dataframe(result, include_meta=True)
+
+        self.assertEqual(
+            dataframe.records,
+            [
+                {
+                    "title": "Flask Guide",
+                    "_id": "doc-1",
+                    "_index": "knowledge",
+                    "_score": 1.25,
+                }
+            ],
+        )
+
+    def test_match_dataframe_returns_dataframe_from_search_hits(self) -> None:
+        client = Mock()
+        client.search.return_value = {
+            "hits": {
+                "hits": [
+                    {
+                        "_id": "doc-1",
+                        "_index": "knowledge",
+                        "_score": 1.25,
+                        "_source": {"title": "Flask Guide", "status": "published"},
+                    }
+                ]
+            }
+        }
+        service = OSSearch(client=client, index="knowledge")
+        service.logger = Mock()
+
+        with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
+            dataframe = service.match_dataframe(
+                "title",
+                "flask",
+                size=5,
+                include_meta=True,
+            )
+
+        client.search.assert_called_once_with(
+            index="knowledge",
+            body={"query": {"match": {"title": "flask"}}, "size": 5},
+        )
+        self.assertEqual(
+            dataframe.records,
+            [
+                {
+                    "title": "Flask Guide",
+                    "status": "published",
+                    "_id": "doc-1",
+                    "_index": "knowledge",
+                    "_score": 1.25,
+                }
+            ],
+        )
+        service.logger.info.assert_called_once()
+
+    def test_search_dataframe_all_collects_scroll_pages(self) -> None:
+        client = Mock()
+        client.search.return_value = {
+            "_scroll_id": "scroll-1",
+            "hits": {
+                "hits": [
+                    {
+                        "_id": "doc-1",
+                        "_index": "knowledge",
+                        "_score": 1.25,
+                        "_source": {"title": "Flask Guide", "status": "published"},
+                    }
+                ]
+            },
+        }
+        client.scroll.side_effect = [
+            {
+                "_scroll_id": "scroll-1",
+                "hits": {
+                    "hits": [
+                        {
+                            "_id": "doc-2",
+                            "_index": "knowledge",
+                            "_score": 0.9,
+                            "_source": {"title": "FastAPI Guide", "status": "draft"},
+                        }
+                    ]
+                },
+            },
+            {
+                "_scroll_id": "scroll-1",
+                "hits": {"hits": []},
+            },
+        ]
+        service = OSSearch(client=client, index="knowledge")
+        service.logger = Mock()
+
+        with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
+            dataframe = service.search_dataframe_all(
+                {"query": {"match_all": {}}},
+                batch_size=1,
+            )
+
+        client.search.assert_called_once_with(
+            index="knowledge",
+            body={"query": {"match_all": {}}, "size": 1},
+            scroll="2m",
+        )
+        self.assertEqual(client.scroll.call_count, 2)
+        client.clear_scroll.assert_called_once_with(scroll_id="scroll-1")
+        self.assertEqual(
+            dataframe.records,
+            [
+                {"title": "Flask Guide", "status": "published"},
+                {"title": "FastAPI Guide", "status": "draft"},
+            ],
+        )
+        service.logger.info.assert_called_once()
+
+    def test_match_dataframe_all_builds_match_query_and_includes_meta(self) -> None:
+        client = Mock()
+        client.search.return_value = {
+            "_scroll_id": "scroll-1",
+            "hits": {
+                "hits": [
+                    {
+                        "_id": "doc-1",
+                        "_index": "knowledge",
+                        "_score": 1.25,
+                        "_source": {"title": "Flask Guide", "status": "published"},
+                    }
+                ]
+            },
+        }
+        client.scroll.return_value = {
+            "_scroll_id": "scroll-1",
+            "hits": {"hits": []},
+        }
+        service = OSSearch(client=client, index="knowledge")
+
+        with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
+            dataframe = service.match_dataframe_all(
+                "title",
+                "flask",
+                batch_size=50,
+                include_meta=True,
+            )
+
+        client.search.assert_called_once_with(
+            index="knowledge",
+            body={"query": {"match": {"title": "flask"}}, "size": 50},
+            scroll="2m",
+        )
+        self.assertEqual(
+            dataframe.records,
+            [
+                {
+                    "title": "Flask Guide",
+                    "status": "published",
+                    "_id": "doc-1",
+                    "_index": "knowledge",
+                    "_score": 1.25,
+                }
+            ],
+        )
+        client.clear_scroll.assert_called_once_with(scroll_id="scroll-1")
+
+    def test_search_dataframe_all_clears_scroll_on_error(self) -> None:
+        client = Mock()
+        client.search.return_value = {
+            "_scroll_id": "scroll-1",
+            "hits": {
+                "hits": [
+                    {
+                        "_id": "doc-1",
+                        "_index": "knowledge",
+                        "_score": 1.25,
+                        "_source": {"title": "Flask Guide"},
+                    }
+                ]
+            },
+        }
+        client.scroll.side_effect = RuntimeError("scroll failed")
+        service = OSSearch(client=client, index="knowledge")
+
+        with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
+            with self.assertRaisesRegex(RuntimeError, "scroll failed"):
+                service.search_dataframe_all(
+                    {"query": {"match_all": {}}},
+                    batch_size=1,
+                )
+
+        client.clear_scroll.assert_called_once_with(scroll_id="scroll-1")
+
+    def test_search_dataframe_all_requires_pandas_before_search(self) -> None:
+        client = Mock()
+        service = OSSearch(client=client, index="knowledge")
+
+        with patch("ops_store.search._pandas_module", return_value=None):
+            with self.assertRaises(ImportError):
+                service.search_dataframe_all({"query": {"match_all": {}}})
+
+        client.search.assert_not_called()
+
+    def test_to_dataframe_requires_pandas(self) -> None:
+        service = OSSearch(client=Mock(), index="knowledge")
+
+        with patch("ops_store.search._pandas_module", return_value=None):
+            with self.assertRaises(ImportError):
+                service.to_dataframe({"hits": {"hits": []}})
 
 
 if __name__ == "__main__":

@@ -122,22 +122,30 @@ alias + backing index 패턴을 의도한 사용 방식으로 보면 됩니다.
 
 ### `search.py`
 
-`OSSearch`는 query helper를 제공하지만, response는 그대로 OpenSearch 형식을
-반환합니다. 그래서 동작이 가볍고 예측하기 쉽습니다.
+`OSSearch`는 query helper를 제공하고, 기본값에서는 response를 그대로
+OpenSearch 형식으로 반환합니다. 필요할 때만 `DataFrame` helper를 추가로
+사용할 수 있게 설계되어 있습니다.
 
 - `search_raw()`: raw search body 직접 전송
+- `search_dataframe()`: raw search body 결과를 `DataFrame`으로 변환
+- `search_dataframe_all()`: scroll로 전체 검색 결과를 `DataFrame`으로 변환
 - `count()`: matching document 개수 조회
 - `match()`: 단일 field match query
+- `match_dataframe()`: 단일 field match query 결과를 `DataFrame`으로 변환
+- `match_dataframe_all()`: 단일 field match 전체 결과를 `DataFrame`으로 변환
 - `term()`: exact-value term query
 - `bool()`: boolean query builder
 - `multi_match()`: multi-field full-text query
 - `knn()`: vector k-NN query
 - `hybrid()`: lexical + vector `should` query
 - `aggregate()`: aggregation search
+- `to_dataframe()`: raw search result의 `hits["hits"]`를 `DataFrame`으로 변환
 
 패키지는 자체 response model을 만들지 않습니다. `hits`, `aggregations`,
-metadata를 어떻게 추출할지는 caller가 결정하도록 OpenSearch response 형식을
-그대로 유지합니다.
+metadata를 어떻게 추출할지는 caller가 결정하도록 기본적으로 OpenSearch
+response 형식을 그대로 유지합니다. `pandas`가 필요한 workflow에서는
+`to_dataframe()`, `match_dataframe()`, `search_dataframe_all()` 같은 helper를
+붙여서 바로 tabular data로 전환할 수 있습니다.
 
 ### `logging.py`
 

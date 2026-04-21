@@ -910,6 +910,186 @@ document = normalize_document(
 
 작고 명시적인 query helper가 필요할 때는 `OSSearch`를 사용합니다.
 
+### 예제: 특정 field에서 keyword 검색하기
+
+가장 흔한 패턴은 특정 field에 대해 `match` query를 보내는 것입니다.
+`OSSearch.match(field, query)`가 바로 그 용도입니다.
+
+아래 예제는 `title` field에서 `"flask"`라는 keyword를 검색하고, 결과의
+`hits`를 순회하는 가장 기본적인 흐름입니다.
+
+```python
+from ops_store import OSDoc, OSIndex, OSSearch
+
+index_service = OSIndex(index="articles")
+doc_service = OSDoc(index="articles")
+search_service = OSSearch(index="articles")
+
+if not index_service.exists():
+    index_service.create(
+        mappings={
+            "properties": {
+                "title": {
+                    "type": "text",
+                    "fields": {
+                        "keyword": {"type": "keyword"},
+                    },
+                },
+                "status": {"type": "keyword"},
+                "body": {"type": "text"},
+            }
+        }
+    )
+
+doc_service.index(
+    {
+        "title": "Flask OpenSearch Guide",
+        "status": "published",
+        "body": "How to search documents with ops_store.",
+    },
+    doc_id="post-1",
+    refresh=True,
+)
+doc_service.index(
+    {
+        "title": "FastAPI Tips",
+        "status": "draft",
+        "body": "This document should not match the flask title query.",
+    },
+    doc_id="post-2",
+    refresh=True,
+)
+
+result = search_service.match("title", "flask", size=10)
+
+for hit in result["hits"]["hits"]:
+    source = hit["_source"]
+    print(hit["_id"], hit["_score"], source["title"], source["status"])
+```
+
+이 예제에서 중요한 점:
+
+- `match("title", "flask")`는 `{"query": {"match": {"title": "flask"}}}`를
+  만들어서 보냅니다.
+- `match()`는 보통 `text` field 검색에 적합합니다.
+- 반환값은 OpenSearch raw response이므로 결과 document는
+  `result["hits"]["hits"]`에서 직접 꺼내면 됩니다.
+
+### exact match가 필요하면 `term()` 사용
+
+`match()`는 analyzer를 거치는 full-text query입니다. exact value 비교가
+필요하면 `term()`을 사용해야 합니다.
+
+예를 들어 `status`가 `keyword` mapping이라면 아래처럼 조회합니다.
+
+```python
+published = search_service.term("status", "published", size=10)
+```
+
+만약 exact title 비교가 필요하고 mapping에 `title.keyword` subfield가 있다면
+다음처럼 검색할 수 있습니다.
+
+```python
+exact_title = search_service.term(
+    "title.keyword",
+    "Flask OpenSearch Guide",
+    size=1,
+)
+```
+
+### 바로 `pandas.DataFrame`으로 받고 싶을 때
+
+검색 결과를 바로 분석 코드로 넘기고 싶다면 `match_dataframe()`을 사용할 수
+있습니다. 이 helper는 내부적으로 `match()`를 호출한 뒤 `hits["hits"]`를
+`DataFrame`으로 바꿔줍니다.
+
+```python
+from ops_store import OSSearch
+
+search_service = OSSearch(index="articles")
+
+df = search_service.match_dataframe("title", "flask", size=100)
+print(df[["title", "status"]].head())
+```
+
+기본값에서는 `_source` field만 column으로 들어갑니다. `_id`, `_index`,
+`_score`도 함께 보고 싶다면 `include_meta=True`를 사용합니다.
+
+```python
+df = search_service.match_dataframe(
+    "title",
+    "flask",
+    size=100,
+    include_meta=True,
+)
+
+print(df[["_id", "_score", "title"]].head())
+```
+
+보다 복잡한 raw query body를 직접 쓰고 싶다면 `search_dataframe()`을 사용하면
+됩니다.
+
+```python
+df = search_service.search_dataframe(
+    {
+        "query": {
+            "bool": {
+                "must": [{"match": {"title": "flask"}}],
+                "filter": [{"term": {"status": "published"}}],
+            }
+        },
+        "size": 100,
+    },
+    include_meta=True,
+)
+```
+
+matching document를 전부 가져오고 싶다면 `size=10000`만 올리는 방식보다
+scroll 기반 helper를 사용하는 편이 안전합니다. 이를 위해
+`match_dataframe_all()`과 `search_dataframe_all()`이 추가되어 있습니다.
+
+```python
+df = search_service.match_dataframe_all(
+    "title",
+    "flask",
+    batch_size=1000,
+    include_meta=True,
+)
+```
+
+raw query body를 그대로 쓰는 경우:
+
+```python
+df = search_service.search_dataframe_all(
+    {
+        "query": {
+            "bool": {
+                "must": [{"match": {"title": "flask"}}],
+                "filter": [{"term": {"status": "published"}}],
+            }
+        }
+    },
+    batch_size=1000,
+    scroll="2m",
+    include_meta=True,
+)
+```
+
+중요한 점:
+
+- 이 기능은 optional dependency인 `pandas`가 설치되어 있어야 합니다.
+- `match()`와 `search_raw()`는 기존처럼 raw OpenSearch response를 그대로
+  반환합니다.
+- `match_dataframe()`과 `search_dataframe()`은 한 번의 search response만
+  `DataFrame`으로 바꿉니다.
+- 전체 결과 export가 필요하면 `match_dataframe_all()` 또는
+  `search_dataframe_all()`을 사용하세요.
+- `batch_size`는 scroll 한 번에 가져오는 문서 수입니다. 전체 결과 수와는
+  다릅니다.
+- exact match 결과를 `DataFrame`으로 받고 싶다면
+  `search_service.to_dataframe(search_service.term("status", "published"))`
+  처럼 조합해서 사용할 수 있습니다.
+
 ```python
 from ops_store import OSSearch
 
