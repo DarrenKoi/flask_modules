@@ -3,7 +3,6 @@
 from .base import OSConfig, create_client, load_config
 from .document import OSDoc, normalize_document
 from .index import OSIndex
-from .logging import configure_logging, get_logger
 from .search import OSSearch
 
 __all__ = [
@@ -11,9 +10,7 @@ __all__ = [
     "OSDoc",
     "OSIndex",
     "OSSearch",
-    "configure_logging",
     "create_client",
-    "get_logger",
     "load_config",
     "normalize_document",
 ]

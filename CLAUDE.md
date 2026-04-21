@@ -34,11 +34,11 @@ Two independent concerns live side by side; keep them separated.
 
 - `OSConfig` (dataclass, `slots=True`) holds all connection settings and has `from_env()` / `to_client_kwargs()`. New settings should be added here, not sprinkled across services.
 - `create_client()` / `load_config()` are the entry points; tests patch `ops_store.base._opensearch_class` to avoid a real cluster.
-- `OSBase` is the single base class for every service. It owns `self.client`, `self.config`, `self.default_index`, and a scoped `self.logger` (`opensearch.<classname>`). Every service method resolves the index via `self._resolve_index(index)` and pipes its return value through `self._log_result(action, result, **context)` — `log_result` calls `summarize_result` to flatten OpenSearch payloads before logging. Follow this pattern for any new service method so results stay observable without `print`.
+- `OSBase` is the single base class for every service. It owns `self.client`, `self.config`, and `self.default_index`. Every service method resolves the index via `self._resolve_index(index)` and returns the raw OpenSearch response. `ops_store` does not log its calls — observe the cluster through OpenSearch/Kibana or a dedicated monitoring service.
 - Three concrete services on top of `OSBase`: `OSDoc` (single + bulk doc CRUD, uses `opensearchpy.helpers.bulk` via the `_bulk_helper` indirection so tests can mock it), `OSIndex` (index/alias management), `OSSearch` (lexical, kNN, hybrid, aggregations — all delegate to `search_raw`).
 - Package `__init__.py` is the public API; add new exports there and in `__all__`.
 
-**Logging (`ops_store/logging.py`)** — loggers live under the `opensearch` namespace. `configure_logging()` defaults to `propagate=True` and installs a `PIDFileHandler` that writes one file per process PID under `logs/opensearch/` (env override: `OPENSEARCH_LOG_DIR`, level: `OPENSEARCH_LOG_LEVEL`). This per-PID design matters for multi-worker Flask/uWSGI deployments — do not replace it with a single `FileHandler` without considering worker concurrency. Set `add_handler=True` only for standalone scripts that also want console output.
+**Flask logging (`logging_config.py`)** — root-level helper for application logs, completely separate from `ops_store`. `configure_logging(log_dir, log_name, ...)` attaches a `TimedRotatingFileHandler` (midnight rotation, `DEFAULT_RETENTION_DAYS=3`). `configure_flask_logging(app, ...)` targets `app.logger`. `setup_logger(path_dir, name)` is the legacy compatibility entrypoint that uses `name` as both logger name and file basename.
 
 ## Conventions (from AGENTS.md — enforce these)
 
@@ -56,4 +56,3 @@ Env vars read by the code — keep this list in sync if you add new ones:
 - Flask: `FLASK_HOST`, `FLASK_PORT`, `FLASK_DEBUG`, `FLASK_TESTING`, `FLASK_SERVER_NAME`, `SECRET_KEY`
 - OpenSearch connection: `OPENSEARCH_HOST`, `OPENSEARCH_PORT`, `OPENSEARCH_USER`, `OPENSEARCH_PASSWORD`, `OPENSEARCH_USE_SSL`, `OPENSEARCH_VERIFY_CERTS`, `OPENSEARCH_SSL_SHOW_WARN`, `OPENSEARCH_CA_CERTS`
 - OpenSearch tuning: `OPENSEARCH_BULK_CHUNK`, `OPENSEARCH_TIMEOUT`, `OPENSEARCH_MAX_RETRIES`, `OPENSEARCH_RETRY_ON_TIMEOUT`, `OPENSEARCH_HTTP_COMPRESS`
-- Logging: `OPENSEARCH_LOG_LEVEL`, `OPENSEARCH_LOG_DIR`

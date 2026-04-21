@@ -16,21 +16,35 @@ pip install -r requirements.txt
 python index.py
 ```
 
+## Flask Logging
+
+For application-wide file logging outside `ops_store`, use the root-level
+`logging_config.py` helper.
+
+```python
+from flask import Flask
+
+from logging_config import configure_flask_logging
+
+app = Flask(__name__)
+configure_flask_logging(app, log_dir="logs/flask", log_name="server")
+```
+
+That creates `logs/flask/server.log`, rotates it at midnight, and keeps the
+latest three rotated log files by default. If you want to target the root or a
+named logger instead of `app.logger`, use `configure_logging(...)`.
+
+For older code that already expects `setup_logger(path_dir, name)`, that
+compatibility entrypoint is also available and uses `name` as both the logger
+name and log filename base.
+
 ## OpenSearch Helpers
 
 The project includes a class-based `ops_store` package built on top of
 `opensearch-py`.
 
 ```python
-from ops_store import (
-    OSDoc,
-    OSIndex,
-    OSSearch,
-    configure_logging,
-)
-
-# Flask/FastAPI: let the app server handle handlers.
-configure_logging(level="INFO")
+from ops_store import OSDoc, OSIndex, OSSearch
 
 index_crud = OSIndex(index="articles")
 document_crud = OSDoc(index="articles")
@@ -50,20 +64,9 @@ document_crud.upsert("post-2", {"title": "Updated later"})
 result = search_service.match("title", "Hello")
 ```
 
-Once logging is configured, CRUD and search calls log their result summaries
-through the `opensearch` logger, so you do not need `print(...)` for normal
-usage tracing.
-
-By default, the package also writes log files under `logs/opensearch` at the
-project root. Each worker process writes to its own file such as
-`logs/opensearch/opensearch.<pid>.log`, which is safer for Flask/FastAPI
-deployments using multiple workers.
-
-For Flask/FastAPI, the logger still propagates to the application or server
-logger by default. That avoids fighting the framework logging pipeline while
-still preserving dedicated OpenSearch logs on disk. Use `add_handler=True`
-only when you also want direct console output for standalone scripts or local
-debugging.
+`ops_store` does not log OpenSearch calls itself. Observe the cluster through
+OpenSearch/Kibana dashboards or a dedicated monitoring service. For Flask
+application logs, use the root-level `logging_config.py` helper.
 
 Connection settings are read from environment variables such as
 `OPENSEARCH_HOST`, `OPENSEARCH_PORT`, `OPENSEARCH_USER`,

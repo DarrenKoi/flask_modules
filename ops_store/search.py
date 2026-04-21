@@ -71,8 +71,7 @@ class OSSearch(OSBase):
         index: str | None = None,
     ) -> dict[str, Any]:
         name = self._resolve_index(index)
-        result = self.client.search(index=name, body=body)
-        return self._log_result("search_raw", result, index=name)
+        return self.client.search(index=name, body=body)
 
     def to_dataframe(
         self,
@@ -93,7 +92,7 @@ class OSSearch(OSBase):
         index: str | None = None,
         batch_size: int = 1000,
         scroll: str = "2m",
-    ) -> tuple[str, list[dict[str, Any]]]:
+    ) -> list[dict[str, Any]]:
         name = self._resolve_index(index)
         request_body = dict(body)
         request_body["size"] = batch_size
@@ -115,7 +114,7 @@ class OSSearch(OSBase):
             if scroll_id is not None:
                 self.client.clear_scroll(scroll_id=scroll_id)
 
-        return name, all_hits
+        return all_hits
 
     def search_dataframe(
         self,
@@ -137,23 +136,15 @@ class OSSearch(OSBase):
         include_meta: bool = False,
     ) -> Any:
         _require_pandas()
-        name, all_hits = self._search_all_hits(
+        all_hits = self._search_all_hits(
             body,
             index=index,
             batch_size=batch_size,
             scroll=scroll,
         )
-        dataframe = _records_to_dataframe(
+        return _records_to_dataframe(
             _records_from_hits(all_hits, include_meta=include_meta)
         )
-        self._log_result(
-            "search_dataframe_all",
-            {"count": len(all_hits)},
-            index=name,
-            batch_size=batch_size,
-            scroll=scroll,
-        )
-        return dataframe
 
     def count(
         self,
@@ -163,8 +154,7 @@ class OSSearch(OSBase):
     ) -> dict[str, Any]:
         body = {"query": query} if query else {}
         name = self._resolve_index(index)
-        result = self.client.count(index=name, body=body)
-        return self._log_result("count", result, index=name)
+        return self.client.count(index=name, body=body)
 
     def match(
         self,

@@ -10,8 +10,7 @@ class OSIndex(OSBase):
 
     def exists(self, index: str | None = None) -> bool:
         name = self._resolve_index(index)
-        result = self.client.indices.exists(index=name)
-        return self._log_result("exists", result, index=name)
+        return self.client.indices.exists(index=name)
 
     def recreate_index(
         self,
@@ -21,23 +20,14 @@ class OSIndex(OSBase):
         mappings: dict[str, Any] | None = None,
         aliases: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        deleted_existing = self.exists(index)
-        if deleted_existing:
+        if self.exists(index):
             self.delete(index)
-        result = self.create(
+        return self.create(
             index=index,
             mappings=mappings,
             aliases=aliases,
             shards=shards,
             replicas=replica,
-        )
-        return self._log_result(
-            "recreate_index",
-            result,
-            index=index,
-            deleted_existing=deleted_existing,
-            shards=shards,
-            replica=replica,
         )
 
     def create(
@@ -63,23 +53,19 @@ class OSIndex(OSBase):
         if aliases:
             body["aliases"] = aliases
 
-        result = self.client.indices.create(index=name, body=body)
-        return self._log_result("create_index", result, index=name)
+        return self.client.indices.create(index=name, body=body)
 
     def delete(self, index: str | None = None) -> dict[str, Any]:
         name = self._resolve_index(index)
-        result = self.client.indices.delete(index=name)
-        return self._log_result("delete_index", result, index=name)
+        return self.client.indices.delete(index=name)
 
     def get_settings(self, index: str | None = None) -> dict[str, Any]:
         name = self._resolve_index(index)
-        result = self.client.indices.get_settings(index=name)
-        return self._log_result("get_settings", result, index=name)
+        return self.client.indices.get_settings(index=name)
 
     def get_mapping(self, index: str | None = None) -> dict[str, Any]:
         name = self._resolve_index(index)
-        result = self.client.indices.get_mapping(index=name)
-        return self._log_result("get_mapping", result, index=name)
+        return self.client.indices.get_mapping(index=name)
 
     def update_settings(
         self,
@@ -88,28 +74,23 @@ class OSIndex(OSBase):
         index: str | None = None,
     ) -> dict[str, Any]:
         name = self._resolve_index(index)
-        result = self.client.indices.put_settings(
+        return self.client.indices.put_settings(
             index=name,
             body={"index": settings},
         )
-        return self._log_result("update_settings", result, index=name)
 
     def refresh(self, index: str | None = None) -> dict[str, Any]:
         name = self._resolve_index(index)
-        result = self.client.indices.refresh(index=name)
-        return self._log_result("refresh_index", result, index=name)
+        return self.client.indices.refresh(index=name)
 
     def get_aliases(self, index: str | None = None) -> dict[str, Any]:
         name = index or self.default_index
         if name is None:
-            result = self.client.indices.get_alias()
-            return self._log_result("get_aliases", result)
-        result = self.client.indices.get_alias(index=name)
-        return self._log_result("get_aliases", result, index=name)
+            return self.client.indices.get_alias()
+        return self.client.indices.get_alias(index=name)
 
     def update_aliases(self, actions: list[dict[str, Any]]) -> dict[str, Any]:
-        result = self.client.indices.update_aliases(body={"actions": actions})
-        return self._log_result("update_aliases", result, action_count=len(actions))
+        return self.client.indices.update_aliases(body={"actions": actions})
 
     def rollover(
         self,
@@ -142,11 +123,4 @@ class OSIndex(OSBase):
         if params is not None:
             kwargs["params"] = params
 
-        result = self.client.indices.rollover(**kwargs)
-        return self._log_result(
-            "rollover",
-            result,
-            alias=name,
-            new_index=new_index,
-            dry_run=dry_run,
-        )
+        return self.client.indices.rollover(**kwargs)

@@ -1,23 +1,17 @@
 import os
-import tempfile
 import unittest
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from logging import NullHandler, StreamHandler
-from pathlib import Path
 from unittest.mock import Mock, patch
 
-import ops_store.logging as os_logging
 from ops_store import (
     OSConfig,
     OSDoc,
     OSIndex,
-    configure_logging,
     create_client,
     load_config,
     normalize_document,
 )
-from ops_store.logging import DEFAULT_LOG_DIR, PIDFileHandler, get_logger, summarize_result
 from ops_store.search import OSSearch
 
 
@@ -93,67 +87,6 @@ class OSConfigTests(unittest.TestCase):
         kwargs = mock_class.call_args.kwargs
         self.assertEqual(kwargs["hosts"][0]["scheme"], "http")
 
-    def tearDown(self) -> None:
-        for logger_name in (
-            "opensearch.test_config",
-            "opensearch.test_handler",
-            "opensearch.test_file",
-        ):
-            logger = get_logger(logger_name.removeprefix("opensearch."))
-            for handler in list(logger.handlers):
-                handler.close()
-                logger.removeHandler(handler)
-
-    def test_configure_logging_uses_propagation_by_default(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            logger = configure_logging(
-                name="test_config",
-                level="INFO",
-                log_dir=tmp_dir,
-            )
-
-            self.assertEqual(logger.name, "opensearch.test_config")
-            self.assertTrue(logger.propagate)
-            self.assertFalse(any(type(handler) is StreamHandler for handler in logger.handlers))
-            self.assertTrue(any(isinstance(handler, PIDFileHandler) for handler in logger.handlers))
-
-    def test_configure_logging_can_add_stream_handler(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            logger = configure_logging(
-                name="test_handler",
-                level="INFO",
-                log_dir=tmp_dir,
-                add_handler=True,
-                propagate=False,
-            )
-
-            self.assertFalse(logger.propagate)
-            self.assertTrue(any(type(handler) is StreamHandler for handler in logger.handlers))
-            self.assertTrue(any(isinstance(handler, PIDFileHandler) for handler in logger.handlers))
-            self.assertFalse(any(isinstance(handler, NullHandler) for handler in logger.handlers))
-
-    def test_configure_logging_writes_under_requested_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            logger = configure_logging(
-                name="test_file",
-                level="INFO",
-                log_dir=tmp_dir,
-                propagate=False,
-            )
-
-            logger.info("hello opensearch")
-
-            expected_path = Path(tmp_dir) / f"opensearch.{os.getpid()}.log"
-            self.assertTrue(expected_path.exists())
-            self.assertTrue(any(isinstance(handler, PIDFileHandler) for handler in logger.handlers))
-            self.assertIn("hello opensearch", expected_path.read_text(encoding="utf-8"))
-
-    def test_default_log_dir_targets_project_root(self) -> None:
-        self.assertEqual(
-            DEFAULT_LOG_DIR,
-            Path(os_logging.__file__).resolve().parent.parent / "logs" / "opensearch",
-        )
-
 
 class OSDocTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -162,7 +95,6 @@ class OSDocTests(unittest.TestCase):
 
     def test_index_uses_default_index(self) -> None:
         self.client.index.return_value = {"_id": "doc-1", "result": "created"}
-        self.service.logger = Mock()
         self.service.index({"title": "hello"}, doc_id="doc-1", refresh="wait_for")
 
         self.client.index.assert_called_once_with(
@@ -171,7 +103,6 @@ class OSDocTests(unittest.TestCase):
             id="doc-1",
             refresh="wait_for",
         )
-        self.service.logger.info.assert_called_once()
 
     def test_upsert_wraps_document_with_doc_as_upsert(self) -> None:
         self.service.upsert("doc-1", {"title": "updated"})
@@ -188,7 +119,6 @@ class OSDocTests(unittest.TestCase):
         with patch("ops_store.document._bulk_helper") as bulk_helper:
             bulk_function = Mock(return_value=(2, []))
             bulk_helper.return_value = bulk_function
-            self.service.logger = Mock()
             result = self.service.bulk_index(documents, id_field="id", refresh=True)
 
         self.assertEqual(result, (2, []))
@@ -202,7 +132,6 @@ class OSDocTests(unittest.TestCase):
         )
         self.assertEqual(bulk_function.call_args.kwargs["chunk_size"], 500)
         self.assertTrue(bulk_function.call_args.kwargs["refresh"])
-        self.service.logger.info.assert_called_once()
 
     def test_bulk_index_normalize_makes_documents_json_safe(self) -> None:
         documents = [
@@ -256,7 +185,6 @@ class OSDocTests(unittest.TestCase):
         with patch("ops_store.document._bulk_helper") as bulk_helper:
             bulk_function = Mock(return_value=(2, []))
             bulk_helper.return_value = bulk_function
-            self.service.logger = Mock()
             result = self.service.bulk_index_dataframe(
                 dataframe,
                 id_field="doc_id",
@@ -292,7 +220,6 @@ class OSDocTests(unittest.TestCase):
         )
         self.assertEqual(bulk_function.call_args.kwargs["chunk_size"], 500)
         self.assertTrue(bulk_function.call_args.kwargs["refresh"])
-        self.service.logger.info.assert_called_once()
 
     def test_bulk_index_dataframe_sets_op_type_when_given(self) -> None:
         dataframe = FakeDataFrame(
@@ -335,28 +262,6 @@ class OSDocumentNormalizationTests(unittest.TestCase):
                 "missing": None,
                 "nested": {"1": "2024-04-21"},
                 "values": ["11:15:00", 180.0],
-            },
-        )
-
-
-class OSLoggingTests(unittest.TestCase):
-    def test_summarize_result_reduces_search_payload(self) -> None:
-        result = summarize_result(
-            {
-                "took": 2,
-                "timed_out": False,
-                "hits": {"total": {"value": 3, "relation": "eq"}},
-                "aggregations": {"by_tag": {"buckets": []}},
-            }
-        )
-
-        self.assertEqual(
-            result,
-            {
-                "took": 2,
-                "timed_out": False,
-                "hits_total": 3,
-                "aggregations": ["by_tag"],
             },
         )
 
@@ -447,7 +352,6 @@ class OSIndexTests(unittest.TestCase):
     def test_rollover_uses_alias_and_conditions(self) -> None:
         client = Mock()
         service = OSIndex(client=client, index="logs")
-        service.logger = Mock()
 
         service.rollover(
             conditions={"max_docs": 1000000},
@@ -461,7 +365,6 @@ class OSIndexTests(unittest.TestCase):
             body={"conditions": {"max_docs": 1000000}},
             params={"dry_run": True},
         )
-        service.logger.info.assert_called_once()
 
 
 class OSSearchTests(unittest.TestCase):
@@ -554,7 +457,6 @@ class OSSearchTests(unittest.TestCase):
             }
         }
         service = OSSearch(client=client, index="knowledge")
-        service.logger = Mock()
 
         with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
             dataframe = service.match_dataframe(
@@ -580,7 +482,6 @@ class OSSearchTests(unittest.TestCase):
                 }
             ],
         )
-        service.logger.info.assert_called_once()
 
     def test_search_dataframe_all_collects_scroll_pages(self) -> None:
         client = Mock()
@@ -617,7 +518,6 @@ class OSSearchTests(unittest.TestCase):
             },
         ]
         service = OSSearch(client=client, index="knowledge")
-        service.logger = Mock()
 
         with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
             dataframe = service.search_dataframe_all(
@@ -639,7 +539,6 @@ class OSSearchTests(unittest.TestCase):
                 {"title": "FastAPI Guide", "status": "draft"},
             ],
         )
-        service.logger.info.assert_called_once()
 
     def test_match_dataframe_all_builds_match_query_and_includes_meta(self) -> None:
         client = Mock()

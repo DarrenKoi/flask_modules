@@ -9,20 +9,17 @@
 - environment variable 기반의 일관된 config 로딩
 - 역할별로 나뉜 작은 class 구성
 - optional default index 처리
-- OpenSearch 작업 결과를 위한 재사용 가능한 logging
 
 즉, 이 패키지는 OpenSearch를 완전히 추상화하려는 목적이 아니라, 공식
 client를 다루기 쉽게 만드는 convenience layer에 가깝습니다.
 
 ## 권장 startup 패턴
 
-application startup 시점에 logging을 한 번만 설정하고, 이후에는 service
-instance를 재사용하거나 shared client를 재사용하는 방식이 좋습니다.
+application startup 시점에 service instance나 shared client를 한 번 만들고
+이후에는 재사용하는 방식이 좋습니다.
 
 ```python
-from ops_store import OSDoc, OSIndex, OSSearch, configure_logging
-
-configure_logging(level="INFO")
+from ops_store import OSDoc, OSIndex, OSSearch
 
 index_service = OSIndex(index="articles")
 doc_service = OSDoc(index="articles")
@@ -420,8 +417,6 @@ doc_service = OSDoc(config=config, index="articles")
 - `OPENSEARCH_MAX_RETRIES`
 - `OPENSEARCH_RETRY_ON_TIMEOUT`
 - `OPENSEARCH_HTTP_COMPRESS`
-- `OPENSEARCH_LOG_LEVEL`
-- `OPENSEARCH_LOG_DIR`
 
 boolean 값은 `true`, `false`, `1`, `0`, `yes`, `no` 같은 일반적인 표현을
 받아들입니다.
@@ -1155,37 +1150,18 @@ search_service.hybrid(
 
 ## Logging 동작
 
-이 패키지는 OpenSearch response 전체가 아니라 요약(summary) 형태를 로그로
-남깁니다.
+`ops_store`는 OpenSearch 호출을 자체 로깅하지 않습니다. 클러스터 상태는
+OpenSearch/Kibana 대시보드 또는 별도 monitoring 서비스로 관찰하는 것을
+전제로 합니다. Flask application 로그가 필요하면 repository root의
+`logging_config.py`를 사용하세요.
 
-권장 설정:
-
-```python
-from ops_store import configure_logging
-
-configure_logging(level="INFO")
-```
-
-`configure_logging()` 이후 기본 동작:
-
-- logger name은 `opensearch` namespace로 시작
-- 로그는 parent logger로 propagate
-- 기본적으로 file handler가 추가됨
-- 로그 파일은 `logs/opensearch` 아래에 기록됨
-- 각 process가 `opensearch.<pid>.log` 같은 자기 파일에 기록
-
-script에서 콘솔 출력도 직접 보고 싶다면 `add_handler=True`를 사용하면 됩니다.
-
-```python
-configure_logging(level="DEBUG", add_handler=True, propagate=False)
-```
+OpenSearch 자체를 로그 저장소로 쓰는 전반적인 전략은
+`ops_store/docs/logging_strategy.md`를 참고하세요.
 
 ## 올바른 사용 규칙
 
 이 패키지를 안정적으로 쓰기 위해 가장 중요한 규칙은 아래와 같습니다.
 
-- logging은 request handler마다 반복 설정하지 말고 startup 시점에 한 번만
-  설정
 - 가능하면 매 호출마다 새 service/client를 만들지 말고 재사용
 - 대부분의 작업이 같은 index를 대상으로 한다면 service 생성 시
   default index를 지정
@@ -1209,9 +1185,8 @@ class로 넘기는 편이 좋습니다.
 
 ```python
 from flask import jsonify
-from ops_store import OSDoc, configure_logging
+from ops_store import OSDoc
 
-configure_logging(level="INFO")
 doc_service = OSDoc(index="articles")
 
 

@@ -4,8 +4,6 @@ import os
 from dataclasses import dataclass, field, replace
 from typing import Any, Self
 
-from .logging import get_logger, log_result
-
 
 def _parse_bool(value: str) -> bool:
     normalized = value.strip().lower()
@@ -172,7 +170,6 @@ class OSBase:
         **client_overrides: Any,
     ) -> None:
         self.default_index = index
-        self.logger = get_logger(self.__class__.__name__.lower())
 
         if client is not None and client_overrides:
             raise ValueError(
@@ -204,6 +201,3 @@ class OSBase:
         if resolved_index is None:
             raise ValueError("An index name is required for this operation.")
         return resolved_index
-
-    def _log_result(self, action: str, result: Any, **context: Any) -> Any:
-        return log_result(self.logger, action, result, **context)
