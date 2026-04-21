@@ -283,31 +283,25 @@ class OSDocTests(unittest.TestCase):
         self.assertTrue(bulk_function.call_args.kwargs["refresh"])
         self.service.logger.info.assert_called_once()
 
-    def test_bulk_index_dataframe_can_use_dataframe_index_as_id(self) -> None:
+    def test_bulk_index_dataframe_sets_op_type_when_given(self) -> None:
         dataframe = FakeDataFrame(
-            ["title"],
-            [("one",), ("two",)],
-            index=["a-1", "a-2"],
+            ["doc_id", "title"],
+            [(101, "one"), (102, "two")],
         )
 
         with patch("ops_store.document._bulk_helper") as bulk_helper:
             bulk_function = Mock(return_value=(2, []))
             bulk_helper.return_value = bulk_function
-            self.service.bulk_index_dataframe(dataframe, id_from_index=True)
-
-        actions = list(bulk_function.call_args.args[1])
-        self.assertEqual(actions[0]["_id"], "a-1")
-        self.assertEqual(actions[1]["_id"], "a-2")
-
-    def test_bulk_index_dataframe_rejects_two_id_sources(self) -> None:
-        dataframe = FakeDataFrame(["doc_id"], [(1,)])
-
-        with self.assertRaises(ValueError):
             self.service.bulk_index_dataframe(
                 dataframe,
                 id_field="doc_id",
-                id_from_index=True,
+                op_type="create",
             )
+
+        actions = list(bulk_function.call_args.args[1])
+        self.assertEqual(len(actions), 2)
+        for action in actions:
+            self.assertEqual(action["_op_type"], "create")
 
 
 class OSDocumentNormalizationTests(unittest.TestCase):

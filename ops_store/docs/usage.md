@@ -769,15 +769,29 @@ doc_service.bulk_index_dataframe(df, id_field="doc_id", refresh=True)
 만들기 전에 normalization을 수행합니다. 그래서 큰 DataFrame 전체를 한 번에
 list of dicts로 바꾸는 추가 메모리 비용을 피할 수 있습니다.
 
-row index 자체가 document identifier라면 DataFrame index를 OpenSearch `_id`로
-사용할 수 있습니다.
+`_id`는 `id_field`로 명시한 column에서만 가져옵니다. 해당 column 값은
+unique여야 하며, normalization 이후에도 `None`이 아닌 값이 있어야 action에
+`_id`가 붙습니다.
+
+### `op_type`으로 insert semantic 선택
+
+`op_type` parameter로 bulk action의 OpenSearch semantic을 선택할 수
+있습니다.
+
+- `op_type=None` (default): action에 `_op_type`을 넣지 않습니다. OpenSearch
+  기본값인 `"index"`가 적용되어, 같은 `_id`가 이미 있으면 덮어씁니다
+  (upsert-by-replace).
+- `op_type="index"`: 위와 같은 의미를 명시적으로 표현합니다.
+- `op_type="create"`: 같은 `_id`가 이미 있으면 409 conflict로 실패합니다.
+  duplicate가 곧 bug인 append-only ingestion에 적합합니다.
 
 ```python
-df = df.set_index("article_key")
-doc_service.bulk_index_dataframe(df, id_from_index=True)
+doc_service.bulk_index_dataframe(
+    df,
+    id_field="doc_id",
+    op_type="create",
+)
 ```
-
-같은 호출에서 `id_field`와 `id_from_index=True`를 동시에 쓰면 안 됩니다.
 
 ### pandas 친화적인 type conversion 규칙
 
@@ -801,29 +815,79 @@ doc_service.bulk_index_dataframe(df, id_from_index=True)
 - MultiIndex column을 쓰고 있다면 먼저 plain string column name으로
   flatten하는 경우
 
-### 예제: bulk indexing 전에 DataFrame 정리
+### 전체 예제: CSV에서 OpenSearch로 DataFrame bulk insert
+
+end-to-end workflow 예제입니다. CSV를 읽어 DataFrame으로 만들고, 최소한의
+cleanup을 거친 뒤 `bulk_index_dataframe()`로 밀어넣습니다.
 
 ```python
 import pandas as pd
 
-from ops_store import OSDoc
+from ops_store import OSConfig, OSDoc
 
-df = pd.DataFrame(
-    [
-        {
-            "doc_id": 1,
-            "title": "hello",
-            "created_at": pd.Timestamp("2024-04-21T10:30:00Z"),
-            "price": 12.5,
-        }
-    ]
-)
+df = pd.read_csv("articles.csv")
 
+# 1) id column은 unique해야 합니다. 중복을 미리 걸러내는 쪽이 안전합니다.
+df = df.drop_duplicates(subset="doc_id")
+
+# 2) NaN/NaT/object column을 bulk action으로 보낼 수 있는 형태로 정리합니다.
+#    (NaN, NaT, numpy scalar, Decimal 등은 normalize_document가 자동 처리하지만
+#     datetime은 tz-aware로 맞춰 두는 편이 ingestion 결과를 예측하기 쉽습니다.)
 df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
 df["title"] = df["title"].fillna("")
 
-doc_service = OSDoc(index="articles")
-doc_service.bulk_index_dataframe(df, id_field="doc_id", refresh=True)
+# 3) service 생성. 환경 변수(OPENSEARCH_HOST 등)를 쓰고 있다면 config 인자 없이
+#    `OSDoc(index="articles")`만으로도 충분합니다.
+config = OSConfig(
+    host="search.example.internal",
+    user="admin",
+    password="admin",
+)
+doc_service = OSDoc(config=config, index="articles")
+
+# 4) bulk insert. default op_type은 "index"이므로 같은 doc_id가 있으면 덮어씁니다.
+success, errors = doc_service.bulk_index_dataframe(
+    df,
+    id_field="doc_id",
+    chunk_size=1000,
+    refresh=True,
+)
+
+print(f"indexed {success} rows, {len(errors)} errors")
+```
+
+`bulk_index_dataframe()`는 `(success_count, errors)` tuple을 돌려줍니다.
+`raise_on_error=False` (default) 상태에서는 실패한 action이 `errors` list에
+들어오므로, ingestion 이후 로그로 남기거나 재시도 logic으로 이어가면 됩니다.
+
+#### append-only ingestion: `op_type="create"`
+
+동일 `_id`가 이미 있으면 **덮어쓰는 게 아니라 에러로 만들고 싶을 때**는
+`op_type="create"`를 함께 넘깁니다.
+
+```python
+success, errors = doc_service.bulk_index_dataframe(
+    df,
+    id_field="doc_id",
+    op_type="create",
+    refresh=True,
+)
+
+# errors 각각은 {"create": {"_id": ..., "status": 409, "error": {...}}} 형태
+duplicate_ids = [
+    item["create"]["_id"]
+    for item in errors
+    if item.get("create", {}).get("status") == 409
+]
+```
+
+#### `id_field` 없이 auto-generated `_id` 사용
+
+`id_field`를 지정하지 않으면 OpenSearch가 `_id`를 생성합니다. event log나
+audit trail처럼 document identity가 중요하지 않은 경우에 유용합니다.
+
+```python
+doc_service.bulk_index_dataframe(df, refresh=True)
 ```
 
 ### 예제: 단일 record만 직접 normalize

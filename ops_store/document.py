@@ -5,7 +5,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 
 from .base import OSBase
 
@@ -281,14 +281,11 @@ class OSDoc(OSBase):
         *,
         index: str | None = None,
         id_field: str | None = None,
-        id_from_index: bool = False,
+        op_type: Literal["index", "create"] | None = None,
         chunk_size: int | None = None,
         refresh: bool = False,
         raise_on_error: bool = False,
     ) -> tuple[int, list[Any]]:
-        if id_field is not None and id_from_index:
-            raise ValueError("Use either id_field or id_from_index, not both.")
-
         name = self._resolve_index(index)
         actual_chunk_size = chunk_size or (
             self.config.bulk_chunk if self.config is not None else 500
@@ -296,20 +293,15 @@ class OSDoc(OSBase):
         columns = list(dataframe.columns)
 
         def iter_actions() -> Iterator[dict[str, Any]]:
-            row_iter = dataframe.itertuples(index=False, name=None)
-            if id_from_index:
-                row_iter = zip(dataframe.index, row_iter)
-            else:
-                row_iter = ((None, row) for row in row_iter)
-
-            for row_id, row in row_iter:
+            for row in dataframe.itertuples(index=False, name=None):
                 source = normalize_document(dict(zip(columns, row)))
                 action: dict[str, Any] = {"_index": name, "_source": source}
 
+                if op_type is not None:
+                    action["_op_type"] = op_type
+
                 if id_field and id_field in source and source[id_field] is not None:
                     action["_id"] = str(source[id_field])
-                elif id_from_index and row_id is not None:
-                    action["_id"] = str(_normalize_value(row_id))
 
                 yield action
 
@@ -319,11 +311,12 @@ class OSDoc(OSBase):
             refresh=refresh,
             raise_on_error=raise_on_error,
         )
-        return self._log_result(
-            "bulk_index_dataframe",
-            result,
-            index=name,
-            row_count=len(dataframe),
-            chunk_size=actual_chunk_size,
-            refresh=refresh,
-        )
+        log_context: dict[str, Any] = {
+            "index": name,
+            "row_count": len(dataframe),
+            "chunk_size": actual_chunk_size,
+            "refresh": refresh,
+        }
+        if op_type is not None:
+            log_context["op_type"] = op_type
+        return self._log_result("bulk_index_dataframe", result, **log_context)
