@@ -49,6 +49,162 @@ search_service = OSSearch(client=client, config=config, index="articles")
 이 방식은 모든 service가 같은 client instance를 명확하게 공유해야 할 때 더
 좋습니다.
 
+## host와 http auth를 넘기는 여러 방법
+
+OpenSearch cluster 주소(`host`, `port`, `use_ssl`)와 인증 정보(`user`,
+`password`)를 service나 client에 전달하는 방식은 여러 가지가 있습니다. 모든
+방식은 같은 precedence rule을 따릅니다.
+
+- config가 없으면 → environment variable이 기본값을 제공하고, 그 위에
+  keyword override가 덮어씁니다 (`load_config(**overrides)`).
+- config가 있으면 → keyword override가 `OSConfig` 위에 덮어씁니다
+  (`dataclasses.replace(config, **overrides)`).
+
+즉 host와 http auth는 아래 여섯 가지 방식 중 어디에 넣어도 동일한 규칙으로
+반영됩니다. 상황에 맞게 고르면 됩니다.
+
+### 1. Environment variable만 사용
+
+startup 전에 `OPENSEARCH_*`를 export해 두면 service는 argument를 거의
+넘기지 않아도 됩니다.
+
+```bash
+export OPENSEARCH_HOST=search.example.internal
+export OPENSEARCH_USER=admin
+export OPENSEARCH_PASSWORD=admin
+```
+
+```python
+from ops_store import OSIndex
+
+index_service = OSIndex(index="articles")
+```
+
+deploy 환경마다 host나 credential이 달라져야 하고, code에 secret을 남기고
+싶지 않을 때 가장 좋습니다.
+
+### 2. service에 keyword argument 직접 전달
+
+`OSDoc`, `OSIndex`, `OSSearch`는 `OSConfig` field를 그대로 keyword argument로
+받습니다. 내부적으로 `load_config(**overrides)`가 호출되어 env 위에
+override됩니다.
+
+```python
+from ops_store import OSIndex
+
+index_service = OSIndex(
+    index="articles",
+    host="search.example.internal",
+    user="admin",
+    password="admin",
+)
+```
+
+한두 값만 빠르게 바꾸거나, script와 test에서 가장 간편합니다.
+
+### 3. `OSConfig`를 만들어 `config=`로 전달
+
+host와 credential을 code에서 명시적으로 관리하고, 같은 설정을 여러 service에
+재사용하고 싶을 때 사용합니다.
+
+```python
+from ops_store import OSConfig, OSDoc, OSIndex, OSSearch
+
+config = OSConfig(
+    host="search.example.internal",
+    user="admin",
+    password="admin",
+)
+
+index_service = OSIndex(config=config, index="articles")
+doc_service = OSDoc(config=config, index="articles")
+search_service = OSSearch(config=config, index="articles")
+```
+
+이 방식에서는 service마다 내부적으로 별도 client가 생성됩니다. 같은 client
+instance를 공유해야 한다면 방식 5를 사용하세요.
+
+### 4. `OSConfig` + keyword override 조합
+
+기존 `OSConfig`는 그대로 두고 특정 값만 바꾸고 싶을 때는 두 가지를 함께
+넘기면 됩니다. `dataclasses.replace(config, **overrides)`로 합쳐집니다.
+
+```python
+from ops_store import OSConfig, OSIndex
+
+base_config = OSConfig(
+    host="search.example.internal",
+    user="admin",
+    password="admin",
+)
+
+index_service = OSIndex(
+    config=base_config,
+    index="articles",
+    timeout=10,
+    max_retries=5,
+)
+```
+
+base config는 공유하되 service별로 timeout 같은 tuning만 달리 주고 싶을 때
+적합합니다.
+
+### 5. `create_client()`로 shared client를 만들어 주입
+
+여러 service가 같은 connection pool과 client instance를 명시적으로 공유해야
+한다면 먼저 client를 만든 뒤 `client=`로 주입합니다.
+
+```python
+from ops_store import OSConfig, OSDoc, OSIndex, OSSearch, create_client
+
+config = OSConfig(
+    host="search.example.internal",
+    user="admin",
+    password="admin",
+)
+client = create_client(config=config)
+
+index_service = OSIndex(client=client, config=config, index="articles")
+doc_service = OSDoc(client=client, config=config, index="articles")
+search_service = OSSearch(client=client, config=config, index="articles")
+```
+
+주의: 이미 `client=...`를 넘긴 경우에는 `host`, `user`, `password` 같은
+client override keyword를 함께 넘길 수 없습니다. 이미 만들어진 client에
+나중에 값을 덮어쓸 방법이 없기 때문에 `OSBase`는 이 조합을 `ValueError`로
+거부합니다.
+
+### 6. `create_client()`에 keyword만 전달
+
+`OSConfig`를 만들지 않고도 `create_client()`에 host와 auth를 바로 넘길 수
+있습니다. 내부적으로 `load_config(host=..., user=..., ...)`가 호출되어 env
+위에 override됩니다.
+
+```python
+from ops_store import create_client, OSIndex
+
+client = create_client(
+    host="search.example.internal",
+    user="admin",
+    password="admin",
+    timeout=10,
+)
+
+index_service = OSIndex(client=client, index="articles")
+```
+
+service 없이 raw client만 잠깐 필요할 때나, client만 먼저 만든 뒤 여러
+service에 주입하고 싶을 때 적합합니다.
+
+### 어떤 방식을 고를까
+
+- deploy 환경별로 값이 달라져야 한다 → **방식 1** (env 전용)
+- 한두 값만 code에서 바꾸는 간단한 script나 test → **방식 2** (service kwargs)
+- 같은 설정을 여러 service에 명시적으로 재사용 → **방식 3**
+- base config는 공유하되 일부 값만 tuning → **방식 4**
+- 여러 service가 같은 client instance를 공유 → **방식 5**
+- service 없이 raw client만 필요 → **방식 6**
+
 ## `create_client()`를 어떻게 쓰나
 
 `create_client()`는 세 가지 방식으로 이해하면 충분합니다. class 이름은
