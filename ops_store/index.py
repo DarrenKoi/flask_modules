@@ -15,17 +15,17 @@ class OSIndex(OSBase):
 
     def recreate_index(
         self,
-        index_name: str,
+        index: str,
         shards: int = 1,
         replica: int = 0,
         mappings: dict[str, Any] | None = None,
         aliases: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        deleted_existing = self.exists(index_name)
+        deleted_existing = self.exists(index)
         if deleted_existing:
-            self.delete(index_name)
+            self.delete(index)
         result = self.create(
-            index=index_name,
+            index=index,
             mappings=mappings,
             aliases=aliases,
             shards=shards,
@@ -34,7 +34,7 @@ class OSIndex(OSBase):
         return self._log_result(
             "recreate_index",
             result,
-            index=index_name,
+            index=index,
             deleted_existing=deleted_existing,
             shards=shards,
             replica=replica,

@@ -487,7 +487,7 @@ index_service = OSIndex(client=client, config=config, index="articles")
 
 - `create()`는 별도 override가 없으면 shard, replica, refresh 기본값을
   채웁니다.
-- `recreate_index(index_name, shards=1, replica=0, mappings=None, aliases=None)`은
+- `recreate_index(index, shards=1, replica=0, mappings=None, aliases=None)`은
   기존 index가 있으면 삭제한 뒤 지정한 shard/replica 설정으로 다시 만들고,
   선택적으로 mapping과 alias도 함께 적용합니다.
 - `create()`는 새 index 생성 시 alias도 함께 붙일 수 있습니다.
