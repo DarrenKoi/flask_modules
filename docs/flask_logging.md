@@ -162,6 +162,85 @@ current_app.logger.warning("service.search.empty_query query=%r", query)
 current_app.logger.exception("service.user.create failed user_id=%s", user_id)
 ```
 
+## Formatting Arguments Correctly
+
+Use the logging module's built-in `%`-style placeholders instead of formatting
+the message first with an f-string.
+
+Preferred:
+
+```python
+logger.info(
+    "api.store_db.opensearch_test status project_root=%s logs_dir=%s readme_found=%s",
+    root,
+    logs_dir,
+    readme_found,
+)
+```
+
+Allowed, but not preferred for normal application code:
+
+```python
+logger.info(
+    f"api.store_db.opensearch_test status project_root={root} "
+    f"logs_dir={logs_dir} readme_found={readme_found}"
+)
+```
+
+Why the placeholder form is preferred:
+
+- logging only formats the message if that log level is actually emitted
+- it matches normal Python logging conventions
+- it is easier to keep consistent across the codebase
+
+For most code in this repository, default to `%s`.
+
+```python
+logger.info("project_root=%s", root)
+logger.info("logs_dir=%s", logs_dir)
+logger.info("readme_found=%s", readme_found)
+```
+
+Useful placeholder choices:
+
+- `%s`: standard string form, best default
+- `%r`: debug representation from `repr(...)`
+- `%d`: integers
+- `%.2f`: formatted float values
+
+## What Types Are Safe To Pass
+
+The logging call accepts a message string first, then the values that fill the
+placeholders. In practice, `%s` works safely for most common values in this
+repository, including:
+
+- `str`
+- `int`
+- `float`
+- `bool`
+- `pathlib.Path`
+- `None`
+- `dict`, `list`, `tuple`, and `set`
+- most custom objects with a normal `__str__` representation
+
+Examples:
+
+```python
+logger.info("root=%s", root)                  # Path
+logger.info("count=%d", 3)                    # int
+logger.info("ratio=%.2f", 0.875)              # float
+logger.info("found=%s", readme_found)         # bool
+logger.info("payload=%s", {"ok": True})       # dict
+logger.info("debug_payload=%r", {"ok": True}) # repr form
+```
+
+Rules that matter:
+
+- the first argument should be the message template string
+- the number of placeholders should match the number of later arguments
+- prefer short key-value fields such as `root=%s` or `user_id=%s`
+- do not log secrets, credentials, or unsanitized raw request data
+
 ## What To Avoid
 
 - Do not call `configure_flask_logging()` or `configure_logging()` in each file

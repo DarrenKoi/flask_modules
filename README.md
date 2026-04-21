@@ -38,6 +38,9 @@ For older code that already expects `setup_logger(path_dir, name)`, that
 compatibility entrypoint is also available and uses `name` as both the logger
 name and log filename base.
 
+For message-style conventions such as when to use `%s` placeholders instead of
+f-strings in `logger.info(...)`, see [docs/flask_logging.md](docs/flask_logging.md).
+
 ## OpenSearch Helpers
 
 The project includes a class-based `ops_store` package built on top of
