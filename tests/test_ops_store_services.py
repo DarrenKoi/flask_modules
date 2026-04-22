@@ -379,6 +379,35 @@ class OSSearchTests(unittest.TestCase):
             body={"query": {"match": {"title": "flask"}}, "size": 5},
         )
 
+    def test_unique_values_returns_terms_bucket_keys(self) -> None:
+        client = Mock()
+        client.search.return_value = {
+            "aggregations": {
+                "unique_values": {
+                    "buckets": [
+                        {"key": "alpha", "doc_count": 3},
+                        {"key": "beta", "doc_count": 1},
+                    ]
+                }
+            }
+        }
+        service = OSSearch(client=client, index="knowledge")
+
+        values = service.unique_values("category.keyword", size=500)
+
+        self.assertEqual(values, ["alpha", "beta"])
+        client.search.assert_called_once_with(
+            index="knowledge",
+            body={
+                "aggs": {
+                    "unique_values": {
+                        "terms": {"field": "category.keyword", "size": 500}
+                    }
+                },
+                "size": 0,
+            },
+        )
+
     def test_to_dataframe_uses_source_fields_by_default(self) -> None:
         service = OSSearch(client=Mock(), index="knowledge")
         result = {

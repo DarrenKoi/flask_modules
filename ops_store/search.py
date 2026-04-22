@@ -307,6 +307,22 @@ class OSSearch(OSBase):
         body = {"query": {"bool": bool_clause}, "size": size}
         return self.search_raw(body, index=index)
 
+    def unique_values(
+        self,
+        field: str,
+        *,
+        index: str | None = None,
+        size: int = 10000,
+        query: dict[str, Any] | None = None,
+    ) -> list[Any]:
+        result = self.aggregate(
+            {"unique_values": {"terms": {"field": field, "size": size}}},
+            query=query,
+            index=index,
+        )
+        buckets = result.get("aggregations", {}).get("unique_values", {}).get("buckets", [])
+        return [bucket["key"] for bucket in buckets]
+
     def aggregate(
         self,
         aggregations: dict[str, Any],
