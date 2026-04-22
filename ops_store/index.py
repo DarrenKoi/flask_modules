@@ -1,16 +1,183 @@
 """Index and alias management services."""
 
+import re
 from typing import Any
 
 from .base import OSBase
+
+_ROLLOVER_INDEX_PATTERN = re.compile(r".*-\d+$")
+
+
+def _join_indices(index_names: list[str]) -> str:
+    return ",".join(sorted(dict.fromkeys(index_names)))
+
+
+def _summarize_aliases(
+    payload: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    aliases: dict[str, dict[str, Any]] = {}
+
+    for index_name, details in payload.items():
+        alias_details = details.get("aliases")
+        if not isinstance(alias_details, dict):
+            continue
+
+        for alias_name, alias_config in alias_details.items():
+            summary = aliases.setdefault(
+                alias_name,
+                {
+                    "backing_indices": [],
+                    "write_index": None,
+                },
+            )
+            summary["backing_indices"].append(index_name)
+            if (
+                isinstance(alias_config, dict)
+                and alias_config.get("is_write_index") is True
+            ):
+                summary["write_index"] = index_name
+
+    for summary in aliases.values():
+        summary["backing_indices"].sort()
+
+    return dict(sorted(aliases.items()))
+
+
+def _build_rollover_summary(
+    name: str,
+    *,
+    is_index: bool,
+    is_alias: bool,
+    alias_summary: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    alias_name: str | None = None
+
+    if is_alias and name in alias_summary:
+        alias_name = name
+    elif is_index:
+        for candidate, details in alias_summary.items():
+            if details.get("write_index") == name:
+                alias_name = candidate
+                break
+
+    if alias_name is None:
+        return {
+            "alias": None,
+            "backing_indices": [],
+            "write_index": None,
+            "ready": False,
+            "uses_numbered_suffix": False,
+        }
+
+    details = alias_summary[alias_name]
+    write_index = details.get("write_index")
+    uses_numbered_suffix = bool(
+        isinstance(write_index, str)
+        and _ROLLOVER_INDEX_PATTERN.fullmatch(write_index)
+    )
+
+    return {
+        "alias": alias_name,
+        "backing_indices": list(details["backing_indices"]),
+        "write_index": write_index,
+        "ready": write_index is not None,
+        "uses_numbered_suffix": uses_numbered_suffix,
+    }
 
 
 class OSIndex(OSBase):
     """Class-based index CRUD wrapper around the OpenSearch indices API."""
 
-    def exists(self, index: str | None = None) -> bool:
+    def exists(
+        self,
+        index: str | None = None,
+        *,
+        include_aliases: bool = True,
+    ) -> bool:
         name = self._resolve_index(index)
-        return self.client.indices.exists(index=name)
+        if self.client.indices.exists(index=name):
+            return True
+        if include_aliases:
+            return self.client.indices.exists_alias(name=name)
+        return False
+
+    def alias_exists(self, alias: str | None = None) -> bool:
+        name = self._resolve_index(alias)
+        return self.client.indices.exists_alias(name=name)
+
+    def describe(
+        self,
+        index: str | None = None,
+        *,
+        include_metadata: bool = False,
+    ) -> dict[str, Any]:
+        name = self._resolve_index(index)
+        is_index = self.client.indices.exists(index=name)
+        is_alias = False
+
+        if not is_index:
+            is_alias = self.client.indices.exists_alias(name=name)
+
+        if not is_index and not is_alias:
+            return {
+                "name": name,
+                "exists": False,
+                "resource_type": "missing",
+                "is_index": False,
+                "is_alias": False,
+                "backing_indices": [],
+                "aliases": {},
+                "searchable_names": [],
+                "rollover": {
+                    "alias": None,
+                    "backing_indices": [],
+                    "write_index": None,
+                    "ready": False,
+                    "uses_numbered_suffix": False,
+                },
+            }
+
+        metadata: dict[str, Any] | None = None
+        if is_index:
+            metadata = self.client.indices.get(index=name)
+            backing_indices = sorted(metadata)
+            alias_summary = _summarize_aliases(metadata)
+        else:
+            target_aliases = self.client.indices.get_alias(name=name)
+            backing_indices = sorted(target_aliases)
+            alias_payload = self.client.indices.get_alias(
+                index=_join_indices(backing_indices)
+            )
+            alias_summary = _summarize_aliases(alias_payload)
+            if include_metadata:
+                metadata = self.client.indices.get(
+                    index=_join_indices(backing_indices)
+                )
+
+        searchable_names = sorted(
+            {name, *backing_indices, *alias_summary.keys()}
+        )
+        result = {
+            "name": name,
+            "exists": True,
+            "resource_type": "index" if is_index else "alias",
+            "is_index": is_index,
+            "is_alias": is_alias,
+            "backing_indices": backing_indices,
+            "aliases": alias_summary,
+            "searchable_names": searchable_names,
+            "rollover": _build_rollover_summary(
+                name,
+                is_index=is_index,
+                is_alias=is_alias,
+                alias_summary=alias_summary,
+            ),
+        }
+
+        if include_metadata and metadata is not None:
+            result["metadata"] = metadata
+
+        return result
 
     def recreate_index(
         self,
@@ -20,7 +187,7 @@ class OSIndex(OSBase):
         mappings: dict[str, Any] | None = None,
         aliases: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if self.exists(index):
+        if self.exists(index, include_aliases=False):
             self.delete(index)
         return self.create(
             index=index,

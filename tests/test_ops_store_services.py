@@ -267,6 +267,33 @@ class OSDocumentNormalizationTests(unittest.TestCase):
 
 
 class OSIndexTests(unittest.TestCase):
+    def test_exists_checks_aliases_by_default(self) -> None:
+        client = Mock()
+        client.indices.exists.return_value = False
+        client.indices.exists_alias.return_value = True
+        service = OSIndex(client=client, index="logs")
+
+        result = service.exists()
+
+        self.assertTrue(result)
+        self.assertEqual(
+            client.indices.method_calls,
+            [
+                unittest.mock.call.exists(index="logs"),
+                unittest.mock.call.exists_alias(name="logs"),
+            ],
+        )
+
+    def test_alias_exists_uses_alias_api(self) -> None:
+        client = Mock()
+        client.indices.exists_alias.return_value = True
+        service = OSIndex(client=client, index="logs")
+
+        result = service.alias_exists()
+
+        self.assertTrue(result)
+        client.indices.exists_alias.assert_called_once_with(name="logs")
+
     def test_create_applies_default_settings(self) -> None:
         client = Mock()
         service = OSIndex(client=client, index="logs")
@@ -349,6 +376,143 @@ class OSIndexTests(unittest.TestCase):
             },
         )
 
+    def test_recreate_index_does_not_delete_alias_only_match(self) -> None:
+        client = Mock()
+        client.indices.exists.return_value = False
+        client.indices.exists_alias.return_value = True
+        service = OSIndex(client=client, index="logs")
+
+        service.recreate_index("logs")
+
+        client.indices.delete.assert_not_called()
+        client.indices.create.assert_called_once_with(
+            index="logs",
+            body={
+                "settings": {
+                    "number_of_shards": 1,
+                    "number_of_replicas": 0,
+                    "refresh_interval": "30s",
+                }
+            },
+        )
+        self.assertEqual(
+            client.indices.method_calls,
+            [
+                unittest.mock.call.exists(index="logs"),
+                unittest.mock.call.create(
+                    index="logs",
+                    body={
+                        "settings": {
+                            "number_of_shards": 1,
+                            "number_of_replicas": 0,
+                            "refresh_interval": "30s",
+                        }
+                    },
+                ),
+            ],
+        )
+
+    def test_describe_summarizes_alias_backing_indices_and_rollover(self) -> None:
+        client = Mock()
+        client.indices.exists.return_value = False
+        client.indices.exists_alias.return_value = True
+        client.indices.get_alias.side_effect = [
+            {
+                "logs-000001": {"aliases": {"logs": {"is_write_index": False}}},
+                "logs-000002": {"aliases": {"logs": {"is_write_index": True}}},
+            },
+            {
+                "logs-000001": {
+                    "aliases": {
+                        "logs": {"is_write_index": False},
+                        "logs-search": {},
+                    }
+                },
+                "logs-000002": {
+                    "aliases": {
+                        "logs": {"is_write_index": True},
+                        "logs-search": {},
+                    }
+                },
+            },
+        ]
+        service = OSIndex(client=client, index="logs")
+
+        description = service.describe()
+
+        self.assertEqual(
+            description,
+            {
+                "name": "logs",
+                "exists": True,
+                "resource_type": "alias",
+                "is_index": False,
+                "is_alias": True,
+                "backing_indices": ["logs-000001", "logs-000002"],
+                "aliases": {
+                    "logs": {
+                        "backing_indices": ["logs-000001", "logs-000002"],
+                        "write_index": "logs-000002",
+                    },
+                    "logs-search": {
+                        "backing_indices": ["logs-000001", "logs-000002"],
+                        "write_index": None,
+                    },
+                },
+                "searchable_names": [
+                    "logs",
+                    "logs-000001",
+                    "logs-000002",
+                    "logs-search",
+                ],
+                "rollover": {
+                    "alias": "logs",
+                    "backing_indices": ["logs-000001", "logs-000002"],
+                    "write_index": "logs-000002",
+                    "ready": True,
+                    "uses_numbered_suffix": True,
+                },
+            },
+        )
+        self.assertEqual(
+            client.indices.method_calls,
+            [
+                unittest.mock.call.exists(index="logs"),
+                unittest.mock.call.exists_alias(name="logs"),
+                unittest.mock.call.get_alias(name="logs"),
+                unittest.mock.call.get_alias(index="logs-000001,logs-000002"),
+            ],
+        )
+
+    def test_describe_can_include_raw_metadata(self) -> None:
+        client = Mock()
+        client.indices.exists.return_value = True
+        client.indices.get.return_value = {
+            "logs-000002": {
+                "aliases": {"logs": {"is_write_index": True}},
+                "settings": {"index": {"number_of_replicas": "0"}},
+                "mappings": {"properties": {"title": {"type": "text"}}},
+            }
+        }
+        service = OSIndex(client=client, index="logs-000002")
+
+        description = service.describe(include_metadata=True)
+
+        self.assertEqual(description["resource_type"], "index")
+        self.assertEqual(description["backing_indices"], ["logs-000002"])
+        self.assertEqual(description["rollover"]["alias"], "logs")
+        self.assertEqual(description["rollover"]["write_index"], "logs-000002")
+        self.assertEqual(
+            description["metadata"],
+            {
+                "logs-000002": {
+                    "aliases": {"logs": {"is_write_index": True}},
+                    "settings": {"index": {"number_of_replicas": "0"}},
+                    "mappings": {"properties": {"title": {"type": "text"}}},
+                }
+            },
+        )
+
     def test_rollover_uses_alias_and_conditions(self) -> None:
         client = Mock()
         service = OSIndex(client=client, index="logs")
@@ -368,6 +532,28 @@ class OSIndexTests(unittest.TestCase):
 
 
 class OSSearchTests(unittest.TestCase):
+    def test_match_works_with_alias_default_index(self) -> None:
+        client = Mock()
+        service = OSSearch(client=client, index="knowledge_alias")
+
+        service.match("title", "flask", size=5)
+
+        client.search.assert_called_once_with(
+            index="knowledge_alias",
+            body={"query": {"match": {"title": "flask"}}, "size": 5},
+        )
+
+    def test_match_can_override_alias_with_concrete_index(self) -> None:
+        client = Mock()
+        service = OSSearch(client=client, index="knowledge_alias")
+
+        service.match("title", "flask", index="knowledge-000001", size=5)
+
+        client.search.assert_called_once_with(
+            index="knowledge-000001",
+            body={"query": {"match": {"title": "flask"}}, "size": 5},
+        )
+
     def test_match_builds_query_body(self) -> None:
         client = Mock()
         service = OSSearch(client=client, index="knowledge")

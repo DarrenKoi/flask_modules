@@ -91,7 +91,9 @@ pandas 중심 workflow에서는 `bulk_index_dataframe()`이 더 안전하고 메
 
 `OSIndex`는 `client.indices`를 감싼 index 관리 helper입니다.
 
-- `exists()`: index 존재 여부 확인
+- `exists()`: 기본적으로 concrete index와 alias를 모두 포함한 존재 여부 확인
+- `alias_exists()`: alias namespace만 따로 확인
+- `describe()`: 현재 이름이 index인지 alias인지, backing index/alias/rollover 구성을 요약
 - `create()`: optional mapping, settings, aliases와 함께 index 생성
 - `recreate_index()`: 기존 index가 있으면 삭제 후 shard/replica, mapping, alias를 포함해 다시 생성
 - `rollover()`: alias를 다음 backing index로 rollover
@@ -117,6 +119,12 @@ alias + backing index 패턴을 의도한 사용 방식으로 보면 됩니다.
 - rollover는 concrete backing index가 아니라 alias 기준으로 수행
 
 이렇게 하면 실제 index 개수가 늘어나도 application code는 거의 바뀌지
+않습니다.
+
+`exists()`가 alias도 `True`로 돌려주기 때문에 application startup에서 alias를
+default index처럼 다뤄도 됩니다. 반대로 물리 index가 있는지만 보고 싶다면
+`include_aliases=False`를 사용해야 합니다. `recreate_index()`는 내부적으로 이
+concrete-index-only 동작을 사용하므로 alias만 있는 이름을 잘못 삭제하지
 않습니다.
 
 ### `search.py`

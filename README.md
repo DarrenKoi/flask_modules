@@ -67,6 +67,31 @@ document_crud.upsert("post-2", {"title": "Updated later"})
 result = search_service.match("title", "Hello")
 ```
 
+`OSIndex.exists()` now treats either a concrete index name or an alias name as an
+existing target by default. If you only want to check for a physical index, use
+`include_aliases=False`.
+
+When you need to inspect how a target is wired, `OSIndex.describe()` summarizes
+whether the name is an index or alias, which backing indices it resolves to,
+which aliases exist on those indices, and whether there is a rollover-style
+write alias.
+
+```python
+summary = index_crud.describe("articles")
+
+# Example summary keys:
+# {
+#     "resource_type": "alias",
+#     "backing_indices": ["articles-000001", "articles-000002"],
+#     "searchable_names": ["articles", "articles-000001", "articles-000002"],
+#     "rollover": {
+#         "alias": "articles",
+#         "write_index": "articles-000002",
+#         "ready": True,
+#     },
+# }
+```
+
 `ops_store` does not log OpenSearch calls itself. Observe the cluster through
 OpenSearch/Kibana dashboards or a dedicated monitoring service. For Flask
 application logs, use the root-level `logging_config.py` helper.

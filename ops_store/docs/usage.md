@@ -480,6 +480,13 @@ index_service = OSIndex(client=client, config=config, index="articles")
 
 알아두면 좋은 동작:
 
+- `exists()`는 기본적으로 concrete index와 alias를 모두 존재하는 것으로
+  간주합니다. 물리 index만 확인하고 싶다면 `include_aliases=False`를
+  사용하세요.
+- `alias_exists()`는 alias namespace만 따로 확인합니다.
+- `describe()`는 이름이 실제 index인지 alias인지, 어떤 backing index로
+  연결되는지, 어떤 alias가 붙어 있는지, rollover 형태인지 한 번에
+  요약해 줍니다.
 - `create()`는 별도 override가 없으면 shard, replica, refresh 기본값을
   채웁니다.
 - `recreate_index(index, shards=1, replica=0, mappings=None, aliases=None)`은
@@ -538,6 +545,11 @@ index_service.recreate_index(
 - 대상 index가 존재하면 먼저 삭제 (`delete()` 경유)
 - `number_of_shards=shards`
 - `number_of_replicas=replica`
+
+중요한 점은 `recreate_index()`가 alias만 있는 경우를 기존 물리 index로
+오해하지 않는다는 것입니다. 내부적으로는 concrete index 존재 여부만 보고
+삭제 여부를 결정합니다.
+
 - `mappings`가 있으면 새 index에 포함
 - `aliases`가 있으면 새 index에 포함
 - `refresh_interval="30s"`로 새 index 생성 (`create()` 경유)
@@ -640,6 +652,67 @@ rolled index 환경에서는 아래 규칙이 가장 단순합니다.
 
 이렇게 하면 현재 write index가 `articles-000001`인지 `articles-000027`인지
 application code는 신경 쓸 필요가 없습니다.
+
+필요하면 search 시점에 concrete index로 직접 override할 수도 있습니다.
+
+```python
+from ops_store import OSSearch
+
+search_service = OSSearch(index="articles")
+
+alias_result = search_service.match("title", "flask")
+backing_result = search_service.match(
+    "title",
+    "flask",
+    index="articles-000002",
+)
+```
+
+즉 `OSSearch`는 alias 이름을 기본값으로 써도 되고, 호출마다 특정 backing
+index 이름으로 바꿔도 됩니다.
+
+### alias, backing index, rollover 구성 확인하기
+
+현재 이름이 실제 index인지 alias인지, rollover 형태인지 한 번에 보고
+싶다면 `describe()`를 사용하면 됩니다.
+
+```python
+from ops_store import OSIndex
+
+index_service = OSIndex()
+
+summary = index_service.describe("articles")
+```
+
+예를 들어 alias 기반 rollover 구성이면 아래처럼 요약됩니다.
+
+```python
+{
+    "name": "articles",
+    "resource_type": "alias",
+    "backing_indices": ["articles-000001", "articles-000002"],
+    "aliases": {
+        "articles": {
+            "backing_indices": ["articles-000001", "articles-000002"],
+            "write_index": "articles-000002",
+        }
+    },
+    "searchable_names": [
+        "articles",
+        "articles-000001",
+        "articles-000002",
+    ],
+    "rollover": {
+        "alias": "articles",
+        "write_index": "articles-000002",
+        "ready": True,
+        "uses_numbered_suffix": True,
+    },
+}
+```
+
+`include_metadata=True`를 주면 raw `indices.get(...)` 결과도 같이 포함되므로,
+settings과 mappings까지 한 번에 확인할 수 있습니다.
 
 ### ISM으로 자동 rollover를 돌리는 경우
 
