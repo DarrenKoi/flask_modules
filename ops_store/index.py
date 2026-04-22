@@ -55,6 +55,89 @@ class OSIndex(OSBase):
 
         return self.client.indices.create(index=name, body=body)
 
+    def create_rollover_index(
+        self,
+        index: str,
+        shards: int = 1,
+        replicas: int = 0,
+        *,
+        mappings: dict[str, Any] | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        backing_index = f"{index}-000001"
+        alias = f"{index}_alias"
+        return self.create(
+            index=backing_index,
+            mappings=mappings,
+            settings=settings,
+            aliases={alias: {"is_write_index": True}},
+            shards=shards,
+            replicas=replicas,
+        )
+
+    def create_ism_policy(
+        self,
+        policy_id: str,
+        index_pattern: str,
+        *,
+        rollover_conditions: dict[str, Any] | None = None,
+        retention_age: str | None = None,
+        priority: int = 100,
+        description: str = "",
+    ) -> dict[str, Any]:
+        hot_actions: list[dict[str, Any]] = []
+        if rollover_conditions:
+            hot_actions.append({"rollover": rollover_conditions})
+
+        states: list[dict[str, Any]] = [
+            {
+                "name": "hot",
+                "actions": hot_actions,
+                "transitions": (
+                    [{"state_name": "delete", "conditions": {"min_index_age": retention_age}}]
+                    if retention_age
+                    else []
+                ),
+            }
+        ]
+        if retention_age:
+            states.append(
+                {
+                    "name": "delete",
+                    "actions": [{"delete": {}}],
+                    "transitions": [],
+                }
+            )
+
+        body = {
+            "policy": {
+                "description": description,
+                "default_state": "hot",
+                "states": states,
+                "ism_template": [
+                    {"index_patterns": [index_pattern], "priority": priority}
+                ],
+            }
+        }
+        return self.client.transport.perform_request(
+            "PUT",
+            f"/_plugins/_ism/policies/{policy_id}",
+            body=body,
+        )
+
+    def attach_ism_policy(self, policy_id: str, index: str) -> dict[str, Any]:
+        return self.client.transport.perform_request(
+            "POST",
+            f"/_plugins/_ism/add/{index}",
+            body={"policy_id": policy_id},
+        )
+
+    def delete_ism_policy(self, policy_id: str) -> dict[str, Any]:
+        return self.client.transport.perform_request(
+            "DELETE",
+            f"/_plugins/_ism/policies/{policy_id}",
+        )
+
     def delete(self, index: str | None = None) -> dict[str, Any]:
         name = self._resolve_index(index)
         return self.client.indices.delete(index=name)
