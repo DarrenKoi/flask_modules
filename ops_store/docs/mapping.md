@@ -53,12 +53,12 @@ svc.create(
 )
 ```
 
-`dynamic` value는 네 가지다.
+`dynamic` value는 세 가지다. (참고: Elasticsearch의 `"dynamic": "runtime"`은
+OpenSearch에는 없다.)
 
 | value      | 동작 |
 |------------|------|
 | `true`     | 새 field를 자동으로 mapping에 추가(기본값) |
-| `runtime`  | runtime field로 등록(`_source`에 남지만 색인은 지연) |
 | `false`    | `_source`에는 저장, mapping에는 추가하지 않음 → 검색/집계 불가 |
 | `strict`   | 선언 안 한 field가 있으면 document reject |
 
@@ -80,9 +80,9 @@ svc.create(
 | `geo_point` | 좌표 | 없음 |
 | `geo_shape` | 도형 | `strategy`, `tree` |
 | `join`      | parent/child 관계 | `relations` |
-| `flattened` | 내부 구조를 전부 keyword로 납작하게 | 전용 type |
+| `flat_object` (OpenSearch 2.7+) | 구조가 일정하지 않은 subtree를 keyword처럼 납작하게 | 전용 type. Elasticsearch의 `flattened`와 다른 구현 |
 | `search_as_you_type` | prefix autocomplete | `max_shingle_size` |
-| `dense_vector`(OS 2.x에서는 `knn_vector`) | 벡터 검색 | `dimension`, `method` |
+| `knn_vector` (k-NN plugin) | 벡터 검색. Elasticsearch의 `dense_vector`와는 별개 구현 | `dimension`, `method` |
 
 ### keyword vs text — 가장 흔한 선택
 
@@ -396,7 +396,7 @@ svc.create(
             }
         }
     },
-    settings={"refresh_interval": "1s", "knn": True},
+    settings={"refresh_interval": "1s", "index.knn": True},
 )
 ```
 
