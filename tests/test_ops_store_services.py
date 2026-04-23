@@ -1,8 +1,11 @@
+import importlib.util
 import os
 import unittest
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from unittest.mock import Mock, patch
+
+_HAS_PANDAS = importlib.util.find_spec("pandas") is not None
 
 from ops_store import (
     OSConfig,
@@ -240,6 +243,46 @@ class OSDocTests(unittest.TestCase):
         self.assertEqual(len(actions), 2)
         for action in actions:
             self.assertEqual(action["_op_type"], "create")
+
+
+@unittest.skipUnless(_HAS_PANDAS, "pandas not installed")
+class OSDocDataFrameDatetimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = Mock()
+        self.service = OSDoc(client=self.client, index="events")
+
+    def test_bulk_index_dataframe_normalizes_datetime64_columns(self) -> None:
+        import pandas as pd
+
+        dataframe = pd.DataFrame(
+            {
+                "doc_id": ["a", "b", "c"],
+                "naive_ts": pd.to_datetime(
+                    ["2024-04-21 08:00:00", "2024-04-21 09:00:00", None]
+                ),
+                "tz_ts": pd.to_datetime(
+                    ["2024-04-21 08:00:00+09:00", None, "2024-04-21 10:00:00+09:00"],
+                    utc=False,
+                ),
+            }
+        )
+        self.assertEqual(dataframe["naive_ts"].dtype.name, "datetime64[ns]")
+
+        with patch("ops_store.document._bulk_helper") as bulk_helper:
+            bulk_function = Mock(return_value=(3, []))
+            bulk_helper.return_value = bulk_function
+            self.service.bulk_index_dataframe(dataframe, id_field="doc_id")
+
+        actions = list(bulk_function.call_args.args[1])
+        sources = [action["_source"] for action in actions]
+
+        self.assertEqual(sources[0]["naive_ts"], "2024-04-21T08:00:00")
+        self.assertEqual(sources[1]["naive_ts"], "2024-04-21T09:00:00")
+        self.assertIsNone(sources[2]["naive_ts"])
+
+        self.assertEqual(sources[0]["tz_ts"], "2024-04-21T08:00:00+09:00")
+        self.assertIsNone(sources[1]["tz_ts"])
+        self.assertEqual(sources[2]["tz_ts"], "2024-04-21T10:00:00+09:00")
 
 
 class OSDocumentNormalizationTests(unittest.TestCase):
@@ -565,6 +608,104 @@ class OSSearchTests(unittest.TestCase):
             body={"query": {"match": {"title": "flask"}}, "size": 5},
         )
 
+    def test_filter_terms_ands_fields_by_default(self) -> None:
+        client = Mock()
+        service = OSSearch(client=client, index="events")
+
+        service.filter_terms(
+            {
+                "category.keyword": ["books", "movies"],
+                "status": ["published", "featured"],
+            },
+            size=25,
+        )
+
+        client.search.assert_called_once_with(
+            index="events",
+            body={
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {"terms": {"category.keyword": ["books", "movies"]}},
+                            {"terms": {"status": ["published", "featured"]}},
+                        ]
+                    }
+                },
+                "size": 25,
+            },
+        )
+
+    def test_filter_terms_with_minimum_should_match_relaxes_to_should(self) -> None:
+        client = Mock()
+        service = OSSearch(client=client, index="events")
+
+        service.filter_terms(
+            {
+                "category.keyword": ["books"],
+                "status": ["published"],
+                "tag": ["hot"],
+            },
+            minimum_should_match=2,
+        )
+
+        client.search.assert_called_once_with(
+            index="events",
+            body={
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {
+                                "bool": {
+                                    "should": [
+                                        {"terms": {"category.keyword": ["books"]}},
+                                        {"terms": {"status": ["published"]}},
+                                        {"terms": {"tag": ["hot"]}},
+                                    ],
+                                    "minimum_should_match": 2,
+                                }
+                            }
+                        ]
+                    }
+                },
+                "size": 10,
+            },
+        )
+
+    def test_filter_terms_skips_empty_value_lists(self) -> None:
+        client = Mock()
+        service = OSSearch(client=client, index="events")
+
+        service.filter_terms(
+            {
+                "category.keyword": ["books"],
+                "status": [],
+            }
+        )
+
+        body = client.search.call_args.kwargs["body"]
+        self.assertEqual(
+            body["query"]["bool"]["filter"],
+            [{"terms": {"category.keyword": ["books"]}}],
+        )
+
+    def test_filter_terms_combines_with_additional_query(self) -> None:
+        client = Mock()
+        service = OSSearch(client=client, index="events")
+
+        service.filter_terms(
+            {"status": ["published"]},
+            query={"match": {"title": "flask"}},
+        )
+
+        body = client.search.call_args.kwargs["body"]
+        self.assertEqual(
+            body["query"]["bool"]["must"], [{"match": {"title": "flask"}}]
+        )
+        self.assertEqual(
+            body["query"]["bool"]["filter"],
+            [{"terms": {"status": ["published"]}}],
+        )
+
     def test_latest_sorts_desc_on_time_field(self) -> None:
         client = Mock()
         client.indices.get_mapping.return_value = {
@@ -679,6 +820,32 @@ class OSSearchTests(unittest.TestCase):
                 "query": {"term": {"user_id": "u-1"}},
             },
         )
+
+    def test_latest_returns_none_when_mapping_index_missing(self) -> None:
+        from opensearchpy.exceptions import NotFoundError
+
+        client = Mock()
+        client.indices.get_mapping.side_effect = NotFoundError(
+            404, "index_not_found_exception", {}
+        )
+        service = OSSearch(client=client, index="events")
+
+        self.assertIsNone(service.latest("event_tm"))
+        client.search.assert_not_called()
+
+    def test_latest_returns_none_when_search_index_missing(self) -> None:
+        from opensearchpy.exceptions import NotFoundError
+
+        client = Mock()
+        client.indices.get_mapping.return_value = {
+            "events": {"mappings": {"properties": {"event_tm": {"type": "date"}}}}
+        }
+        client.search.side_effect = NotFoundError(
+            404, "index_not_found_exception", {}
+        )
+        service = OSSearch(client=client, index="events")
+
+        self.assertIsNone(service.latest("event_tm"))
 
     def test_sample_uses_random_score_with_match_all(self) -> None:
         client = Mock()

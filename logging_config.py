@@ -107,6 +107,22 @@ def configure_flask_logging(
     return configure_logging(log_dir, log_name, logger=app.logger, **kwargs)
 
 
+def silence_opensearch_client_warnings(
+    level: int | str | None = logging.ERROR,
+) -> None:
+    """Raise the log level of the opensearch-py client loggers.
+
+    The bulk helper emits a WARNING per failed action when
+    ``raise_on_error=False`` — including every version_conflict from
+    ``op_type="create"``. Bumping the level drops those records before they
+    reach any handler.
+    """
+
+    resolved = _resolve_level(level)
+    for name in ("opensearch", "opensearchpy"):
+        logging.getLogger(name).setLevel(resolved)
+
+
 def setup_logger(
     path_dir: str | Path,
     name: str,

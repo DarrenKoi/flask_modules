@@ -142,6 +142,7 @@ OpenSearch 형식으로 반환합니다. 필요할 때만 `DataFrame` helper를 
 - `match_dataframe_all()`: 단일 field match 전체 결과를 `DataFrame`으로 변환
 - `term()`: exact-value term query
 - `bool()`: boolean query builder
+- `filter_terms()`: field별 value list를 AND(기본) 또는 `minimum_should_match` 기준으로 묶어주는 exact-value filter
 - `multi_match()`: multi-field full-text query
 - `knn()`: vector k-NN query
 - `hybrid()`: lexical + vector `should` query

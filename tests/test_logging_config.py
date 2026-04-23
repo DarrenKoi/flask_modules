@@ -12,6 +12,7 @@ from logging_config import (
     configure_flask_logging,
     configure_logging,
     setup_logger,
+    silence_opensearch_client_warnings,
 )
 
 
@@ -170,6 +171,24 @@ class LoggingConfigTests(unittest.TestCase):
 
             self.assertTrue(log_dir.is_dir())
             self.assertTrue((log_dir / "legacy_service.log").exists())
+
+    def test_silence_opensearch_client_warnings_sets_error_by_default(self) -> None:
+        for name in ("opensearch", "opensearchpy"):
+            self.loggers.append(logging.getLogger(name))
+
+        silence_opensearch_client_warnings()
+
+        self.assertEqual(logging.getLogger("opensearch").level, logging.ERROR)
+        self.assertEqual(logging.getLogger("opensearchpy").level, logging.ERROR)
+
+    def test_silence_opensearch_client_warnings_accepts_string_level(self) -> None:
+        for name in ("opensearch", "opensearchpy"):
+            self.loggers.append(logging.getLogger(name))
+
+        silence_opensearch_client_warnings(level="CRITICAL")
+
+        self.assertEqual(logging.getLogger("opensearch").level, logging.CRITICAL)
+        self.assertEqual(logging.getLogger("opensearchpy").level, logging.CRITICAL)
 
     def test_configure_logging_rejects_logger_and_logger_name_together(self) -> None:
         logger = logging.getLogger("test.logging_config.conflict")

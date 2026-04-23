@@ -1065,6 +1065,149 @@ exact_title = search_service.term(
 )
 ```
 
+### 여러 field를 동시에 filter — `filter_terms()`
+
+`term()`은 한 field, 한 value 기준입니다. 실제 filter UI나 API에서는
+"field별로 허용 값 리스트"를 여러 개 동시에 걸어야 할 때가 많습니다.
+
+- field별 value list는 OR (`[a, b, c]` → 해당 field가 `a`, `b`, `c` 중 하나면 매치)
+- field끼리는 AND (field A 조건 **그리고** field B 조건)
+
+이 패턴을 한 번에 표현해 주는 것이 `filter_terms()`입니다. 내부적으로
+`bool.filter` context에 `terms` clause를 field마다 하나씩 붙이는 구조라,
+점수 계산이 없고 shard-level cache도 활용됩니다.
+
+```python
+from ops_store import OSSearch
+
+search_service = OSSearch(index="articles")
+
+result = search_service.filter_terms(
+    {
+        "category.keyword": ["books", "movies"],
+        "status": ["published", "featured"],
+    },
+    size=50,
+)
+```
+
+위 호출은 아래 query body를 생성합니다.
+
+```json
+{
+  "query": {
+    "bool": {
+      "filter": [
+        {"terms": {"category.keyword": ["books", "movies"]}},
+        {"terms": {"status": ["published", "featured"]}}
+      ]
+    }
+  }
+}
+```
+
+#### exact match 동작과 `.keyword` subfield
+
+`filter_terms()`는 내부적으로 `terms` query를 사용하므로 analyzer를 거치지
+않는 **exact** 비교입니다. 대소문자, 공백, 구두점이 모두 그대로 비교되므로
+text field에서 exact match가 필요하면 `title.keyword`처럼 `.keyword`
+subfield를 caller가 직접 지정해야 합니다. 자동으로 붙이지는 않습니다.
+
+- `keyword` type field → field 이름 그대로 사용 (`status`, `category` 등)
+- `text` type field에서 exact match → `.keyword` subfield 사용 (`title.keyword`)
+
+#### `minimum_should_match`로 field AND를 완화
+
+기본 동작은 모든 field가 매치해야 합니다 (AND across fields). "지정한 K개
+field 중 적어도 N개가 매치하면 된다"로 완화하고 싶다면
+`minimum_should_match`를 넘깁니다. 이 값은 **field 단위**로 적용됩니다.
+
+```python
+# 세 개 field 중 적어도 두 개가 매치하면 포함
+search_service.filter_terms(
+    {
+        "category.keyword": ["books"],
+        "status": ["published"],
+        "tag": ["hot"],
+    },
+    minimum_should_match=2,
+)
+```
+
+`minimum_should_match=None` (default): 모든 field가 매치해야 함.
+`minimum_should_match=N`: K개 중 N개 이상 매치하면 포함.
+
+주의: 여기서의 `minimum_should_match`는 **각 field 안의 value 개수**가
+아니라 **field 자체의 개수**에 대한 임계값입니다. "한 field 안에서 value
+리스트 중 몇 개 이상 토큰이 포함돼야 한다"는 semantics는 지원하지
+않습니다. 그 경우에는 `bool()` helper로 직접 clause를 구성해야 합니다.
+
+#### 빈 value list는 무시
+
+특정 field의 value가 빈 list면 해당 field는 query에서 조용히 빠집니다.
+UI에서 아직 선택되지 않은 filter 항목을 그대로 전달해도 zero-hit
+함정에 빠지지 않게 하기 위한 동작입니다.
+
+```python
+search_service.filter_terms(
+    {
+        "category.keyword": ["books"],
+        "status": [],          # 전달되긴 했지만 query에 포함되지 않음
+    }
+)
+```
+
+#### 추가 scoring query와 결합
+
+filter는 점수를 계산하지 않습니다. filter 결과 안에서 별도의 match
+query로 정렬하고 싶다면 `query=`에 일반 query clause를 넘깁니다. 이
+clause는 `bool.must`로 들어가므로 점수에 반영됩니다.
+
+```python
+search_service.filter_terms(
+    {"status": ["published"]},
+    query={"match": {"title": "flask"}},
+    size=20,
+)
+```
+
+이 호출은 `status="published"`인 문서 집합 안에서 `title`에 `flask`가
+매치되는 정도로 순위를 매깁니다.
+
+#### 언제 `filter_terms()`가 적합하고 언제 적합하지 않은가
+
+적합한 상황:
+
+- status / category / tag 같은 dropdown filter 구성
+- ID, UUID, enum 값 매칭
+- "이 값들 중 하나" 조건이 여러 field에 걸쳐 필요한 경우
+
+적합하지 않은 상황:
+
+- 자유 텍스트 검색 → `match()` / `multi_match()` 사용
+- case-insensitive 매칭이 필요 → mapping에 `lowercase` normalizer를 붙이거나
+  `match()`를 사용
+- 부분/접두 매칭 → `prefix`, `wildcard`, edge-ngram analyzer 사용
+
+#### `index=` 인자는 언제 넘기나
+
+다른 search helper와 동일한 규칙입니다. 대부분은 service 생성 시
+`OSSearch(index="articles")`처럼 default index를 지정해 두고, 호출 시에는
+따로 넘기지 않습니다. 특정 backing index로 강제로 보내야 할 때(예:
+`articles-000002`에만 질의) 또는 여러 index를 wildcard로 한 번에 타겟할
+때만 call site에 `index=`를 추가합니다.
+
+```python
+# 기본 경로: service default index(보통 alias) 사용
+search_service.filter_terms({"status": ["published"]})
+
+# 특정 backing index로 override
+search_service.filter_terms(
+    {"status": ["published"]},
+    index="articles-000002",
+)
+```
+
 ### 바로 `pandas.DataFrame`으로 받고 싶을 때
 
 검색 결과를 바로 분석 코드로 넘기고 싶다면 `match_dataframe()`을 사용할 수
