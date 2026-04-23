@@ -1,8 +1,10 @@
 """Search-oriented wrappers for OpenSearch queries."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from functools import lru_cache
 from typing import Any
+
+from opensearchpy.exceptions import NotFoundError
 
 from .base import OSBase
 
@@ -14,13 +16,6 @@ def _pandas_module() -> Any | None:
     except ImportError:
         return None
     return pd
-
-
-@lru_cache(maxsize=1)
-def _not_found_error() -> type[Exception]:
-    from opensearchpy.exceptions import NotFoundError
-
-    return NotFoundError
 
 
 def _hit_to_record(hit: dict[str, Any], *, include_meta: bool) -> dict[str, Any]:
@@ -261,10 +256,10 @@ class OSSearch(OSBase):
 
     def filter_terms(
         self,
-        filters: Mapping[str, Sequence[Any]],
+        filters: dict[str, Sequence[Any]],
         *,
         minimum_should_match: int | str | None = None,
-        query: Mapping[str, Any] | None = None,
+        query: dict[str, Any] | None = None,
         index: str | None = None,
         size: int = 10,
     ) -> dict[str, Any]:
@@ -274,31 +269,24 @@ class OSSearch(OSBase):
             if values
         ]
 
-        filter_clauses: list[dict[str, Any]] = []
-        if term_clauses:
-            if minimum_should_match is None:
-                filter_clauses.extend(term_clauses)
-            else:
-                filter_clauses.append(
-                    {
-                        "bool": {
-                            "should": term_clauses,
-                            "minimum_should_match": minimum_should_match,
-                        }
+        if term_clauses and minimum_should_match is not None:
+            filter_clauses = [
+                {
+                    "bool": {
+                        "should": term_clauses,
+                        "minimum_should_match": minimum_should_match,
                     }
-                )
+                }
+            ]
+        else:
+            filter_clauses = term_clauses
 
-        bool_clause: dict[str, Any] = {}
-        if filter_clauses:
-            bool_clause["filter"] = filter_clauses
-        if query is not None:
-            bool_clause["must"] = [dict(query)]
-
-        body: dict[str, Any] = {
-            "query": {"bool": bool_clause} if bool_clause else {"match_all": {}},
-            "size": size,
-        }
-        return self.search_raw(body, index=index)
+        return self.bool(
+            must=[query] if query is not None else None,
+            filter=filter_clauses or None,
+            index=index,
+            size=size,
+        )
 
     def multi_match(
         self,
@@ -401,10 +389,9 @@ class OSSearch(OSBase):
         query: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         resolved_index = self._resolve_index(index)
-        not_found = _not_found_error()
         try:
             self._require_date_field(resolved_index, time_field)
-        except not_found:
+        except NotFoundError:
             return None
         body: dict[str, Any] = {
             "sort": [{time_field: {"order": "desc"}}],
@@ -414,7 +401,7 @@ class OSSearch(OSBase):
             body["query"] = query
         try:
             return self.search_raw(body, index=resolved_index)
-        except not_found:
+        except NotFoundError:
             return None
 
     def sample(
