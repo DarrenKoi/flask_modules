@@ -565,6 +565,178 @@ class OSSearchTests(unittest.TestCase):
             body={"query": {"match": {"title": "flask"}}, "size": 5},
         )
 
+    def test_latest_sorts_desc_on_time_field(self) -> None:
+        client = Mock()
+        client.indices.get_mapping.return_value = {
+            "events": {"mappings": {"properties": {"event_tm": {"type": "date"}}}}
+        }
+        client.search.return_value = {
+            "hits": {"hits": [{"_id": "doc-9", "_source": {"event_tm": "2026-04-23T10:00:00Z"}}]}
+        }
+        service = OSSearch(client=client, index="events")
+
+        result = service.latest("event_tm")
+
+        self.assertEqual(result["hits"]["hits"][0]["_id"], "doc-9")
+        client.indices.get_mapping.assert_called_once_with(index="events")
+        client.search.assert_called_once_with(
+            index="events",
+            body={"sort": [{"event_tm": {"order": "desc"}}], "size": 1},
+        )
+
+    def test_latest_accepts_date_nanos_field(self) -> None:
+        client = Mock()
+        client.indices.get_mapping.return_value = {
+            "events": {"mappings": {"properties": {"event_tm": {"type": "date_nanos"}}}}
+        }
+        service = OSSearch(client=client, index="events")
+
+        service.latest("event_tm")
+
+        client.search.assert_called_once()
+
+    def test_latest_raises_when_field_is_not_a_date(self) -> None:
+        client = Mock()
+        client.indices.get_mapping.return_value = {
+            "events": {"mappings": {"properties": {"event_tm": {"type": "keyword"}}}}
+        }
+        service = OSSearch(client=client, index="events")
+
+        with self.assertRaises(ValueError) as ctx:
+            service.latest("event_tm")
+
+        self.assertIn("keyword", str(ctx.exception))
+        client.search.assert_not_called()
+
+    def test_latest_raises_when_field_missing_from_mapping(self) -> None:
+        client = Mock()
+        client.indices.get_mapping.return_value = {
+            "events": {"mappings": {"properties": {"other_tm": {"type": "date"}}}}
+        }
+        service = OSSearch(client=client, index="events")
+
+        with self.assertRaises(ValueError):
+            service.latest("event_tm")
+
+        client.search.assert_not_called()
+
+    def test_latest_validates_every_backing_index_behind_alias(self) -> None:
+        client = Mock()
+        client.indices.get_mapping.return_value = {
+            "events-000001": {
+                "mappings": {"properties": {"event_tm": {"type": "date"}}}
+            },
+            "events-000002": {
+                "mappings": {"properties": {"event_tm": {"type": "keyword"}}}
+            },
+        }
+        service = OSSearch(client=client, index="events_alias")
+
+        with self.assertRaises(ValueError) as ctx:
+            service.latest("event_tm")
+
+        self.assertIn("events-000002", str(ctx.exception))
+        client.search.assert_not_called()
+
+    def test_latest_resolves_nested_field_path(self) -> None:
+        client = Mock()
+        client.indices.get_mapping.return_value = {
+            "events": {
+                "mappings": {
+                    "properties": {
+                        "event": {"properties": {"tm": {"type": "date"}}}
+                    }
+                }
+            }
+        }
+        service = OSSearch(client=client, index="events")
+
+        service.latest("event.tm")
+
+        client.search.assert_called_once_with(
+            index="events",
+            body={"sort": [{"event.tm": {"order": "desc"}}], "size": 1},
+        )
+
+    def test_latest_applies_query_and_size(self) -> None:
+        client = Mock()
+        client.indices.get_mapping.return_value = {
+            "events": {"mappings": {"properties": {"event_tm": {"type": "date"}}}}
+        }
+        service = OSSearch(client=client, index="events")
+
+        service.latest(
+            "event_tm",
+            size=5,
+            query={"term": {"user_id": "u-1"}},
+        )
+
+        client.search.assert_called_once_with(
+            index="events",
+            body={
+                "sort": [{"event_tm": {"order": "desc"}}],
+                "size": 5,
+                "query": {"term": {"user_id": "u-1"}},
+            },
+        )
+
+    def test_sample_uses_random_score_with_match_all(self) -> None:
+        client = Mock()
+        service = OSSearch(client=client, index="events")
+
+        service.sample()
+
+        client.search.assert_called_once_with(
+            index="events",
+            body={
+                "size": 10,
+                "query": {
+                    "function_score": {
+                        "query": {"match_all": {}},
+                        "random_score": {},
+                    }
+                },
+            },
+        )
+
+    def test_sample_with_seed_includes_seq_no_field(self) -> None:
+        client = Mock()
+        service = OSSearch(client=client, index="events")
+
+        service.sample(size=5, seed=42)
+
+        client.search.assert_called_once_with(
+            index="events",
+            body={
+                "size": 5,
+                "query": {
+                    "function_score": {
+                        "query": {"match_all": {}},
+                        "random_score": {"seed": 42, "field": "_seq_no"},
+                    }
+                },
+            },
+        )
+
+    def test_sample_applies_caller_query(self) -> None:
+        client = Mock()
+        service = OSSearch(client=client, index="events")
+
+        service.sample(size=3, query={"term": {"status": "ok"}})
+
+        client.search.assert_called_once_with(
+            index="events",
+            body={
+                "size": 3,
+                "query": {
+                    "function_score": {
+                        "query": {"term": {"status": "ok"}},
+                        "random_score": {},
+                    }
+                },
+            },
+        )
+
     def test_unique_values_returns_terms_bucket_keys(self) -> None:
         client = Mock()
         client.search.return_value = {

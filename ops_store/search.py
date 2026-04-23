@@ -61,6 +61,26 @@ def _records_to_dataframe(records: list[dict[str, Any]]) -> Any:
     return pandas.DataFrame(records)
 
 
+_DATE_TYPES = frozenset({"date", "date_nanos"})
+
+
+def _lookup_mapped_field(
+    properties: dict[str, Any], dotted_path: str
+) -> dict[str, Any] | None:
+    parts = dotted_path.split(".")
+    current: Any = properties
+    for depth, part in enumerate(parts):
+        if not isinstance(current, dict):
+            return None
+        field_def = current.get(part)
+        if not isinstance(field_def, dict):
+            return None
+        if depth == len(parts) - 1:
+            return field_def
+        current = field_def.get("properties")
+    return None
+
+
 class OSSearch(OSBase):
     """Class-based query helper for lexical, vector, and raw searches."""
 
@@ -305,6 +325,65 @@ class OSSearch(OSBase):
             bool_clause["filter"] = filter_list
 
         body = {"query": {"bool": bool_clause}, "size": size}
+        return self.search_raw(body, index=index)
+
+    def _require_date_field(self, index: str, time_field: str) -> None:
+        mapping = self.client.indices.get_mapping(index=index)
+        for backing_index, index_data in mapping.items():
+            properties = index_data.get("mappings", {}).get("properties", {})
+            field_def = _lookup_mapped_field(properties, time_field)
+            if field_def is None:
+                raise ValueError(
+                    f"Field {time_field!r} not found in mapping for "
+                    f"index {backing_index!r}."
+                )
+            field_type = field_def.get("type")
+            if field_type not in _DATE_TYPES:
+                raise ValueError(
+                    f"Field {time_field!r} in index {backing_index!r} has "
+                    f"type {field_type!r}; expected 'date' or 'date_nanos'."
+                )
+
+    def latest(
+        self,
+        time_field: str,
+        *,
+        index: str | None = None,
+        size: int = 1,
+        query: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        resolved_index = self._resolve_index(index)
+        self._require_date_field(resolved_index, time_field)
+        body: dict[str, Any] = {
+            "sort": [{time_field: {"order": "desc"}}],
+            "size": size,
+        }
+        if query is not None:
+            body["query"] = query
+        return self.search_raw(body, index=resolved_index)
+
+    def sample(
+        self,
+        *,
+        index: str | None = None,
+        size: int = 10,
+        query: dict[str, Any] | None = None,
+        seed: int | None = None,
+    ) -> dict[str, Any]:
+        random_score: dict[str, Any] = {}
+        if seed is not None:
+            random_score = {"seed": seed, "field": "_seq_no"}
+
+        base_query = query if query is not None else {"match_all": {}}
+        body = {
+            "size": size,
+            "query": {
+                "function_score": {
+                    "query": base_query,
+                    "random_score": random_score,
+                }
+            },
+        }
         return self.search_raw(body, index=index)
 
     def unique_values(

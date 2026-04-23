@@ -1221,6 +1221,120 @@ search_service.hybrid(
 - `hybrid()`는 `match`와 `knn` clause를 `should`로 묶은 단순한 boolean query
   입니다. 더 고급 ranking/fusion pipeline을 대신하는 것은 아닙니다.
 
+### 시간 기준으로 가장 최근 document 가져오기 — `latest()`
+
+특정 time field 기준으로 최신 document를 뽑을 때 `OSSearch.latest()`를
+사용합니다. 내부적으로 `sort: [{<time_field>: {"order": "desc"}}]`를 붙여서
+`search`를 호출합니다.
+
+time field 이름은 index마다 다를 수 있으므로 인자로 직접 넘겨야 합니다
+(`event_tm`, `created_at`, `logged_at` 등).
+
+```python
+from ops_store import OSSearch
+
+events = OSSearch(index="events")
+
+# 가장 최근 1건
+latest = events.latest("event_tm")
+newest_doc = latest["hits"]["hits"][0]["_source"]
+
+# 최근 10건
+recent = events.latest("event_tm", size=10)
+
+# 특정 조건 안에서 가장 최근 doc (예: user_id="u-1"의 최신 이벤트)
+user_latest = events.latest(
+    "event_tm",
+    query={"term": {"user_id": "u-1"}},
+)
+
+# 호출 시점에 index를 override
+override = events.latest("event_tm", index="events-000002")
+```
+
+중요한 점:
+
+- `latest()`는 search를 보내기 전에 해당 index의 mapping을 조회해서 `time_field`가
+  `date` 또는 `date_nanos` 타입인지 검증합니다. `keyword`/`text` 같은 다른 타입이면
+  `ValueError`를 던집니다 — 문자열 비교로 정렬되어 "최신 doc"이 틀리게 나오는
+  사고를 방지하기 위해서입니다.
+- alias 뒤에 backing index가 여러 개 붙어 있는 경우(rollover 구성), `latest()`는
+  모든 backing index의 mapping을 확인합니다. 그 중 하나라도 time field가
+  date 계열이 아니면 에러가 납니다.
+- mapping에 해당 field가 없으면 역시 `ValueError`가 납니다.
+- nested field는 dotted path로 넘기면 됩니다: `events.latest("event.tm")`.
+- 반환값은 raw OpenSearch response이므로, DataFrame으로 받고 싶다면
+  `events.to_dataframe(events.latest("event_tm", size=100))`처럼 조합합니다.
+
+### index에 어떤 data가 있는지 빠르게 훑어보기 — `sample()`
+
+`sample()`은 `function_score` + `random_score`로 무작위 N건을 가져옵니다.
+schema를 파악하거나 EDA용으로 빠르게 데이터를 훑을 때 유용합니다.
+
+```python
+from ops_store import OSSearch
+
+events = OSSearch(index="events")
+
+# 전체 중 무작위 10건 (default)
+rows = events.sample()
+for hit in rows["hits"]["hits"]:
+    print(hit["_id"], hit["_source"])
+
+# 개수 조정
+thirty = events.sample(size=30)
+
+# 특정 조건 안에서 무작위 샘플링
+ok_sample = events.sample(
+    size=20,
+    query={"term": {"status": "ok"}},
+)
+
+# 재현 가능한 샘플링 (같은 seed ⇒ 같은 결과)
+reproducible = events.sample(size=10, seed=42)
+```
+
+중요한 점:
+
+- `seed`를 주지 않으면 호출마다 결과가 달라집니다. 같은 seed로 항상 같은
+  샘플을 받고 싶다면 `seed=<int>`를 넘기세요. OpenSearch는 seed 사용 시
+  segment-level 일관성을 위해 필드를 요구하므로 `sample()`은 자동으로
+  `_seq_no`를 사용합니다.
+- `query`는 `function_score`의 inner query로 들어갑니다. 즉 "조건을 만족하는
+  document 중에서 무작위로 N건" 이라는 의미가 됩니다.
+- 반환값은 raw response이므로 `to_dataframe()`과 조합하면 DataFrame으로
+  바로 받을 수 있습니다: `events.to_dataframe(events.sample(size=100))`.
+
+### 특정 field의 unique value 목록이 필요할 때 — `unique_values()`
+
+category/status 같은 field에 어떤 값이 들어 있는지 한 번에 보고 싶을 때
+사용합니다. 내부적으로 `terms` aggregation을 돌린 뒤 bucket key들만 꺼내서
+list로 돌려줍니다.
+
+```python
+from ops_store import OSSearch
+
+articles = OSSearch(index="articles")
+
+# text field라면 keyword sub-field를 지정해야 합니다.
+statuses = articles.unique_values("status")
+categories = articles.unique_values("category.keyword", size=500)
+
+# 조건을 건 후 그 안에서만 unique value를 보고 싶다면 query를 넘깁니다.
+published_categories = articles.unique_values(
+    "category.keyword",
+    query={"term": {"status": "published"}},
+)
+```
+
+중요한 점:
+
+- `terms` aggregation은 기본적으로 `keyword`(혹은 numeric/boolean) 타입 field에서
+  동작합니다. `text` field에 대해서는 `fielddata`를 켜지 않는 한 실패하므로,
+  보통은 `title.keyword` 처럼 sub-field를 지정하게 됩니다.
+- `size`는 반환할 bucket 개수 상한입니다. cardinality가 매우 큰 field에서
+  전부 필요하면 composite aggregation 같은 다른 접근이 필요합니다.
+
 ## Logging 동작
 
 `ops_store`는 OpenSearch 호출을 자체 로깅하지 않습니다. 클러스터 상태는
