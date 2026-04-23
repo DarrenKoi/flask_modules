@@ -604,7 +604,7 @@ class OSIndexTests(unittest.TestCase):
             },
             params={
                 "wait_for_completion": False,
-                "slices": "auto",
+                "slices": 1,
                 "refresh": False,
             },
         )

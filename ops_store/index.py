@@ -387,7 +387,7 @@ class OSIndex(OSBase):
         size: int = 1000,
         op_type: Literal["index", "create"] = "index",
         conflicts: Literal["abort", "proceed"] = "abort",
-        slices: int | str = "auto",
+        slices: int = 1,
         refresh: bool = False,
         wait_for_completion: bool = False,
         requests_per_second: float | None = None,
@@ -424,7 +424,8 @@ class OSIndex(OSBase):
             },
         }
 
-        # slices="auto" is an OpenSearch sentinel: one slice per source shard.
+        # Remote reindex doesn't support automatic slicing; parallelize by
+        # issuing multiple calls with manual source.slice {id, max} instead.
         params: dict[str, Any] = {
             "wait_for_completion": wait_for_completion,
             "slices": slices,
