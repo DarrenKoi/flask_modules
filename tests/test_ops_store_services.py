@@ -573,6 +573,80 @@ class OSIndexTests(unittest.TestCase):
             params={"dry_run": True},
         )
 
+    def test_reindex_from_remote_builds_body_and_params(self) -> None:
+        client = Mock()
+        service = OSIndex(client=client, index="logs_clustered")
+
+        service.reindex_from_remote(
+            source_host="https://standalone:9200",
+            source_index="logs",
+            source_username="admin",
+            source_password="secret",
+            query={"range": {"@timestamp": {"gte": "now-7d"}}},
+        )
+
+        client.reindex.assert_called_once_with(
+            body={
+                "conflicts": "abort",
+                "source": {
+                    "remote": {
+                        "host": "https://standalone:9200",
+                        "socket_timeout": "1m",
+                        "connect_timeout": "10s",
+                        "username": "admin",
+                        "password": "secret",
+                    },
+                    "index": "logs",
+                    "size": 1000,
+                    "query": {"range": {"@timestamp": {"gte": "now-7d"}}},
+                },
+                "dest": {"index": "logs_clustered", "op_type": "index"},
+            },
+            params={
+                "wait_for_completion": False,
+                "slices": "auto",
+                "refresh": False,
+            },
+        )
+
+    def test_reindex_from_remote_overrides_dest_and_throttles(self) -> None:
+        client = Mock()
+        service = OSIndex(client=client, index="default_dest")
+
+        service.reindex_from_remote(
+            source_host="http://src:9200",
+            source_index=["logs-2026-04-22", "logs-2026-04-23"],
+            dest_index="logs_new",
+            size=500,
+            op_type="create",
+            conflicts="proceed",
+            slices=6,
+            refresh=True,
+            wait_for_completion=True,
+            requests_per_second=2000.0,
+        )
+
+        body = client.reindex.call_args.kwargs["body"]
+        params = client.reindex.call_args.kwargs["params"]
+        self.assertEqual(body["conflicts"], "proceed")
+        self.assertEqual(
+            body["source"]["index"],
+            ["logs-2026-04-22", "logs-2026-04-23"],
+        )
+        self.assertEqual(body["source"]["size"], 500)
+        self.assertNotIn("username", body["source"]["remote"])
+        self.assertNotIn("query", body["source"])
+        self.assertEqual(body["dest"], {"index": "logs_new", "op_type": "create"})
+        self.assertEqual(
+            params,
+            {
+                "wait_for_completion": True,
+                "slices": 6,
+                "refresh": True,
+                "requests_per_second": 2000.0,
+            },
+        )
+
 
 class OSSearchTests(unittest.TestCase):
     def test_match_works_with_alias_default_index(self) -> None:

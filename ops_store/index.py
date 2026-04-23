@@ -1,7 +1,7 @@
 """Index and alias management services."""
 
 import re
-from typing import Any
+from typing import Any, Literal
 
 from .base import OSBase
 
@@ -374,3 +374,63 @@ class OSIndex(OSBase):
             kwargs["params"] = params
 
         return self.client.indices.rollover(**kwargs)
+
+    def reindex_from_remote(
+        self,
+        *,
+        source_host: str,
+        source_index: str | list[str],
+        dest_index: str | None = None,
+        source_username: str | None = None,
+        source_password: str | None = None,
+        query: dict[str, Any] | None = None,
+        size: int = 1000,
+        op_type: Literal["index", "create"] = "index",
+        conflicts: Literal["abort", "proceed"] = "abort",
+        slices: int | str = "auto",
+        refresh: bool = False,
+        wait_for_completion: bool = False,
+        requests_per_second: float | None = None,
+        socket_timeout: str = "1m",
+        connect_timeout: str = "10s",
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        remote: dict[str, Any] = {
+            "host": source_host,
+            "socket_timeout": socket_timeout,
+            "connect_timeout": connect_timeout,
+        }
+        if source_username is not None:
+            remote["username"] = source_username
+        if source_password is not None:
+            remote["password"] = source_password
+        if headers:
+            remote["headers"] = headers
+
+        source: dict[str, Any] = {
+            "remote": remote,
+            "index": source_index,
+            "size": size,
+        }
+        if query is not None:
+            source["query"] = query
+
+        body: dict[str, Any] = {
+            "conflicts": conflicts,
+            "source": source,
+            "dest": {
+                "index": self._resolve_index(dest_index),
+                "op_type": op_type,
+            },
+        }
+
+        # slices="auto" is an OpenSearch sentinel: one slice per source shard.
+        params: dict[str, Any] = {
+            "wait_for_completion": wait_for_completion,
+            "slices": slices,
+            "refresh": refresh,
+        }
+        if requests_per_second is not None:
+            params["requests_per_second"] = requests_per_second
+
+        return self.client.reindex(body=body, params=params)
