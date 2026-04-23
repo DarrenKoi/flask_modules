@@ -7,6 +7,8 @@
 
 - `codebase.md`: repository 구조, module 역할, runtime 흐름 설명
 - `usage.md`: 설정 방법, 예제, 권장 사용 패턴, 자주 하는 실수 정리
+- `policy.md`: ISM policy의 state/action/transition 개념과
+  `create_ism_policy` 해설, four-tier lifecycle 예제
 - `logging_strategy.md`: OpenSearch를 로그 저장소로 쓸 때의 권장 아키텍처와
   운영 전략
 
