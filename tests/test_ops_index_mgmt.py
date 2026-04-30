@@ -1,4 +1,3 @@
-import os
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -55,18 +54,14 @@ class SemMsrInfoIndexMgmtTests(unittest.TestCase):
             mgmt.build_index_settings("hvsem_msr_info"),
         )
 
-    def test_create_client_reads_connection_from_environment(self) -> None:
-        with patch.dict(
-            os.environ,
-            {
-                "SKEWNONO_OPENSEARCH_HOST": "cluster.example",
-                "SKEWNONO_OPENSEARCH_USER": "sem-user",
-                "SKEWNONO_OPENSEARCH_PASSWORD": "secret",
-            },
-            clear=True,
-        ):
-            with patch("ops_index_mgmt.hitachi_sem_msr_info.create_client") as factory:
-                mgmt.create_skewnono_client()
+    def test_create_client_reads_connection_from_module_variables(self) -> None:
+        with patch.object(mgmt, "OPENSEARCH_HOST", "cluster.example"):
+            with patch.object(mgmt, "OPENSEARCH_USER", "sem-user"):
+                with patch.object(mgmt, "OPENSEARCH_PASSWORD", "secret"):
+                    with patch(
+                        "ops_index_mgmt.hitachi_sem_msr_info.create_client"
+                    ) as factory:
+                        mgmt.create_skewnono_client()
 
         factory.assert_called_once_with(
             host="cluster.example",
@@ -75,11 +70,7 @@ class SemMsrInfoIndexMgmtTests(unittest.TestCase):
         )
 
     def test_create_client_defaults_host_and_user(self) -> None:
-        with patch.dict(
-            os.environ,
-            {"SKEWNONO_OPENSEARCH_PASSWORD": "secret"},
-            clear=True,
-        ):
+        with patch.object(mgmt, "OPENSEARCH_PASSWORD", "secret"):
             with patch("ops_index_mgmt.hitachi_sem_msr_info.create_client") as factory:
                 mgmt.create_skewnono_client()
 
@@ -89,8 +80,8 @@ class SemMsrInfoIndexMgmtTests(unittest.TestCase):
             password="secret",
         )
 
-    def test_create_client_requires_connection_environment(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
+    def test_create_client_requires_password_variable(self) -> None:
+        with patch.object(mgmt, "OPENSEARCH_PASSWORD", ""):
             with self.assertRaises(RuntimeError):
                 mgmt.create_skewnono_client()
 

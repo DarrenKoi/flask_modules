@@ -2,10 +2,13 @@
 
 import argparse
 import json
-import os
 from typing import Any
 
 from ops_store import OSIndex, create_client
+
+OPENSEARCH_HOST = "skewnono-db1-os.osp01.skhynix.com"
+OPENSEARCH_USER = "skewnono001"
+OPENSEARCH_PASSWORD = ""
 
 INDEX_ALIASES = ("cdsem_msr_info", "hvsem_msr_info")
 POLICY_ID = "sem_msr_info_retention_policy"
@@ -16,21 +19,6 @@ REFRESH_INTERVAL = "30s"
 ROLLOVER_SIZE = "15gb"
 RETENTION_AGE = "50d"
 POLICY_PRIORITY = 100
-
-DEFAULT_HOST = "skewnono-db1-os.osp01.skhynix.com"
-DEFAULT_USER = "skewnono001"
-
-HOST_ENV_KEYS = ("SKEWNONO_OPENSEARCH_HOST", "OPENSEARCH_HOST")
-USER_ENV_KEYS = ("SKEWNONO_OPENSEARCH_USER", "OPENSEARCH_USER")
-PASSWORD_ENV_KEYS = ("SKEWNONO_OPENSEARCH_PASSWORD", "OPENSEARCH_PASSWORD")
-
-
-def first_env_value(keys: tuple[str, ...]) -> str | None:
-    for key in keys:
-        value = os.getenv(key)
-        if value:
-            return value
-    return None
 
 
 def index_pattern(alias: str) -> str:
@@ -138,20 +126,17 @@ def build_initial_index_body(alias: str) -> dict[str, Any]:
 def create_skewnono_client() -> Any:
     """Create a client for the skewnono OpenSearch cluster."""
 
-    host = first_env_value(HOST_ENV_KEYS) or DEFAULT_HOST
-    user = first_env_value(USER_ENV_KEYS) or DEFAULT_USER
-    password = first_env_value(PASSWORD_ENV_KEYS)
-
-    missing_keys: list[str] = []
-    if not password:
-        missing_keys.append("SKEWNONO_OPENSEARCH_PASSWORD or OPENSEARCH_PASSWORD")
-    if missing_keys:
+    if not OPENSEARCH_PASSWORD:
         raise RuntimeError(
-            "Set these environment variables before running this script: "
-            + ", ".join(missing_keys)
+            "Set OPENSEARCH_PASSWORD at the top of "
+            "ops_index_mgmt/hitachi_sem_msr_info.py before running this script."
         )
 
-    return create_client(host=host, user=user, password=password)
+    return create_client(
+        host=OPENSEARCH_HOST,
+        user=OPENSEARCH_USER,
+        password=OPENSEARCH_PASSWORD,
+    )
 
 
 def put_ism_policy(client: Any) -> dict[str, Any]:
@@ -241,11 +226,9 @@ def build_dry_run_plan() -> dict[str, Any]:
 
     return {
         "cluster": {
-            "host": first_env_value(HOST_ENV_KEYS) or DEFAULT_HOST,
-            "user": first_env_value(USER_ENV_KEYS) or DEFAULT_USER,
-            "host_override_env": " or ".join(HOST_ENV_KEYS),
-            "user_override_env": " or ".join(USER_ENV_KEYS),
-            "password_env": " or ".join(PASSWORD_ENV_KEYS),
+            "host": OPENSEARCH_HOST,
+            "user": OPENSEARCH_USER,
+            "password_set": bool(OPENSEARCH_PASSWORD),
         },
         "policy_request": {
             "method": "PUT",
