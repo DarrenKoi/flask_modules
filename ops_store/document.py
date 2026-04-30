@@ -153,6 +153,40 @@ class OSDoc(OSBase):
         name = self._resolve_index(index)
         return self.client.get(index=name, id=doc_id)
 
+    def exists_many(
+        self,
+        doc_ids: Sequence[str],
+        *,
+        index: str | None = None,
+    ) -> dict[str, bool]:
+        """Return document existence by id using a single multi-get request."""
+
+        name = self._resolve_index(index)
+        ids = list(doc_ids)
+        if not ids:
+            return {}
+
+        result = {doc_id: False for doc_id in ids}
+        response = self.client.mget(
+            index=name,
+            body={
+                "docs": [
+                    {
+                        "_id": doc_id,
+                        "_source": False,
+                    }
+                    for doc_id in ids
+                ]
+            },
+        )
+
+        for document in response.get("docs", []):
+            doc_id = document.get("_id")
+            if doc_id in result:
+                result[doc_id] = bool(document.get("found"))
+
+        return result
+
     def update(
         self,
         doc_id: str,

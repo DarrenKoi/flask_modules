@@ -751,6 +751,7 @@ doc_service.index(
 
 doc_service.update("post-1", {"title": "Hello again"})
 doc_service.upsert("post-2", {"title": "Created if missing"})
+doc_exists = doc_service.exists_many(["post-1", "post-2", "post-3"])
 doc_service.delete("post-2")
 ```
 
@@ -766,6 +767,8 @@ doc_service.index({"title": "Hello"}, doc_id="post-1")
 method별 동작:
 
 - `index()`는 document 자체를 request body로 전송합니다.
+- `exists_many()`는 id list를 `_mget`으로 한 번에 확인하고 `{id: bool}`을
+  반환합니다.
 - `update()`는 partial update를 위해 `{"doc": ...}` 형태를 사용합니다.
 - `upsert()`는 `{"doc": ..., "doc_as_upsert": True}`를 사용합니다.
 - `delete()`는 id 기준으로 document를 삭제합니다.
