@@ -21,7 +21,7 @@ class MinioConfig:
     endpoint: str = "localhost:9000"
     access_key: str | None = None
     secret_key: str | None = None
-    secure: bool = True
+    secure: bool = False
     region: str | None = None
     cert_check: bool = True
     extra_client_kwargs: dict[str, Any] = field(default_factory=dict)

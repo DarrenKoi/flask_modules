@@ -2,6 +2,7 @@
 
 import io
 from collections.abc import Iterable, Iterator
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -167,6 +168,53 @@ class MinioObject(MinioBase):
         if not targets:
             return []
         return list(self.client.remove_objects(bucket_name, targets))
+
+    def presigned_get_url(
+        self,
+        key: str,
+        *,
+        bucket: str | None = None,
+        expires: timedelta = timedelta(hours=1),
+        response_headers: dict[str, str] | None = None,
+        version_id: str | None = None,
+    ) -> str:
+        """Return a temporary URL anyone can ``GET`` to download the object.
+
+        ``response_headers`` overrides headers MinIO returns on the download
+        (e.g. ``{"response-content-disposition": "attachment; filename=x.csv"}``
+        to force a browser save dialog).
+        """
+
+        bucket_name = self._resolve_bucket(bucket)
+        full_key = self._resolve_key(key)
+        return self.client.presigned_get_object(
+            bucket_name,
+            full_key,
+            expires=expires,
+            response_headers=response_headers,
+            version_id=version_id,
+        )
+
+    def presigned_put_url(
+        self,
+        key: str,
+        *,
+        bucket: str | None = None,
+        expires: timedelta = timedelta(hours=1),
+    ) -> str:
+        """Return a temporary URL a client can ``PUT`` raw bytes to.
+
+        Hand this to a browser or another service so it uploads straight to
+        MinIO without seeing the access/secret keys.
+        """
+
+        bucket_name = self._resolve_bucket(bucket)
+        full_key = self._resolve_key(key)
+        return self.client.presigned_put_object(
+            bucket_name,
+            full_key,
+            expires=expires,
+        )
 
     def list(
         self,
