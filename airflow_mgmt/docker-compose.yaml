@@ -1,0 +1,93 @@
+# Local Airflow 3.1.8 stack for development on Windows (via Docker Desktop).
+#
+# This is a slimmed-down version of the official compose file:
+#   https://airflow.apache.org/docs/apache-airflow/3.1.8/howto/docker-compose/index.html
+#
+# Removed for simplicity: Flower, Redis, CeleryExecutor.
+# Uses LocalExecutor + Postgres which is plenty for local DAG authoring.
+#
+# First-time bring-up:
+#   copy .env.example .env
+#   docker compose up airflow-init     # one-shot: creates DB, admin user
+#   docker compose up -d               # start the long-running services
+#
+# Tear down (keeps data):     docker compose down
+# Tear down (wipes DB):       docker compose down -v
+#
+# UI:  http://localhost:8080  user: airflow / pass: airflow
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:3.1.8-python3.11
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__API_AUTH__JWT_SECRET: "local-dev-only-not-a-secret"
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./config:/opt/airflow/config
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username "${_AIRFLOW_WWW_USER_USERNAME:-airflow}" \
+          --password "${_AIRFLOW_WWW_USER_PASSWORD:-airflow}" \
+          --firstname Air --lastname Flow --role Admin \
+          --email airflow@example.com || true
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: unless-stopped
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    restart: unless-stopped
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    restart: unless-stopped
+
+volumes:
+  postgres-db-volume:

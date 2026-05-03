@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+logs/
+plugins/
+config/
+# Local Airflow metadata when running standalone outside docker
+airflow.db
+airflow.cfg
+webserver_config.py

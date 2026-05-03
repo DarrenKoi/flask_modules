@@ -1,0 +1,13 @@
+# Pin to your company's Airflow platform version (3.1.8) so local tests
+# match production behavior. Constraints file ensures dependency compat.
+#
+# Install:
+#   pip install -r requirements.txt \
+#     --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-3.1.8/constraints-3.11.txt"
+
+apache-airflow==3.1.8
+apache-airflow-providers-standard
+
+# Testing
+pytest>=8.0
+pytest-mock>=3.12
