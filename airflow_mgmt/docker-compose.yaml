@@ -51,16 +51,19 @@ services:
 
   airflow-init:
     <<: *airflow-common
-    entrypoint: /bin/bash
-    command:
-      - -c
-      - |
-        airflow db migrate
-        airflow users create \
-          --username "${_AIRFLOW_WWW_USER_USERNAME:-airflow}" \
-          --password "${_AIRFLOW_WWW_USER_PASSWORD:-airflow}" \
-          --firstname Air --lastname Flow --role Admin \
-          --email airflow@example.com || true
+    # Airflow 3.x bootstrap: do NOT call `airflow users create` directly —
+    # that command lives in the FAB provider, which isn't installed by
+    # default. Instead set `_AIRFLOW_DB_MIGRATE` and `_AIRFLOW_WWW_USER_CREATE`
+    # so the container entrypoint runs migration + user creation for us via
+    # the auth manager that's actually configured (SimpleAuthManager by
+    # default in 3.x).
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+    command: version
 
   airflow-apiserver:
     <<: *airflow-common
