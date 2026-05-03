@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 .pytest_cache/
 logs/
+minio_handler/minio_config.py

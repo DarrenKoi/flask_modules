@@ -4,6 +4,20 @@ import os
 from dataclasses import dataclass, field, replace
 from typing import Any, Self
 
+_CONNECTION_ATTRS = {
+    "endpoint": "ENDPOINT",
+    "access_key": "ACCESS_KEY",
+    "secret_key": "SECRET_KEY",
+    "secure": "SECURE",
+    "region": "REGION",
+    "cert_check": "CERT_CHECK",
+}
+
+_OBJECT_ATTRS = {
+    "bucket": "BUCKET",
+    "prefix": "PREFIX",
+}
+
 
 def _parse_bool(value: str) -> bool:
     normalized = value.strip().lower()
@@ -12,6 +26,29 @@ def _parse_bool(value: str) -> bool:
     if normalized in {"0", "false", "f", "no", "n", "off"}:
         return False
     raise ValueError(f"Invalid boolean value: {value!r}")
+
+
+def _module_values(attr_map: dict[str, str]) -> dict[str, Any]:
+    """Return non-None constants defined in ``minio_handler.minio_config``.
+
+    Missing module or missing attributes are silently ignored so the package
+    works on a fresh clone where the gitignored config file is absent.
+    """
+
+    try:
+        from . import minio_config as mod
+    except ImportError:
+        return {}
+
+    values: dict[str, Any] = {}
+    for key, attr in attr_map.items():
+        if not hasattr(mod, attr):
+            continue
+        value = getattr(mod, attr)
+        if value is None:
+            continue
+        values[key] = value
+    return values
 
 
 @dataclass(slots=True)
@@ -43,7 +80,7 @@ class MinioConfig:
 
     @classmethod
     def from_env(cls, **overrides: Any) -> Self:
-        values: dict[str, Any] = {}
+        values: dict[str, Any] = _module_values(_CONNECTION_ATTRS)
 
         endpoint = os.getenv("MINIO_ENDPOINT")
         if endpoint:
@@ -111,8 +148,12 @@ class MinioBase:
         prefix: str | None = None,
         **client_overrides: Any,
     ) -> None:
-        self.default_bucket = bucket
-        self.default_prefix = prefix.strip("/") if prefix else None
+        module_defaults = _module_values(_OBJECT_ATTRS)
+        resolved_bucket = bucket if bucket is not None else module_defaults.get("bucket")
+        resolved_prefix = prefix if prefix is not None else module_defaults.get("prefix")
+
+        self.default_bucket = resolved_bucket
+        self.default_prefix = resolved_prefix.strip("/") if resolved_prefix else None
 
         if client is not None and client_overrides:
             raise ValueError(

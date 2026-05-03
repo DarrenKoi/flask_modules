@@ -21,7 +21,54 @@ update입니다. 이 wrapper도 별도의 update API를 두지 않습니다.
 pip install -r requirements.txt
 ```
 
-## 환경 변수
+## 설정값을 어디에 두는가
+
+다음 세 가지 방법 중 편한 것을 골라 쓰면 됩니다. 우선순위는 위에서 아래로
+**높음 → 낮음** 순입니다.
+
+1. `MinioConfig(...)` / `MinioObject(...)` 호출 시 직접 넘기는 인자 (kwargs)
+2. 환경 변수 (`MINIO_*`)
+3. `minio_handler/minio_config.py` 안의 상수
+4. 패키지 빌트인 기본값
+
+즉 `minio_config.py`에 키를 넣어 두면 평소엔 그것이 쓰이고, 운영 환경에서는
+환경 변수로 일시적으로 덮어쓸 수 있습니다.
+
+### `minio_config.py` 사용
+
+이 파일은 `.gitignore`에 등록되어 있어 절대 commit 되지 않습니다. 안심하고
+키를 직접 넣어 둘 수 있습니다.
+
+```python
+# minio_handler/minio_config.py
+ENDPOINT: str | None = "aistor-api.lake.skhynix.com"
+ACCESS_KEY: str | None = "<여기에 access key>"
+SECRET_KEY: str | None = "<여기에 secret key>"
+SECURE: bool | None = False
+REGION: str | None = None
+CERT_CHECK: bool | None = True
+
+BUCKET: str | None = "user"
+PREFIX: str | None = "2067928/"
+```
+
+값을 채워 두면 application 코드는 인자 없이 한 줄로 끝납니다.
+
+```python
+from minio_handler import MinioObject
+
+mo = MinioObject()              # ENDPOINT, KEY, BUCKET, PREFIX 모두 자동 적용
+mo.put("hello.txt", b"hi")
+print(mo.get("hello.txt"))
+```
+
+비워 두고 싶은 항목은 `None`으로 두면 됩니다. 그러면 그 항목만 환경 변수
+또는 빌트인 기본값으로 떨어집니다.
+
+> 새 clone에서는 `.gitignore` 때문에 이 파일이 존재하지 않습니다. 패키지는
+> 파일이 없어도 정상 동작하므로, 필요할 때 직접 만들면 됩니다.
+
+### 환경 변수 사용
 
 `MinioConfig.from_env()`가 읽는 변수입니다.
 
@@ -399,6 +446,20 @@ export MINIO_SECURE=true
 from minio_handler import MinioObject
 
 mo = MinioObject(bucket="user", prefix="2067928/")
+mo.put("ping.txt", b"pong")
+print(mo.get("ping.txt").decode())
+mo.delete("ping.txt")
+```
+
+## `minio_config.py`만으로 사용하는 가장 짧은 형태
+
+`minio_handler/minio_config.py`에 ENDPOINT / ACCESS_KEY / SECRET_KEY / BUCKET /
+PREFIX 를 채워 두면 끝입니다.
+
+```python
+from minio_handler import MinioObject
+
+mo = MinioObject()
 mo.put("ping.txt", b"pong")
 print(mo.get("ping.txt").decode())
 mo.delete("ping.txt")
