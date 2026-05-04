@@ -278,9 +278,11 @@ Presigned URL은 access/secret key 없이도 짧은 시간 동안 특정 object 
 key로 서명을 만들어 주면, URL을 가진 누구든 만료 전까지 그 동작을 수행할
 수 있습니다.
 
-- 만료 최대 7일 (AWS SigV4 제한)
+- 만료 최대 7일 (AWS SigV4 제한, 604,800초)
 - 만료 최소 1초
 - URL 한 개 = method/bucket/key 한 쌍에 한정. listing이나 다른 key는 안 됨
+- 이 wrapper의 default는 `timedelta(days=7)` (최대값). 더 짧게 쓰고 싶으면
+  호출 시 `expires=`를 명시하세요.
 
 ### 다운로드 URL 만들어 공유하기
 
@@ -375,6 +377,175 @@ mo.use_prefix(None)
 url = mo.presigned_get_url("misc/file.txt")
 mo.use_prefix("2067928/")
 ```
+
+### 7일을 넘기는 공유가 필요할 때
+
+SigV4 spec이 7일을 hard limit으로 잡고 있어서, 한 URL을 그보다 오래 살게
+만들 수는 없습니다. 그 대신 다음 세 가지 우회 전략 중 하나를 쓰면 됩니다.
+실무에서는 1번이 압도적으로 많이 쓰입니다.
+
+**1. 재발급 endpoint (가장 권장)**
+
+URL을 직접 공유하지 말고, 매 요청마다 짧은 URL을 새로 만들어 redirect
+하는 endpoint를 공유합니다. 사용자는 한 URL을 평생 bookmark할 수 있고,
+실제 download URL은 매번 새로 서명됩니다.
+
+```python
+from datetime import timedelta
+from flask import redirect
+
+@api_bp.get("/share/<token>")
+def share(token: str):
+    # token을 DB에서 찾아 (key, expires_at, allowed_ips, ...) 정보를 얻고
+    record = lookup_share(token)
+    if record.is_expired():
+        return {"error": "expired"}, 410
+    url = mo.presigned_get_url(record.key, expires=timedelta(minutes=10))
+    return redirect(url, code=302)
+```
+
+장점:
+
+- 만료 / 권한 / IP 제한 / 다운로드 횟수 등 추가 정책을 자유롭게 얹음
+- 키 관리는 backend 안에만 머무름
+- 한 token을 revoke하기 쉬움 (DB record 한 줄만 끄면 됨)
+
+**2. Bucket 또는 prefix를 public read로 정책 부여**
+
+특정 prefix만 anonymous read를 허용하면 URL에 서명이 필요 없게 됩니다.
+URL 만료 자체가 사라집니다.
+
+```python
+import json
+
+policy = {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {"AWS": ["*"]},
+            "Action": ["s3:GetObject"],
+            "Resource": ["arn:aws:s3:::user/public/*"],
+        }
+    ],
+}
+mo.client.set_bucket_policy("user", json.dumps(policy))
+```
+
+이 방법은 키를 알면 누구나 읽을 수 있게 만듭니다. 실수로 민감한 파일을
+이 prefix에 두면 즉시 노출되므로 일반 데이터에는 권하지 않습니다.
+
+**3. Cron으로 주기적 재발급**
+
+URL 자체가 어딘가에 박혀 있는 환경(이메일 본문, Slack 핀 메시지)에선
+6일마다 새로 만들어 같은 자리에 갱신해 두는 cron job을 둡니다. 가장
+fragile하므로 1번이 가능하면 1번을 쓰세요.
+
+## Lifecycle: 오래된 파일 자동 삭제
+
+S3 lifecycle은 bucket 단위로 "객체가 마지막으로 수정된 뒤 N일이 지나면
+삭제"라는 규칙을 걸어 두는 기능입니다. MinIO도 이 규약을 그대로 지원합니다.
+규칙을 한 번 걸어 두면 application 코드는 더 이상 삭제를 신경 쓰지
+않아도 됩니다.
+
+### 동작 원리
+
+- bucket 전체 또는 특정 prefix / tag 만 대상으로 지정 가능
+- 기준 시각은 객체의 `last_modified` (즉 동일 key를 다시 `put`하면 다시
+  카운팅이 시작됨)
+- MinIO scanner가 주기적으로(기본 24시간) bucket을 훑으며 만료된 객체를
+  제거. 즉 6개월이 되는 그 순간 즉시 사라지는 것이 아니라 다음 scan 때
+  지워짐
+- versioning이 켜진 bucket이면 `noncurrent_version_expiration`로 옛 버전
+  관리 규칙도 따로 가능
+
+### 6개월 정책 만들기
+
+`user` bucket에서 prefix `2067928/` 아래의 모든 객체를 180일 뒤 삭제.
+
+```python
+from minio.commonconfig import ENABLED, Filter
+from minio.lifecycleconfig import Expiration, LifecycleConfig, Rule
+
+config = LifecycleConfig(
+    rules=[
+        Rule(
+            rule_id="expire-after-180-days",
+            rule_filter=Filter(prefix="2067928/"),
+            status=ENABLED,
+            expiration=Expiration(days=180),
+        ),
+    ],
+)
+
+mo.client.set_bucket_lifecycle("user", config)
+```
+
+여러 prefix에 서로 다른 보관 기간을 두고 싶으면 `Rule`을 여러 개 만들어
+같은 `LifecycleConfig`에 넣습니다.
+
+```python
+config = LifecycleConfig(
+    rules=[
+        Rule(
+            rule_id="logs-30-days",
+            rule_filter=Filter(prefix="2067928/logs/"),
+            status=ENABLED,
+            expiration=Expiration(days=30),
+        ),
+        Rule(
+            rule_id="reports-180-days",
+            rule_filter=Filter(prefix="2067928/reports/"),
+            status=ENABLED,
+            expiration=Expiration(days=180),
+        ),
+        Rule(
+            rule_id="archives-keep-forever",
+            rule_filter=Filter(prefix="2067928/archives/"),
+            status="Disabled",
+            expiration=Expiration(days=3650),
+        ),
+    ],
+)
+mo.client.set_bucket_lifecycle("user", config)
+```
+
+### 현재 설정 확인 / 해제
+
+```python
+# 조회
+current = mo.client.get_bucket_lifecycle("user")
+print(current)
+
+# 전체 해제
+mo.client.delete_bucket_lifecycle("user")
+```
+
+### 일자가 아니라 특정 날짜에 삭제
+
+`Expiration(date=...)`를 쓰면 모든 매칭 객체가 그 날짜 이후 한꺼번에
+삭제됩니다. 일회성 cleanup에 유용합니다.
+
+```python
+from datetime import datetime, timezone
+from minio.lifecycleconfig import Expiration
+
+Expiration(date=datetime(2026, 12, 31, tzinfo=timezone.utc))
+```
+
+### 자주 하는 실수
+
+- **scan 주기를 모르고 즉시 삭제 기대.** 정확히 180일 0초가 되는 순간
+  삭제되지 않습니다. 24시간 정도 지연 가능. SLA가 중요하면 lifecycle 대신
+  `delete_many`를 cron에서 직접 돌리세요.
+- **prefix slash 누락.** `prefix="2067928"`로 두면 `2067928foo/` 같은 다른
+  객체에도 매칭됩니다. 거의 항상 마지막에 `/`까지 적어주세요.
+- **`last_modified` 갱신 함정.** 같은 key를 다시 `put`하면 lifecycle이
+  새로 카운팅을 시작합니다. immutable한 archive면 의도대로지만, 자주
+  덮어쓰는 파일이면 영원히 안 지워질 수 있습니다.
+- **권한 부족.** lifecycle 설정에는 bucket 단위 admin 권한이 필요합니다.
+  read/write만 허용된 service account로는 `set_bucket_lifecycle`이 403을
+  돌려줍니다.
 
 ## 자주 하는 실수
 
