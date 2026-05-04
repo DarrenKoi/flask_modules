@@ -13,12 +13,12 @@ Use this version when:
 Otherwise prefer ingest_kpo_dag.py.
 
 Imports resolve because Airflow puts dags_folder on sys.path:
-- `ftp_ingest` and `lib.minio_handler` are both packages under dags/
+- `ftp_ingest` and `util.minio_handler` are both packages under dags/
 - absolute imports only — no `from .sources import ...`
 
 MinIO config: MinioObject() with no args reads MINIO_ENDPOINT,
 MINIO_ACCESS_KEY, MINIO_SECRET_KEY from the worker's environment
-(see lib/minio_handler/base.py). Set those once on the platform; the
+(see util/minio_handler/base.py). Set those once on the platform; the
 DAG only specifies the bucket and key.
 """
 
@@ -31,7 +31,7 @@ from airflow.sdk import dag, task
 
 from ftp_ingest.lib.downloader import download_to_path
 from ftp_ingest.sources import SOURCES, FtpSource
-from lib.minio_handler import MinioObject
+from util.minio_handler import MinioObject
 
 
 MINIO_BUCKET = "raw-ingest"          # promote to an Airflow Variable if it varies per env

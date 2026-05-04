@@ -7,7 +7,7 @@ business logic can't be unit-tested without instantiating a DAG.
 
 The fix: **DAG file = orchestration. Helper module = pure Python logic.**
 
-See `dags/example_07_external_module.py` and `dags/lib/orders.py` for a
+See `dags/example_07_external_module.py` and `dags/util/orders.py` for a
 working reference.
 
 ---
@@ -18,7 +18,7 @@ Three files, three roles:
 
 | File | Role | Imports `airflow`? |
 |---|---|---|
-| `dags/lib/orders.py` | Pure business logic — parse, filter, transform | No |
+| `dags/util/orders.py` | Pure business logic — parse, filter, transform | No |
 | `dags/example_07_external_module.py` | DAG: schedule + `@task` wrappers + wiring | Yes |
 | `tests/test_orders_lib.py` | Unit tests on the helpers | No |
 
@@ -30,11 +30,11 @@ and is testable with plain `pytest`, no Airflow needed.
 ```
 airflow_mgmt/
 └── dags/
-    ├── lib/                          ← helper subpackage
+    ├── util/                         ← helper subpackage (reusable across tasks)
     │   ├── __init__.py
     │   ├── orders.py                 ← pure functions, no airflow import
     │   └── transforms.py             ← add more as the project grows
-    └── example_07_external_module.py ← thin DAG, imports from lib.orders
+    └── example_07_external_module.py ← thin DAG, imports from util.orders
 ```
 
 ### How the imports resolve
@@ -44,7 +44,7 @@ That makes any subpackage of `dags/` importable as a top-level name:
 
 ```python
 # inside dags/example_07_external_module.py
-from lib.orders import parse_orders, daily_summary
+from util.orders import parse_orders, daily_summary
 ```
 
 `tests/conftest.py` does the same trick for pytest:
@@ -54,10 +54,10 @@ DAGS_DIR = Path(__file__).resolve().parent.parent / "dags"
 sys.path.insert(0, str(DAGS_DIR))
 ```
 
-So the same `from lib.orders import ...` works in production AND in tests.
+So the same `from util.orders import ...` works in production AND in tests.
 No `PYTHONPATH` env var, no `sys.path.append` in the DAG file.
 
-### What goes in `lib/*.py`
+### What goes in `util/*.py`
 
 - Pure functions and dataclasses
 - No `airflow.*` imports
@@ -67,7 +67,7 @@ No `PYTHONPATH` env var, no `sys.path.append` in the DAG file.
 ### What stays in the DAG file
 
 - `@dag(...)` decorator: schedule, start_date, retries, tags
-- `@task` wrappers — usually 1–3 lines that call into `lib/`
+- `@task` wrappers — usually 1–3 lines that call into `util/`
 - Task wiring (the data flow `load(transform(extract()))`)
 - Hooks/connections that *must* go through Airflow
 
@@ -129,7 +129,7 @@ introspect what failed beyond exit code.
    it from `@task` instead.
 
 3. **Putting helpers in a sibling folder of `dags/`** (e.g.
-   `airflow_mgmt/lib/`). Your platform git-registers `dags/` only —
+   `airflow_mgmt/util/`). Your platform git-registers `dags/` only —
    anything outside is invisible in production. Subpackages of `dags/`
    are the only safe place.
 
@@ -137,12 +137,12 @@ introspect what failed beyond exit code.
    the dependency, and surprises the next maintainer. Use a subpackage
    under `dags/` instead — it's importable for free.
 
-5. **Relative imports inside a DAG file** (`from .lib.orders import ...`).
+5. **Relative imports inside a DAG file** (`from .util.orders import ...`).
    The dag-processor loads each DAG file as a top-level script, not as
    part of a package, so relative imports fail and the DAG silently
-   disappears from the UI. Use absolute: `from lib.orders import ...`.
+   disappears from the UI. Use absolute: `from util.orders import ...`.
 
-6. **Reaching into Airflow internals from `lib/`.** If `lib/orders.py`
+6. **Reaching into Airflow internals from `util/`.** If `util/orders.py`
    imports `airflow`, you've coupled your business logic to Airflow's
    release cadence. Keep the helper layer Airflow-free; let the DAG
    layer adapt between Airflow's API and your pure functions.
@@ -166,6 +166,6 @@ python scripts/validate_dags.py
 
 If the helper tests pass but DAG integrity fails, the split itself is
 fine — you have a typo in the DAG file's imports or wiring. If helper
-tests fail to even collect, your `from lib.X import Y` path is wrong
-(check `dags/lib/__init__.py` exists and `tests/conftest.py` is putting
+tests fail to even collect, your `from util.X import Y` path is wrong
+(check `dags/util/__init__.py` exists and `tests/conftest.py` is putting
 `dags/` on `sys.path`).

@@ -3,25 +3,25 @@ Example 07 — Keep DAGs thin by importing helpers from a sibling module.
 
 Demonstrates:
 - DAG file as orchestration only: schedule, dependencies, retries
-- Business logic lives in `lib/orders.py` and is imported, not inlined
+- Business logic lives in `util/orders.py` and is imported, not inlined
 - Each @task is a 1–3 line wrapper that calls a tested pure function
 
 Why this pattern:
 - The DAG file fits on one screen — reviewers see the *shape* of the pipeline
-- `lib/orders.py` is unit-testable with plain pytest, no Airflow needed
+- `util/orders.py` is unit-testable with plain pytest, no Airflow needed
 - Same helpers can be reused from other DAGs or a Flask endpoint
 
 How imports resolve:
 - Airflow's dag-processor puts `dags_folder` on sys.path
-- `dags/lib/__init__.py` makes `lib` an importable package
-- `from lib.orders import ...` works in production and in pytest (see conftest.py)
+- `dags/util/__init__.py` makes `util` an importable package
+- `from util.orders import ...` works in production and in pytest (see conftest.py)
 """
 
 from datetime import datetime, timedelta
 
 from airflow.sdk import dag, task
 
-from lib.orders import customer_totals, daily_summary, parse_orders
+from util.orders import customer_totals, daily_summary, parse_orders
 
 
 DEFAULT_ARGS = {
@@ -33,7 +33,7 @@ DEFAULT_ARGS = {
 
 @dag(
     dag_id="example_07_external_module",
-    description="Slim DAG — logic lives in dags/lib/orders.py",
+    description="Slim DAG — logic lives in dags/util/orders.py",
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,

@@ -11,7 +11,7 @@ local development and never deployed.
 ```
 airflow_mgmt/
 ├── dags/                       # ← register THIS folder with your Airflow platform
-│   ├── lib/                    # cross-topic helpers (pure Python)
+│   ├── util/                   # cross-topic helpers (pure Python, reusable across tasks)
 │   │   ├── orders.py
 │   │   └── minio_handler/      # vendored from project root for use in DAGs
 │   ├── ftp_ingest/             # topic: download files from FTP servers
@@ -28,7 +28,7 @@ airflow_mgmt/
 │   ├── example_04_branching.py
 │   ├── example_05_scheduled_etl.py
 │   ├── example_06_xcom_and_params.py
-│   └── example_07_external_module.py   # imports from lib/ — keeps DAGs thin
+│   └── example_07_external_module.py   # imports from util/ — keeps DAGs thin
 ├── tests/                      # pytest / unittest — run anywhere, no Airflow server
 │   ├── conftest.py
 │   ├── test_dag_integrity.py
