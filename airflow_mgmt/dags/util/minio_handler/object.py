@@ -123,6 +123,79 @@ class MinioObject(MinioBase):
             response.close()
             response.release_conn()
 
+    def put_json(
+        self,
+        key: str,
+        obj: Any,
+        *,
+        bucket: str | None = None,
+        metadata: dict[str, str] | None = None,
+        indent: int | None = None,
+        ensure_ascii: bool = False,
+        default: Any = None,
+    ) -> Any:
+        """Serialize ``obj`` to JSON (UTF-8) and upload.
+
+        ``default`` is forwarded to ``json.dumps`` so non-native types
+        (datetime, Decimal, ...) can be handled by the caller.
+        """
+
+        import json
+
+        payload = json.dumps(
+            obj,
+            indent=indent,
+            ensure_ascii=ensure_ascii,
+            default=default,
+        ).encode("utf-8")
+        return self.put(
+            key,
+            payload,
+            bucket=bucket,
+            content_type="application/json; charset=utf-8",
+            metadata=metadata,
+        )
+
+    def get_json(self, key: str, *, bucket: str | None = None) -> Any:
+        """Download a JSON object and return the parsed value."""
+
+        import json
+
+        return json.loads(self.get(key, bucket=bucket).decode("utf-8"))
+
+    def put_pickle(
+        self,
+        key: str,
+        obj: Any,
+        *,
+        bucket: str | None = None,
+        metadata: dict[str, str] | None = None,
+        protocol: int | None = None,
+    ) -> Any:
+        """Pickle a Python object and upload it.
+
+        Only safe for objects produced by trusted code — ``get_pickle`` will
+        execute whatever's in the payload.
+        """
+
+        import pickle
+
+        payload = pickle.dumps(obj, protocol=protocol)
+        return self.put(
+            key,
+            payload,
+            bucket=bucket,
+            content_type="application/octet-stream",
+            metadata=metadata,
+        )
+
+    def get_pickle(self, key: str, *, bucket: str | None = None) -> Any:
+        """Download a pickled object and return the unpickled value."""
+
+        import pickle
+
+        return pickle.loads(self.get(key, bucket=bucket))
+
     def put_dataframe(
         self,
         key: str,
@@ -208,6 +281,29 @@ class MinioObject(MinioBase):
         bucket_name = self._resolve_bucket(bucket)
         delete_object = _delete_object_class()
         targets = [delete_object(self._resolve_key(k)) for k in keys]
+        if not targets:
+            return []
+        return list(self.client.remove_objects(bucket_name, targets))
+
+    def delete_prefix(
+        self,
+        prefix: str,
+        *,
+        bucket: str | None = None,
+    ) -> list[Any]:
+        """Delete every object under ``prefix`` recursively. Returns error entries.
+
+        ``prefix`` is composed with ``default_prefix`` the same way object keys
+        are: ``delete_prefix("runs/")`` on a service with ``prefix="kpo"``
+        wipes everything under ``kpo/runs/``.
+        """
+
+        bucket_name = self._resolve_bucket(bucket)
+        delete_object = _delete_object_class()
+        targets = [
+            delete_object(obj.object_name)
+            for obj in self.list(prefix, bucket=bucket, recursive=True)
+        ]
         if not targets:
             return []
         return list(self.client.remove_objects(bucket_name, targets))
