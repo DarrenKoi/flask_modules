@@ -20,12 +20,31 @@ mounted into the pod (provisioned by the platform team), NOT from this
 DAG. The DAG only passes non-secret config (remote path, destination key).
 """
 
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
+from platform import system
 
-from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
-from airflow.sdk import dag
 
-from ftp_ingest.sources import SOURCES, FtpSource
+def _root_dir() -> Path:
+    if "/opt/airflow/" in str(Path(__file__).resolve()):
+        return Path("/opt/airflow/dags/airflow_repo.git/skewnono-scheduler1/dags")
+    name = system()
+    if name == "Windows":
+        return Path("F:/skewnono")
+    if name == "Linux":
+        return Path("/project/workSpace")
+    return Path(__file__).resolve().parents[1]
+
+
+ROOT_DIR = _root_dir()
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator  # noqa: E402
+from airflow.sdk import dag  # noqa: E402
+
+from ftp_ingest.sources import SOURCES, FtpSource  # noqa: E402
 
 
 def _kpo_kwargs_for(source: FtpSource) -> dict:

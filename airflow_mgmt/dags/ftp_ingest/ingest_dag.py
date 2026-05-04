@@ -22,16 +22,34 @@ MINIO_ACCESS_KEY, MINIO_SECRET_KEY from the worker's environment
 DAG only specifies the bucket and key.
 """
 
+import sys
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
+from platform import system
 
-from airflow.hooks.base import BaseHook
-from airflow.sdk import dag, task
 
-from ftp_ingest.lib.downloader import download_to_path
-from ftp_ingest.sources import SOURCES, FtpSource
-from util.minio_handler import MinioObject
+def _root_dir() -> Path:
+    if "/opt/airflow/" in str(Path(__file__).resolve()):
+        return Path("/opt/airflow/dags/airflow_repo.git/skewnono-scheduler1/dags")
+    name = system()
+    if name == "Windows":
+        return Path("F:/skewnono")
+    if name == "Linux":
+        return Path("/project/workSpace")
+    return Path(__file__).resolve().parents[1]
+
+
+ROOT_DIR = _root_dir()
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from airflow.hooks.base import BaseHook  # noqa: E402
+from airflow.sdk import dag, task  # noqa: E402
+
+from ftp_ingest.lib.downloader import download_to_path  # noqa: E402
+from ftp_ingest.sources import SOURCES, FtpSource  # noqa: E402
+from util.minio_handler import MinioObject  # noqa: E402
 
 
 MINIO_BUCKET = "raw-ingest"          # promote to an Airflow Variable if it varies per env

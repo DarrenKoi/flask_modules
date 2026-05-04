@@ -9,11 +9,28 @@ an OS-branched constant. Cleanup is guaranteed on every exit path
 """
 
 import asyncio
+import sys
 import tempfile
 from pathlib import Path
+from platform import system
 from typing import TypedDict
 
-from minio_handler import MinioObject
+
+def _root_dir() -> Path:
+    name = system()
+    if name == "Windows":
+        return Path("F:/skewnono")
+    if name == "Linux":
+        return Path("/project/workSpace")
+    # Darwin / unknown — derive from this file (airflow_mgmt/scripts/x.py → repo root)
+    return Path(__file__).resolve().parents[2]
+
+
+ROOT_DIR = _root_dir()
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from minio_handler import MinioObject  # noqa: E402
 
 
 REMOTE_LOG_PATH = "/HITACHI/SYSFILE/LOG_RECIPE_EXE.log"
