@@ -3,18 +3,25 @@
 Runnable standalone (local dev). The same shape drops into an Airflow @task
 unchanged — replace the `__main__` block with a `@task` wrapper.
 
-Key idea: scratch storage lives in a uniquely-named subdir of ROOT_DIR,
-created at the start of the run and removed in a `finally` block. Files
-stay inspectable during the run (useful for debugging) and are gone the
-moment the function returns — success or failure.
+Two filesystem locations, two purposes:
+  - ROOT_DIR     → where the code lives (sys.path target). On Airflow this
+                   is the read-only git mount, so we never write here.
+  - SCRATCH_ROOT → where we write runtime files (downloads, working data).
+                   On Airflow this is /tmp; on dev boxes it's a subdir of
+                   ROOT_DIR so the files stay inspectable.
 
-Airflow does NOT auto-clean task working files. Without an explicit cleanup,
-downloaded files would accumulate on the worker forever.
+Conflating these two is the classic "PermissionError: cannot mkdir under
+the dags folder" bug — the airflow user has read access to the git mount
+but not write access, by ops design.
+
+Cleanup runs in a `finally` block. Airflow does not auto-clean task
+working files; without explicit cleanup, downloads accumulate on the worker.
 """
 
 import asyncio
 import shutil
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 from platform import system
@@ -22,14 +29,32 @@ from typing import TypedDict
 
 
 def _root_dir() -> Path:
+    if "/opt/airflow" in str(Path.cwd()):
+        return Path("/opt/airflow/dags/airflow_repo.git/skewnono-scheduler1")
     if system() == "Windows":
         return Path("F:/skewnono")
     return Path("/project/workSpace")
 
 
+def _scratch_root() -> Path:
+    """Writable scratch directory for runtime data.
+
+    On the Airflow worker, ROOT_DIR is the git mount and is not writable
+    by the airflow user — we use the OS temp dir (/tmp on Linux) instead.
+    On dev boxes, we keep scratch under ROOT_DIR so files are inspectable
+    in the same folder layout you already have open.
+    """
+    if "/opt/airflow" in str(Path.cwd()):
+        return Path(tempfile.gettempdir())
+    return ROOT_DIR / "scratch"
+
+
 ROOT_DIR = _root_dir()
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+SCRATCH_ROOT = _scratch_root()
+SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
 
 from minio_handler import MinioObject  # noqa: E402
 
@@ -94,21 +119,22 @@ def upload_results(result: DownloadResult, cwd_folder: Path, bucket: str) -> dic
 
 
 def cleanup_folder(path: Path) -> None:
-    # Refuse to delete anything outside ROOT_DIR — guards against a caller
-    # accidentally passing ROOT_DIR itself or "/". relative_to() raises
-    # ValueError if `path` is not under ROOT_DIR, and we also reject the
-    # root itself (relative path == ".").
+    # Refuse to delete anything outside SCRATCH_ROOT — guards against a
+    # caller accidentally passing SCRATCH_ROOT itself or "/". relative_to()
+    # raises ValueError if `path` is not under SCRATCH_ROOT, and we also
+    # reject the root itself (relative path == ".").
     resolved = path.resolve()
-    rel = resolved.relative_to(ROOT_DIR.resolve())
+    rel = resolved.relative_to(SCRATCH_ROOT.resolve())
     if rel == Path("."):
-        raise ValueError(f"refusing to remove ROOT_DIR itself: {resolved}")
+        raise ValueError(f"refusing to remove SCRATCH_ROOT itself: {resolved}")
     shutil.rmtree(resolved, ignore_errors=True)
 
 
 def collect_logs(ips: list[str]) -> dict:
     # uuid4 isolates concurrent task instances (e.g. .expand() fan-out) so
-    # they never share a directory.
-    cwd_folder = ROOT_DIR / "recipe_logs" / uuid.uuid4().hex
+    # they never share a directory. SCRATCH_ROOT, not ROOT_DIR — the latter
+    # is the git mount on Airflow workers and not writable.
+    cwd_folder = SCRATCH_ROOT / "recipe_logs" / uuid.uuid4().hex
     cwd_folder.mkdir(parents=True, exist_ok=True)
     try:
         targets = build_targets(cwd_folder, ips)
