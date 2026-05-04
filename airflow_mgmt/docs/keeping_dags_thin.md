@@ -1,177 +1,178 @@
-# Keeping DAGs thin: extract long Python into helper modules
+# DAG를 얇게 유지하기
 
-When a DAG file grows past one screen, it stops being readable as a pipeline
-overview and starts being a mix of "what runs when" and "how each step
-works". Reviewers can't see the shape of the pipeline at a glance, and the
-business logic can't be unit-tested without instantiating a DAG.
+DAG 파일은 "무엇을 언제 실행하는지"를 보여주는 오케스트레이션 계층으로 유지하고,
+실제 Python 로직은 `airflow_mgmt/` 아래의 재사용 가능한 모듈로 분리합니다.
 
-The fix: **DAG file = orchestration. Helper module = pure Python logic.**
+현재 이 저장소의 실제 DAG는 `dags/diagnostics/inspect_packages_dag.py` 하나입니다.
+이 DAG는 Airflow worker에 설치된 Python 패키지 목록을 로그로 출력하는 진단용 DAG이며,
+repo-local helper를 아직 가져오지 않습니다. 앞으로 업무 DAG를 추가할 때는 이 문서의
+패턴을 기준으로 DAG를 얇게 유지합니다.
 
-See `dags/ftp_ingest/ingest_dag.py` (DAG: schedule + `@task` wiring) and
-`dags/ftp_ingest/lib/downloader.py` (pure ftplib helper, no airflow import)
-for a working reference.
+## 현재 DAG
 
----
+| DAG 파일 | DAG ID | 스케줄 | 태그 | 역할 |
+|---|---|---:|---|---|
+| `dags/diagnostics/inspect_packages_dag.py` | `diagnostics_inspect_packages` | 수동 실행 | `diagnostics` | worker에 설치된 Python 패키지와 버전을 task 로그에 기록 |
 
-## The recommended pattern
+`diagnostics_inspect_packages`는 패키지 설치 여부를 확인하기 위한 운영 진단 도구입니다.
+Airflow UI에서 수동으로 실행한 뒤 `list_packages` task 로그를 보면 됩니다.
 
-Three files, three roles:
+## 권장 구조
 
-| File | Role | Imports `airflow`? |
-|---|---|---|
-| `dags/ftp_ingest/lib/downloader.py` | Pure business logic — `ftplib` wrapper, no Airflow | No |
-| `dags/ftp_ingest/ingest_dag.py` | DAG: schedule + `@task` wrappers + wiring | Yes |
-| `tests/test_ftp_downloader.py` | Unit tests on the helper | No |
+현재 `airflow_mgmt/`의 reusable layer는 DAG 폴더 밖에 있습니다.
 
-The DAG file stays a one-page overview. The "long" logic lives next door
-and is testable with plain `pytest`, no Airflow needed.
-
-### Layout
-
-```
+```text
 airflow_mgmt/
-└── dags/
-    ├── util/                         ← cross-topic helpers (reusable everywhere)
-    │   ├── __init__.py
-    │   └── orders.py                 ← pure functions, no airflow import
-    └── ftp_ingest/                   ← topic package: DAG + topic-local helpers
-        ├── __init__.py
-        ├── lib/
-        │   └── downloader.py         ← pure ftplib wrapper
-        ├── sources.py                ← config registry
-        └── ingest_dag.py             ← thin DAG, imports from lib + util
+├── dags/
+│   └── diagnostics/
+│       └── inspect_packages_dag.py   # 현재 등록된 진단 DAG
+├── utils/
+│   └── orders.py                     # Airflow import가 없는 순수 Python 예시 로직
+├── minio_handler/                    # MinIO / S3 호환 client wrapper
+├── scripts/
+│   ├── ftp_download_sample.py        # FTP → MinIO helper (재사용용)
+│   └── validate_dags.py              # DAG parse-only 검증 스크립트
+├── templates/                        # 복사해서 dags/<topic>/ 로 옮길 DAG 템플릿
+└── tests/
+    ├── conftest.py                   # pytest에서 AIRFLOW_MGMT_ROOT 기본값 설정
+    ├── test_dag_integrity.py         # DagBag 기반 DAG import 검증
+    └── test_orders_lib.py            # helper 로직 unit test
 ```
 
-### How the imports resolve
+업무 DAG를 새로 만들 때는 다음 기준으로 나눕니다.
 
-Airflow's dag-processor adds the `dags/` folder to `sys.path` automatically.
-That makes any subpackage of `dags/` importable as a top-level name:
-
-```python
-# inside dags/ftp_ingest/ingest_dag.py
-from ftp_ingest.lib.downloader import download_to_path
-from util.minio_handler import MinioObject
-```
-
-`tests/conftest.py` does the same trick for pytest:
-
-```python
-DAGS_DIR = Path(__file__).resolve().parent.parent / "dags"
-sys.path.insert(0, str(DAGS_DIR))
-```
-
-So the same `from util.orders import ...` works in production AND in tests.
-No `PYTHONPATH` env var, no `sys.path.append` in the DAG file.
-
-### What goes in `util/*.py`
-
-- Pure functions and dataclasses
-- No `airflow.*` imports
-- No I/O against external systems (databases, APIs) — pass data in/out
-- Anything you'd want to call from a Flask route or a CLI script too
-
-### What stays in the DAG file
-
-- `@dag(...)` decorator: schedule, start_date, retries, tags
-- `@task` wrappers — usually 1–3 lines that call into `util/`
-- Task wiring (the data flow `load(transform(extract()))`)
-- Hooks/connections that *must* go through Airflow
-
----
-
-## When NOT to use this pattern
-
-| Situation | Use instead | Why |
+| 위치 | 넣을 내용 | `airflow` import |
 |---|---|---|
-| Helper has dep conflicts with Airflow (e.g. `pandas==1.5` while Airflow pins newer) | `@task.virtualenv` or `@task.external_python` | Runs the function in an isolated interpreter; args/return ship via pickle |
-| Calling a vendor CLI or legacy script you don't own (`python migrate.py --date=...`) | `BashOperator(bash_command="python /path/to/script.py ...")` | Wasn't built to be imported; wrapping it as a function is more code than it's worth |
-| Heavy CPU/memory work, or needs system packages | `KubernetesPodOperator` / `DockerOperator` | Full process isolation; doesn't share the worker's resources |
-| The Python is 5–10 lines | Inline `@task` | Extracting would just add indirection |
+| `dags/<topic>/<name>_dag.py` | `@dag`, `@task`, schedule, retry, task wiring | 허용 |
+| `utils/*.py` | 순수 함수, dataclass, 데이터 변환 규칙 | 금지 |
+| `minio_handler/*.py` | MinIO / S3 호환 저장소 wrapper | 금지 |
+| `tests/test_*.py` | helper 동작과 DAG import 검증 | 보통 금지 |
 
-### `@task.virtualenv` example
+## repo-local import 규칙
+
+회사 Airflow가 이 repo를 clone하거나 mount하더라도 `airflow_mgmt/` root가 항상
+`sys.path`에 들어간다고 가정하면 안 됩니다. 그래서 repo-local helper를 import하는
+DAG 파일과 entry-point script는 파일 상단에 작은 **bootstrap stub**을 둡니다.
+이 stub이 `airflow_mgmt/` 디렉터리를 찾아 `sys.path`에 넣은 뒤에야 repo-local
+import가 가능합니다.
+
+bootstrap stub이 읽는 환경 변수는 하나입니다.
+
+| 환경 변수 | 의미 |
+|---|---|
+| `AIRFLOW_MGMT_ROOT` | `airflow_mgmt/` 절대 경로 (auto-detect 실패 시 override) |
+
+추가로 `scripts/ftp_download_sample.py`만 사용하는 변수가 하나 더 있습니다.
+
+| 환경 변수 | 의미 |
+|---|---|
+| `AIRFLOW_MGMT_SCRATCH_ROOT` | task 실행 중 다운로드, 임시 파일 등을 둘 writable scratch 경로 |
+
+두 값 모두 Airflow 내장 설정이나 Airflow UI의 Variables가 아니라 OS 환경 변수입니다.
+`os.getenv()`로 읽기 때문에 `.env` 파일을 repo에 만든다고 자동으로 적용되지 않습니다.
+로컬에서는 shell에서 직접 설정하고 (`$env:AIRFLOW_MGMT_ROOT="..."` PowerShell,
+`export AIRFLOW_MGMT_ROOT=...` bash), 운영 Airflow에서는 scheduler, dag-processor,
+worker 프로세스가 뜰 때 해당 환경 변수가 들어가도록 플랫폼 설정에 반영합니다.
+
+`AIRFLOW_MGMT_ROOT`는 `dags/`가 아니라 그 부모인 `airflow_mgmt/`를 가리켜야 합니다.
+auto-detect는 `__file__`에서 위로 올라가며 이름이 `airflow_mgmt`인 폴더를 찾는
+방식이므로, 부모 디렉터리에 그 이름이 없는 환경에서만 env 변수가 필요합니다.
+
+업무 DAG에서 repo-local package를 가져와야 한다면 파일 상단에 다음 stub을 둡니다.
+
+```python
+import os, sys
+from pathlib import Path
+
+# ── sys.path bootstrap ──────────────────────────────────────────────────────
+ROOT_DIR = Path(os.getenv("AIRFLOW_MGMT_ROOT") or next(
+    (str(p) for p in Path(__file__).resolve().parents if p.name == "airflow_mgmt"),
+    "",
+)).resolve()
+if not ROOT_DIR.is_dir():
+    raise RuntimeError("Cannot find airflow_mgmt root. Set AIRFLOW_MGMT_ROOT.")
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+# ────────────────────────────────────────────────────────────────────────────
+
+from minio_handler import MinioObject       # noqa: E402
+from utils.orders import daily_summary      # noqa: E402
+```
+
+이 stub이 필요한 이유는 dag-processor가 각 DAG 파일을 **package의 일부가 아닌
+top-level script로 parse**하기 때문입니다. `dags/`만 sys.path에 들어가는
+환경에서는 `airflow_mgmt/` root를 직접 추가해야 `minio_handler`, `utils` 같은
+top-level 이름으로 import할 수 있습니다.
+
+stub을 entry-point 파일마다 복사하는 것은 의도된 패턴입니다. helper 모듈로
+factor out하면 그 helper 자체를 import하는 데 또 chicken-and-egg가 생깁니다.
+9줄을 매 파일에 두는 편이 학습 곡선과 deployment 양쪽에서 더 단순합니다.
+
+## scratch 경로 규칙
+
+task가 생성하는 다운로드 파일, 변환 중간 결과, 임시 payload는 git checkout 아래에
+바로 쓰지 않습니다. Airflow worker에서 git mount는 보통 read-only이기 때문입니다.
+`scripts/ftp_download_sample.py`의 `_scratch_root()` helper가 이 분기를 담당합니다.
+
+우선순위는 다음과 같습니다.
+
+1. `AIRFLOW_MGMT_SCRATCH_ROOT`가 있으면 그 경로를 사용합니다.
+2. Airflow 런타임으로 보이면 OS temp 아래 `airflow_mgmt`를 사용합니다.
+   판단 기준은 `AIRFLOW_HOME`, `AIRFLOW_CTX_DAG_ID`,
+   `AIRFLOW__CORE__DAGS_FOLDER`, 또는 cwd의 `/opt/airflow`, `/ops/airflow`입니다.
+3. 그 외 로컬 실행에서는 `ROOT_DIR/scratch`를 사용합니다.
+
+다른 script가 동일한 scratch 로직이 필요해지면 `_scratch_root()`를 그쪽에도
+복사하거나 공용 helper로 분리합니다. 현재는 사용처가 한 곳뿐이라 inline 상태로
+두고 있습니다.
+
+## 얇은 DAG 예시
+
+아래 예시는 같은 DAG 파일 상단에서 위의 `ROOT_HINT` / `bootstrap_sys_path()` prelude가
+이미 실행되었다고 가정합니다.
 
 ```python
 from airflow.sdk import dag, task
 
-@task.virtualenv(
-    requirements=["pandas==1.5.3"],
-    system_site_packages=False,
+@dag(
+    dag_id="orders_daily_summary",
+    schedule=None,
+    catchup=False,
+    tags=["orders"],
 )
-def transform_with_old_pandas(rows: list[dict]) -> dict:
-    import pandas as pd
-    df = pd.DataFrame(rows)
-    return df.describe().to_dict()
+def orders_daily_summary():
+    @task
+    def summarize(rows: list[dict]) -> dict[str, float | int]:
+        from utils.orders import daily_summary, parse_orders
+
+        return daily_summary(parse_orders(rows))
+
+    summarize([])
+
+orders_daily_summary()
 ```
 
-The function body runs in a fresh venv each task run. Inputs and outputs
-must be picklable. First run is slow (builds the venv); subsequent runs
-reuse the cached venv.
+DAG 파일에는 task의 경계와 데이터 흐름만 남기고, 검증 규칙과 계산 로직은
+`utils/orders.py`처럼 Airflow와 분리된 파일에 둡니다.
 
-### `BashOperator` example (vendor script)
+## 피해야 할 패턴
 
-```python
-from airflow.providers.standard.operators.bash import BashOperator
+1. 하나의 `@task` 안에 수백 줄의 업무 로직을 넣는 방식.
+2. 직접 관리하는 Python 코드를 `BashOperator("python my_job.py")`로 우회 실행하는 방식.
+3. DAG 파일마다 서버 절대 경로를 `sys.path.append("/some/server/path")`로 박는 방식.
+4. DAG 파일에서 `from .utils import ...` 같은 상대 import를 쓰는 방식.
+5. `utils/` helper가 `airflow.*`를 import하도록 만드는 방식.
 
-run_vendor_etl = BashOperator(
-    task_id="run_vendor_etl",
-    bash_command="python /opt/vendor/etl.py --date {{ ds }}",
-)
-```
+## 검증 명령
 
-Trade-offs you accept: no Python return value via XCom (only the last
-stdout line), tracebacks become subprocess stderr, and Airflow can't
-introspect what failed beyond exit code.
+문서와 코드를 바꾼 뒤에는 `airflow_mgmt/`에서 다음 명령을 실행합니다.
 
----
-
-## Anti-patterns
-
-1. **Inlining 200 lines inside one `@task`.** Unreviewable, and you can't
-   unit-test the logic without instantiating the DAG.
-
-2. **`BashOperator(bash_command="python my_etl.py")` when `my_etl.py` is
-   your own code.** You lose XCom return values, lose proper tracebacks,
-   and Airflow can't introspect the failure. Import the function and call
-   it from `@task` instead.
-
-3. **Putting helpers in a sibling folder of `dags/`** (e.g.
-   `airflow_mgmt/util/`). Your platform git-registers `dags/` only —
-   anything outside is invisible in production. Subpackages of `dags/`
-   are the only safe place.
-
-4. **`sys.path.append(...)` at the top of a DAG file.** Brittle, hides
-   the dependency, and surprises the next maintainer. Use a subpackage
-   under `dags/` instead — it's importable for free.
-
-5. **Relative imports inside a DAG file** (`from .util.orders import ...`).
-   The dag-processor loads each DAG file as a top-level script, not as
-   part of a package, so relative imports fail and the DAG silently
-   disappears from the UI. Use absolute: `from util.orders import ...`.
-
-6. **Reaching into Airflow internals from `util/`.** If `util/orders.py`
-   imports `airflow`, you've coupled your business logic to Airflow's
-   release cadence. Keep the helper layer Airflow-free; let the DAG
-   layer adapt between Airflow's API and your pure functions.
-
----
-
-## Verifying the split
-
-After extracting, check both halves still work independently:
-
-```bash
-# 1. Helpers run on their own (no Airflow needed in this venv)
+```powershell
 python -m pytest tests/test_orders_lib.py -v
-
-# 2. DAG still parses (catches missing imports, typos)
 python -m pytest tests/test_dag_integrity.py -v
-
-# 3. Full quick check
-python scripts/validate_dags.py
+python scripts\validate_dags.py
 ```
 
-If the helper tests pass but DAG integrity fails, the split itself is
-fine — you have a typo in the DAG file's imports or wiring. If helper
-tests fail to even collect, your `from util.X import Y` path is wrong
-(check `dags/util/__init__.py` exists and `tests/conftest.py` is putting
-`dags/` on `sys.path`).
+`test_dag_integrity.py`와 `scripts/validate_dags.py`는 Airflow scheduler를 띄우지 않고
+DagBag으로 DAG import만 검증합니다. import error가 있으면 운영 UI에서 DAG가 보이지
+않는 문제를 배포 전에 잡을 수 있습니다.

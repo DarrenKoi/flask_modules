@@ -22,10 +22,10 @@ it. Copy into dags/<topic>/ and rename when you adapt it.
 """
 
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from platform import system
 
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import DAG, dag, task
@@ -33,18 +33,23 @@ from airflow.sdk import DAG, dag, task
 log = logging.getLogger(__name__)
 
 
-def _root_dir() -> Path:
-    if "/opt/airflow" in str(Path.cwd()):
-        return Path("/opt/airflow/dags/airflow_repo.git/skewnono-scheduler1")
-    if system() == "Windows":
-        return Path("F:/skewnono")
-    return Path("/project/workSpace")
-
-
-ROOT_DIR = _root_dir()
+# ── sys.path bootstrap ──────────────────────────────────────────────────────
+# Find airflow_mgmt/ on disk and put it on sys.path so repo-local packages
+# (scripts/, minio_handler/, utils/, ...) become importable as top-level names.
+# AIRFLOW_MGMT_ROOT env var overrides auto-detect — set it on Airflow workers
+# if the parent walk can't find the airflow_mgmt directory.
+ROOT_DIR = Path(os.getenv("AIRFLOW_MGMT_ROOT") or next(
+    (str(p) for p in Path(__file__).resolve().parents if p.name == "airflow_mgmt"),
+    "",
+)).resolve()
+if not ROOT_DIR.is_dir():
+    raise RuntimeError("Cannot find airflow_mgmt root. Set AIRFLOW_MGMT_ROOT.")
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+# ────────────────────────────────────────────────────────────────────────────
 
+# Repo-local imports go AFTER the bootstrap. `scripts/` is now importable as
+# a top-level package because airflow_mgmt/ is on sys.path.
 from scripts.ftp_download_sample import collect_logs  # noqa: E402
 
 

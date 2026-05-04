@@ -2,16 +2,30 @@
 
 A learning + testing sandbox for Apache Airflow 3.1.8 DAGs.
 
-The `dags/` folder is what you'll point Bitbucket at when registering the repo
-with your company's Airflow platform. Everything else (tests, docs) is for
-local development and never deployed.
+The company Airflow platform references this git repo, but the worker may not
+put the repo checkout on `sys.path` by default. DAGs and task helpers carry a
+small bootstrap stub at the top of the file that locates the `airflow_mgmt/`
+directory and inserts it into `sys.path` before importing repo-local packages
+such as `utils` or `minio_handler`. See `docs/sys_path_bootstrap.md`.
+
+Optional environment variables:
+
+- `AIRFLOW_MGMT_ROOT`: absolute path to the checked-out `airflow_mgmt/` folder.
+  Set this on the Airflow worker if the parent-walk can't find the directory
+  (e.g. the repo is mounted at a path that isn't an ancestor of the DAG file).
+- `AIRFLOW_MGMT_SCRATCH_ROOT`: writable runtime scratch folder for downloads.
+  Used by `scripts/ftp_download_sample.py`. Defaults to `/tmp/airflow_mgmt/`
+  on Airflow workers and `airflow_mgmt/scratch/` for local development.
+
+Never write task files into the git checkout. Use the scratch root and remove
+per-run folders after the task finishes.
 
 ## Layout
 
 ```
 airflow_mgmt/
 ├── dags/                       # ← register THIS folder with your Airflow platform
-│   ├── util/                   # cross-topic helpers (pure Python, reusable across tasks)
+│   ├── utils/                  # cross-topic helpers (pure Python, reusable across tasks)
 │   │   ├── orders.py
 │   │   └── minio_handler/      # vendored from project root for use in DAGs
 │   ├── ftp_ingest/             # topic: download files from FTP servers
@@ -71,7 +85,7 @@ You don't deploy from here. The flow is:
 
 1. Push this repo to Bitbucket.
 2. Register the Bitbucket URL in your company's Airflow platform.
-3. Airflow's **dag-processor** will pull the `dags/` folder and parse each file.
-4. Anything that imports cleanly shows up in the UI.
+3. Airflow's **dag-processor** will pull or mount the repo and parse DAG files.
+4. Anything that imports cleanly after the runtime path bootstrap shows up in the UI.
 
 This is why DAG integrity tests matter: a broken import = invisible DAG.

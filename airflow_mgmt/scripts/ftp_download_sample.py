@@ -7,7 +7,7 @@ Two filesystem locations, two purposes:
   - ROOT_DIR     → where the code lives (sys.path target). On Airflow this
                    is the read-only git mount, so we never write here.
   - SCRATCH_ROOT → where we write runtime files (downloads, working data).
-                   On Airflow this is /tmp; on dev boxes it's a subdir of
+                   On Airflow this defaults under /tmp; on dev boxes it's a subdir of
                    ROOT_DIR so the files stay inspectable.
 
 Conflating these two is the classic "PermissionError: cannot mkdir under
@@ -19,43 +19,53 @@ working files; without explicit cleanup, downloads accumulate on the worker.
 """
 
 import asyncio
+import os
 import shutil
 import sys
 import tempfile
 import uuid
 from pathlib import Path
-from platform import system
 from typing import TypedDict
 
 
-def _root_dir() -> Path:
-    if "/opt/airflow" in str(Path.cwd()):
-        return Path("/opt/airflow/dags/airflow_repo.git/skewnono-scheduler1")
-    if system() == "Windows":
-        return Path("F:/skewnono")
-    return Path("/project/workSpace")
+# ── sys.path bootstrap ──────────────────────────────────────────────────────
+# Find airflow_mgmt/ on disk and put it on sys.path so repo-local packages
+# (minio_handler/, utils/, ...) become importable as top-level names.
+# AIRFLOW_MGMT_ROOT env var overrides auto-detect — set it on Airflow workers
+# if the parent walk can't find the airflow_mgmt directory.
+ROOT_DIR = Path(os.getenv("AIRFLOW_MGMT_ROOT") or next(
+    (str(p) for p in Path(__file__).resolve().parents if p.name == "airflow_mgmt"),
+    "",
+)).resolve()
+if not ROOT_DIR.is_dir():
+    raise RuntimeError("Cannot find airflow_mgmt root. Set AIRFLOW_MGMT_ROOT.")
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+# ────────────────────────────────────────────────────────────────────────────
 
 
 def _scratch_root() -> Path:
-    """Writable scratch directory for runtime data.
+    """Writable runtime dir. Never under ROOT_DIR on Airflow (read-only mount).
 
-    On the Airflow worker, ROOT_DIR is the git mount and is not writable
-    by the airflow user — we use the OS temp dir (/tmp on Linux) instead.
-    On dev boxes, we keep scratch under ROOT_DIR so files are inspectable
-    in the same folder layout you already have open.
+    Order: AIRFLOW_MGMT_SCRATCH_ROOT env wins; else /tmp/airflow_mgmt on
+    Airflow workers; else ROOT_DIR/scratch for local dev (inspectable).
     """
-    if "/opt/airflow" in str(Path.cwd()):
-        return Path(tempfile.gettempdir())
+    env = os.getenv("AIRFLOW_MGMT_SCRATCH_ROOT")
+    if env:
+        return Path(env).expanduser().resolve()
+    in_airflow = (
+        any(os.getenv(n) for n in ("AIRFLOW_HOME", "AIRFLOW_CTX_DAG_ID", "AIRFLOW__CORE__DAGS_FOLDER"))
+        or any(s in Path.cwd().as_posix() for s in ("/opt/airflow", "/ops/airflow"))
+    )
+    if in_airflow:
+        return Path(tempfile.gettempdir()).resolve() / "airflow_mgmt"
     return ROOT_DIR / "scratch"
 
 
-ROOT_DIR = _root_dir()
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
 SCRATCH_ROOT = _scratch_root()
-SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
 
+# Repo-local import: airflow_mgmt/minio_handler/ is importable as a top-level
+# package now that airflow_mgmt/ is on sys.path.
 from minio_handler import MinioObject  # noqa: E402
 
 
