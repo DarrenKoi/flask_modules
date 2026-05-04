@@ -2,11 +2,11 @@
 diagnostics / probe_util_import_dag.
 
 Verifies the cross-platform sys.path bootstrap pattern: pick a per-host
-root_dir and insert it into sys.path so sibling packages
-(util, ftp_ingest, ...) resolve as `from util.X import Y`.
+root_dir (the parent of dags/) and insert it into sys.path so top-level
+packages (utils, minio_handler, ...) resolve.
 
 Hosts:
-- Airflow worker  → /opt/airflow/dags/airflow_repo.git/skewnono-scheduler1/dags
+- Airflow worker  → /opt/airflow/dags/airflow_repo.git/skewnono-scheduler1
 - Windows dev     → F:/skewnono
 - Linux dev       → /project/workSpace
 - Other / Darwin  → derived from __file__
@@ -26,13 +26,14 @@ from airflow.sdk import dag, task
 
 def _root_dir() -> Path:
     if "/opt/airflow/" in str(Path(__file__).resolve()):
-        return Path("/opt/airflow/dags/airflow_repo.git/skewnono-scheduler1/dags")
+        return Path("/opt/airflow/dags/airflow_repo.git/skewnono-scheduler1")
     name = system()
     if name == "Windows":
         return Path("F:/skewnono")
     if name == "Linux":
         return Path("/project/workSpace")
-    return Path(__file__).resolve().parents[1]
+    # Darwin / unknown — derive from this file (dags/diagnostics/x.py → airflow_mgmt/)
+    return Path(__file__).resolve().parents[2]
 
 
 ROOT_DIR = _root_dir()
@@ -42,7 +43,7 @@ if str(ROOT_DIR) not in sys.path:
 
 @dag(
     dag_id="diagnostics_probe_util_import",
-    description="Verify cross-platform sys.path bootstrap exposes vendored packages",
+    description="Verify cross-platform sys.path bootstrap exposes top-level packages",
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
@@ -66,7 +67,7 @@ def probe_util_import():
             print(f"  {entry}")
 
         print("\n# Imports:")
-        for name in ("util", "util.orders", "util.minio_handler"):
+        for name in ("utils", "utils.orders", "minio_handler"):
             print(f"  import {name}")
             try:
                 module = __import__(name, fromlist=["__file__"])

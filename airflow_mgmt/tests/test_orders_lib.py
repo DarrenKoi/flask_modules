@@ -1,14 +1,14 @@
 """
-Unit tests for dags/util/orders.py.
+Unit tests for utils/orders.py.
 
-The whole point of extracting logic into `util/` is that we can test it
-without spinning up Airflow. These tests just `import util.orders` and
+The whole point of extracting logic into `utils/` is that we can test it
+without spinning up Airflow. These tests just `import utils.orders` and
 exercise pure functions.
 """
 
 from datetime import date
 
-from util.orders import (
+from utils.orders import (
     Order,
     customer_totals,
     daily_summary,
