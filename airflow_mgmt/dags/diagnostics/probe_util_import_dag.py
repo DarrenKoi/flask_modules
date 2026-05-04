@@ -1,11 +1,21 @@
 """
 diagnostics / probe_util_import_dag.
 
-Verifies the cross-platform sys.path bootstrap pattern used across this
-project: pick a per-OS root_dir and insert it into sys.path so sibling
-packages (util, ftp_ingest, ...) resolve as `from util.X import Y`.
+Verifies the cross-platform sys.path bootstrap pattern: pick a per-host
+root_dir and insert it into sys.path so sibling packages
+(util, ftp_ingest, ...) resolve as `from util.X import Y`.
+
+Hosts:
+- Airflow worker  → /opt/airflow/dags/airflow_repo.git/skewnono-scheduler1/dags
+- Windows dev     → F:/skewnono
+- Linux dev       → /project/workSpace
+- Other / Darwin  → derived from __file__
+
+Airflow is detected via the AIRFLOW_HOME env var, which the platform
+sets on every worker.
 """
 
+import os
 import sys
 import traceback
 from datetime import datetime
@@ -16,12 +26,13 @@ from airflow.sdk import dag, task
 
 
 def _root_dir() -> Path:
+    if os.environ.get("AIRFLOW_HOME"):
+        return Path("/opt/airflow/dags/airflow_repo.git/skewnono-scheduler1/dags")
     name = system()
     if name == "Windows":
         return Path("F:/skewnono")
     if name == "Linux":
         return Path("/project/workSpace")
-    # Darwin / unknown — fall back to this DAG file's local dags folder
     return Path(__file__).resolve().parents[1]
 
 
@@ -42,7 +53,10 @@ def probe_util_import():
     @task
     def probe() -> None:
         print(f"# platform.system() = {system()!r}")
-        print(f"# ROOT_DIR = {ROOT_DIR}  (exists={ROOT_DIR.exists()})")
+        print(f"# AIRFLOW_HOME      = {os.environ.get('AIRFLOW_HOME')!r}")
+        print(f"# __file__          = {__file__}")
+        print(f"# ROOT_DIR          = {ROOT_DIR}  (exists={ROOT_DIR.exists()})")
+
         if ROOT_DIR.exists():
             print("# Top-level entries in ROOT_DIR:")
             for child in sorted(ROOT_DIR.iterdir()):
