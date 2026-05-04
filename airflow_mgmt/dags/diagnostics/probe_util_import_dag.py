@@ -11,11 +11,10 @@ Hosts:
 - Linux dev       → /project/workSpace
 - Other / Darwin  → derived from __file__
 
-Airflow is detected via the AIRFLOW_HOME env var, which the platform
-sets on every worker.
+Airflow is detected by checking whether this file's resolved path
+contains "/opt/airflow/" — the platform deploys clones under that root.
 """
 
-import os
 import sys
 import traceback
 from datetime import datetime
@@ -26,7 +25,7 @@ from airflow.sdk import dag, task
 
 
 def _root_dir() -> Path:
-    if os.environ.get("AIRFLOW_HOME"):
+    if "/opt/airflow/" in str(Path(__file__).resolve()):
         return Path("/opt/airflow/dags/airflow_repo.git/skewnono-scheduler1/dags")
     name = system()
     if name == "Windows":
@@ -53,7 +52,6 @@ def probe_util_import():
     @task
     def probe() -> None:
         print(f"# platform.system() = {system()!r}")
-        print(f"# AIRFLOW_HOME      = {os.environ.get('AIRFLOW_HOME')!r}")
         print(f"# __file__          = {__file__}")
         print(f"# ROOT_DIR          = {ROOT_DIR}  (exists={ROOT_DIR.exists()})")
 
