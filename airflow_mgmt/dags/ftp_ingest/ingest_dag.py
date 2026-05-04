@@ -58,32 +58,30 @@ def ftp_ingest_worker():
     @task
     def download_and_upload(source: FtpSource) -> dict:
         conn = BaseHook.get_connection(source["conn_id"])
-        local_path = (
-            Path(tempfile.gettempdir())
-            / "ftp_ingest"
-            / source["name"]
-            / Path(source["remote_path"]).name
-        )
 
-        download_meta = download_to_path(
-            host=conn.host,
-            user=conn.login,
-            password=conn.password,
-            port=conn.port or 21,
-            remote_path=source["remote_path"],
-            local_path=local_path,
-        )
+        # TemporaryDirectory cleans up on every exit path — success, exception,
+        # or worker SIGTERM mid-task. Replaces a manual unlink that only ran on
+        # the happy path.
+        with tempfile.TemporaryDirectory(prefix=f"ftp_ingest_{source['name']}_") as tmp:
+            local_path = Path(tmp) / Path(source["remote_path"]).name
 
-        storage = MinioObject(bucket=MINIO_BUCKET)
-        storage.upload(key=source["s3_key"], file_path=local_path)
+            download_meta = download_to_path(
+                host=conn.host,
+                user=conn.login,
+                password=conn.password,
+                port=conn.port or 21,
+                remote_path=source["remote_path"],
+                local_path=local_path,
+            )
 
-        local_path.unlink(missing_ok=True)
+            storage = MinioObject(bucket=MINIO_BUCKET)
+            storage.upload(key=source["s3_key"], file_path=local_path)
 
-        return {
-            **download_meta,
-            "bucket": MINIO_BUCKET,
-            "s3_key": source["s3_key"],
-        }
+            return {
+                **download_meta,
+                "bucket": MINIO_BUCKET,
+                "s3_key": source["s3_key"],
+            }
 
     download_and_upload.expand(source=SOURCES)
 
