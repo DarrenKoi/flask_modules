@@ -13,9 +13,12 @@
   URL / multipart upload / 비동기 처리 / CORS / 보안 함정
 - `usage.md`: `minio_handler` wrapper 자체의 설정 방법, CRUD 예제, presigned
   URL, lifecycle wrapper, 자주 하는 실수 정리
+- `serialization.md`: `pandas.DataFrame` ↔ Parquet (`put_dataframe` /
+  `get_dataframe`) 그리고 PNG / JPEG / WebP / TIFF 이미지를 `PIL.Image` /
+  로컬 파일과 주고받는 패턴
 
-처음 보는 거라면 `concepts.md` → `usage.md` → 필요에 따라 `data_management.md`
-혹은 `web_integration.md` 순으로 읽으면 좋습니다.
+처음 보는 거라면 `concepts.md` → `usage.md` → 필요에 따라 `serialization.md`
+/ `data_management.md` / `web_integration.md` 순으로 읽으면 좋습니다.
 
 `minio_handler`는 `minio` Python SDK 위에 얇게 올린 wrapper입니다. bucket /
 object key prefix를 instance 단위로 보관해 주고, 자주 쓰는 read / write /

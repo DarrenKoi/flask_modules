@@ -123,6 +123,36 @@ class MinioObject(MinioBase):
             response.close()
             response.release_conn()
 
+    def put_dataframe(
+        self,
+        key: str,
+        df: Any,
+        *,
+        bucket: str | None = None,
+        metadata: dict[str, str] | None = None,
+    ) -> Any:
+        """Serialize a pandas DataFrame to parquet (pyarrow) and upload."""
+
+        buf = io.BytesIO()
+        df.to_parquet(buf, engine="pyarrow")
+        return self.put(
+            key,
+            buf.getvalue(),
+            bucket=bucket,
+            content_type="application/vnd.apache.parquet",
+            metadata=metadata,
+        )
+
+    def get_dataframe(self, key: str, *, bucket: str | None = None) -> Any:
+        """Download a parquet object and return it as a pandas DataFrame."""
+
+        import pandas as pd
+
+        return pd.read_parquet(
+            io.BytesIO(self.get(key, bucket=bucket)),
+            engine="pyarrow",
+        )
+
     def download(
         self,
         key: str,
