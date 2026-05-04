@@ -59,8 +59,12 @@ def template_virtualenv_task():
             "redis==5.0.8",
         ],
         system_site_packages=False,
+        # Cache key = hash(requirements + python_version + system_site_packages).
+        # Pinned versions above mean repeated runs hit the same cached venv
+        # (cold start ~30s → warm ~1s). Path is shared across all DAGs on the
+        # worker — that's intentional, identical requirements = same venv.
+        venv_cache_path="/opt/airflow/venv_cache",
         # python_version="3.11",   # uncomment to pin; defaults to worker's python
-        # venv_cache_path="/opt/airflow/venv_cache",  # speeds up reuse if set
     )
     def probe_os_and_redis(os_cfg: dict, redis_cfg: dict) -> dict:
         # ALL imports must be inside this function — they run in the venv,
