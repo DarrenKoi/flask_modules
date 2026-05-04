@@ -83,14 +83,14 @@ http://localhost:8080.
 To trigger a DAG from the CLI:
 
 ```bash
-airflow dags trigger example_01_hello_world
-airflow dags list-runs --dag-id example_01_hello_world
+airflow dags trigger ftp_ingest_worker
+airflow dags list-runs --dag-id ftp_ingest_worker
 ```
 
 To run a DAG **without the scheduler at all** (one-shot, in-process):
 
 ```bash
-airflow dags test example_02_taskflow_etl 2026-01-01
+airflow dags test ftp_ingest_worker 2026-01-01
 ```
 
 That last command is the closest you'll get to "just run my DAG and show me
@@ -99,7 +99,7 @@ the output" — no UI required.
 To exercise a single task in the foreground (fastest debug loop):
 
 ```bash
-airflow tasks test example_02_taskflow_etl extract 2026-01-01
+airflow tasks test ftp_ingest_worker download_and_upload 2026-01-01
 ```
 
 ---

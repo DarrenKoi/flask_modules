@@ -1,7 +1,7 @@
 """
 Shared pytest setup for DAG tests.
 
-Adds the dags/ folder to sys.path so tests can `import example_01_hello_world`
+Adds the dags/ folder to sys.path so tests can import top-level DAG modules
 the same way Airflow's dag-processor does at runtime.
 """
 

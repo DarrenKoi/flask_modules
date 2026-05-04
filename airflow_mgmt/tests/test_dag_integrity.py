@@ -46,24 +46,6 @@ def test_dags_loaded(dag_bag: DagBag) -> None:
     assert len(dag_bag.dags) > 0, "No DAGs were discovered in dags/"
 
 
-@pytest.mark.parametrize(
-    "expected_dag_id",
-    [
-        "example_01_hello_world",
-        "example_02_taskflow_etl",
-        "example_03_bash_operator",
-        "example_04_branching",
-        "example_05_scheduled_etl",
-        "example_06_xcom_and_params",
-    ],
-)
-def test_specific_dag_present(dag_bag: DagBag, expected_dag_id: str) -> None:
-    """Each example DAG we expect to ship should be discoverable by id."""
-    assert expected_dag_id in dag_bag.dags, (
-        f"DAG '{expected_dag_id}' not found. Discovered: {sorted(dag_bag.dags)}"
-    )
-
-
 def test_every_dag_has_owner_and_tags(dag_bag: DagBag) -> None:
     """
     Soft hygiene check — every DAG should declare an owner (default_args)

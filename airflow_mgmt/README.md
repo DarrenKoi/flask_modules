@@ -20,15 +20,8 @@ airflow_mgmt/
 │   │   │   └── downloader.py   # pure-Python ftplib wrapper
 │   │   ├── ingest_dag.py       # @task: FTP → MinIO upload (runs on worker)
 │   │   └── ingest_kpo_dag.py   # KubernetesPodOperator version
-│   ├── diagnostics/            # topic: inspect the Airflow runtime
-│   │   └── inspect_packages_dag.py  # list installed Python packages
-│   ├── example_01_hello_world.py
-│   ├── example_02_taskflow_etl.py
-│   ├── example_03_bash_operator.py
-│   ├── example_04_branching.py
-│   ├── example_05_scheduled_etl.py
-│   ├── example_06_xcom_and_params.py
-│   └── example_07_external_module.py   # imports from util/ — keeps DAGs thin
+│   └── diagnostics/            # topic: inspect the Airflow runtime
+│       └── inspect_packages_dag.py  # list installed Python packages
 ├── tests/                      # pytest / unittest — run anywhere, no Airflow server
 │   ├── conftest.py
 │   ├── test_dag_integrity.py

@@ -7,8 +7,9 @@ business logic can't be unit-tested without instantiating a DAG.
 
 The fix: **DAG file = orchestration. Helper module = pure Python logic.**
 
-See `dags/example_07_external_module.py` and `dags/util/orders.py` for a
-working reference.
+See `dags/ftp_ingest/ingest_dag.py` (DAG: schedule + `@task` wiring) and
+`dags/ftp_ingest/lib/downloader.py` (pure ftplib helper, no airflow import)
+for a working reference.
 
 ---
 
@@ -18,9 +19,9 @@ Three files, three roles:
 
 | File | Role | Imports `airflow`? |
 |---|---|---|
-| `dags/util/orders.py` | Pure business logic — parse, filter, transform | No |
-| `dags/example_07_external_module.py` | DAG: schedule + `@task` wrappers + wiring | Yes |
-| `tests/test_orders_lib.py` | Unit tests on the helpers | No |
+| `dags/ftp_ingest/lib/downloader.py` | Pure business logic — `ftplib` wrapper, no Airflow | No |
+| `dags/ftp_ingest/ingest_dag.py` | DAG: schedule + `@task` wrappers + wiring | Yes |
+| `tests/test_ftp_downloader.py` | Unit tests on the helper | No |
 
 The DAG file stays a one-page overview. The "long" logic lives next door
 and is testable with plain `pytest`, no Airflow needed.
@@ -30,11 +31,15 @@ and is testable with plain `pytest`, no Airflow needed.
 ```
 airflow_mgmt/
 └── dags/
-    ├── util/                         ← helper subpackage (reusable across tasks)
+    ├── util/                         ← cross-topic helpers (reusable everywhere)
     │   ├── __init__.py
-    │   ├── orders.py                 ← pure functions, no airflow import
-    │   └── transforms.py             ← add more as the project grows
-    └── example_07_external_module.py ← thin DAG, imports from util.orders
+    │   └── orders.py                 ← pure functions, no airflow import
+    └── ftp_ingest/                   ← topic package: DAG + topic-local helpers
+        ├── __init__.py
+        ├── lib/
+        │   └── downloader.py         ← pure ftplib wrapper
+        ├── sources.py                ← config registry
+        └── ingest_dag.py             ← thin DAG, imports from lib + util
 ```
 
 ### How the imports resolve
@@ -43,8 +48,9 @@ Airflow's dag-processor adds the `dags/` folder to `sys.path` automatically.
 That makes any subpackage of `dags/` importable as a top-level name:
 
 ```python
-# inside dags/example_07_external_module.py
-from util.orders import parse_orders, daily_summary
+# inside dags/ftp_ingest/ingest_dag.py
+from ftp_ingest.lib.downloader import download_to_path
+from util.minio_handler import MinioObject
 ```
 
 `tests/conftest.py` does the same trick for pytest:
