@@ -9,10 +9,13 @@ The task prints results to its log so they show up in the Airflow UI
 (Graph → task → Logs).
 """
 
+import logging
 from datetime import datetime
 from importlib.metadata import distributions
 
 from airflow.sdk import dag, task
+
+log = logging.getLogger(__name__)
 
 
 @dag(
@@ -30,9 +33,9 @@ def inspect_packages():
             ((dist.metadata["Name"] or "<unknown>").strip(), dist.version)
             for dist in distributions()
         )
-        print(f"# {len(packages)} package(s) installed:")
+        log.info("%d package(s) installed:", len(packages))
         for name, version in packages:
-            print(f"  {name}=={version}")
+            log.info("  %s==%s", name, version)
 
     list_packages()
 

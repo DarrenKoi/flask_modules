@@ -15,13 +15,15 @@ contains "/opt/airflow" — the worker process runs under that root,
 dev hosts (Windows / Linux at /project/workSpace) don't.
 """
 
+import logging
 import sys
-import traceback
 from datetime import datetime
 from pathlib import Path
 from platform import system
 
 from airflow.sdk import dag, task
+
+log = logging.getLogger(__name__)
 
 
 def _root_dir() -> Path:
@@ -48,31 +50,30 @@ if str(ROOT_DIR) not in sys.path:
 def probe_util_import():
     @task
     def probe() -> None:
-        print(f"# platform.system() = {system()!r}")
-        print(f"# Path.cwd()        = {Path.cwd()}")
-        print(f"# __file__          = {__file__}")
-        print(f"# ROOT_DIR          = {ROOT_DIR}  (exists={ROOT_DIR.exists()})")
+        log.info("platform.system() = %r", system())
+        log.info("Path.cwd()        = %s", Path.cwd())
+        log.info("__file__          = %s", __file__)
+        log.info("ROOT_DIR          = %s  (exists=%s)", ROOT_DIR, ROOT_DIR.exists())
 
         if ROOT_DIR.exists():
-            print("# Top-level entries in ROOT_DIR:")
+            log.info("Top-level entries in ROOT_DIR:")
             for child in sorted(ROOT_DIR.iterdir()):
                 kind = "DIR " if child.is_dir() else "FILE"
-                print(f"  {kind} {child.name}")
+                log.info("  %s %s", kind, child.name)
 
-        print("\n# sys.path:")
+        log.info("sys.path:")
         for entry in sys.path:
-            print(f"  {entry}")
+            log.info("  %s", entry)
 
-        print("\n# Imports:")
+        log.info("Imports:")
         for name in ("utils", "utils.orders", "minio_handler"):
-            print(f"  import {name}")
+            log.info("  import %s", name)
             try:
                 module = __import__(name, fromlist=["__file__"])
             except Exception:
-                print("    FAILED")
-                traceback.print_exc()
+                log.exception("    FAILED")
                 continue
-            print(f"    OK  __file__={getattr(module, '__file__', '<none>')}")
+            log.info("    OK  __file__=%s", getattr(module, "__file__", "<none>"))
 
     probe()
 
