@@ -281,8 +281,10 @@ key로 서명을 만들어 주면, URL을 가진 누구든 만료 전까지 그 
 - 만료 최대 7일 (AWS SigV4 제한, 604,800초)
 - 만료 최소 1초
 - URL 한 개 = method/bucket/key 한 쌍에 한정. listing이나 다른 key는 안 됨
-- 이 wrapper의 default는 `timedelta(days=7)` (최대값). 더 짧게 쓰고 싶으면
-  호출 시 `expires=`를 명시하세요.
+- 이 wrapper의 default:
+  - `presigned_get_url` → `timedelta(days=7)` (SigV4 최대값, 다운로드 링크 공유용)
+  - `presigned_put_url` → `timedelta(minutes=20)` (업로드는 write 권한이라 짧게)
+  더 길거나 짧게 쓰고 싶으면 호출 시 `expires=`를 명시하세요.
 
 ### 다운로드 URL 만들어 공유하기
 

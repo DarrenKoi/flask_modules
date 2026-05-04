@@ -339,7 +339,7 @@ class MinioObject(MinioBase):
         key: str,
         *,
         bucket: str | None = None,
-        expires: timedelta = timedelta(days=7),
+        expires: timedelta = timedelta(minutes=20),
     ) -> str:
         """Return a temporary URL a client can ``PUT`` raw bytes to.
 
@@ -408,7 +408,7 @@ class MinioObject(MinioBase):
 
     def set_expiration(
         self,
-        days: int,
+        days: int = 7,
         *,
         prefix: str | None = None,
         bucket: str | None = None,
