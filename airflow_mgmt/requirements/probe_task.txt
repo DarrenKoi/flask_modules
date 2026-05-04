@@ -1,0 +1,13 @@
+# Requirements for the probe_os_and_redis @task.virtualenv example.
+#
+# Scope: ONLY what the probe function imports inside its body.
+# Do NOT mirror airflow_mgmt/requirements.txt here — that file lists
+# Airflow itself plus dev/test tools, none of which belong in a
+# per-task isolated venv.
+#
+# Each requirements file under this directory corresponds to one
+# @task.virtualenv use case. Different tasks → different files →
+# different cached venvs.
+
+opensearch-py==2.6.0
+redis==5.0.8

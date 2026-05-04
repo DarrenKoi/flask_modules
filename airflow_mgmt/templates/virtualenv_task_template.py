@@ -43,6 +43,26 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 
+def _load_requirements(path: Path) -> list[str]:
+    """Read a pip-style requirements file → list of requirement strings.
+
+    Handles blank lines and `# comment` lines; preserves version pins
+    so the cache key remains deterministic. Errors here surface at DAG
+    parse time, not at first task execution.
+    """
+    return [
+        line.split("#", 1)[0].strip()
+        for line in path.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+# Per-task requirements file lives beside the project, NOT the top-level
+# airflow_mgmt/requirements.txt (that one carries Airflow + dev tools, far
+# too much for an isolated task venv). One file per @task.virtualenv use case.
+PROBE_REQUIREMENTS = _load_requirements(ROOT_DIR / "requirements" / "probe_task.txt")
+
+
 @dag(
     dag_id="template_virtualenv_task",
     description="Template: run a task in an isolated venv with extra pip packages",
@@ -54,15 +74,16 @@ if str(ROOT_DIR) not in sys.path:
 def template_virtualenv_task():
 
     @task.virtualenv(
-        requirements=[
-            "opensearch-py==2.6.0",
-            "redis==5.0.8",
-        ],
+        # Loaded from airflow_mgmt/requirements/probe_task.txt at parse
+        # time, so the cache key is deterministic and edits to that file
+        # invalidate the cache as expected.
+        requirements=PROBE_REQUIREMENTS,
         system_site_packages=False,
         # Cache key = hash(requirements + python_version + system_site_packages).
-        # Pinned versions above mean repeated runs hit the same cached venv
-        # (cold start ~30s → warm ~1s). Path is shared across all DAGs on the
-        # worker — that's intentional, identical requirements = same venv.
+        # Pinned versions in the requirements file mean repeated runs hit the
+        # same cached venv (cold start ~30s → warm ~1s). Path is shared across
+        # all DAGs on the worker — that's intentional, identical requirements
+        # = same venv.
         venv_cache_path="/opt/airflow/venv_cache",
         # python_version="3.11",   # uncomment to pin; defaults to worker's python
     )
