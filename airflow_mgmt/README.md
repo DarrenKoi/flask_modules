@@ -12,12 +12,13 @@ local development and never deployed.
 airflow_mgmt/
 ├── dags/                       # ← register THIS folder with your Airflow platform
 │   ├── lib/                    # cross-topic helpers (pure Python)
-│   │   └── orders.py
+│   │   ├── orders.py
+│   │   └── minio_handler/      # vendored from project root for use in DAGs
 │   ├── ftp_ingest/             # topic: download files from FTP servers
 │   │   ├── sources.py          # config registry (200 entries in prod)
 │   │   ├── lib/
 │   │   │   └── downloader.py   # pure-Python ftplib wrapper
-│   │   ├── ingest_dag.py       # @task version (runs on worker)
+│   │   ├── ingest_dag.py       # @task: FTP → MinIO upload (runs on worker)
 │   │   └── ingest_kpo_dag.py   # KubernetesPodOperator version
 │   ├── diagnostics/            # topic: inspect the Airflow runtime
 │   │   └── inspect_packages_dag.py  # list installed Python packages
