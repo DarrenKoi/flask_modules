@@ -17,13 +17,9 @@ from typing import TypedDict
 
 
 def _root_dir() -> Path:
-    name = system()
-    if name == "Windows":
+    if system() == "Windows":
         return Path("F:/skewnono")
-    if name == "Linux":
-        return Path("/project/workSpace")
-    # Darwin / unknown — derive from this file (airflow_mgmt/scripts/x.py → repo root)
-    return Path(__file__).resolve().parents[2]
+    return Path("/project/workSpace")
 
 
 ROOT_DIR = _root_dir()
