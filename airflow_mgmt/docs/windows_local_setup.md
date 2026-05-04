@@ -1,12 +1,12 @@
 # Running Airflow 3.1.8 locally on Windows
 
 Airflow does **not run natively on Windows** — the scheduler relies on POSIX
-fork semantics. You have three workable options, in increasing order of
-"closeness to production":
+fork semantics. And since your company manages the Airflow platform centrally,
+running your own containerised Airflow stack is **not** an option here. That
+leaves two workable paths:
 
 1. **DAG integrity tests** — pip install + pytest. No scheduler.
 2. **WSL2 + `airflow standalone`** — single-process Airflow inside WSL.
-3. **Docker Compose** — full Airflow stack (the same image your company runs).
 
 Pick the lightest option that answers your current question.
 
@@ -15,7 +15,7 @@ Pick the lightest option that answers your current question.
 ## Option 1 — DAG integrity tests (fastest feedback)
 
 Catches imports, syntax, cycles, and structural bugs. ~80% of pre-deploy
-failures show up here. Works on plain Windows Python with no WSL or Docker.
+failures show up here. Works on plain Windows Python with no WSL.
 
 ```powershell
 cd airflow_mgmt
@@ -33,7 +33,10 @@ python scripts\validate_dags.py
 
 > **Note**: `pip install apache-airflow` on plain Windows Python sometimes
 > chokes on transitive dependencies (e.g. `python-daemon`). If that
-> happens, use Option 2 (WSL) — Airflow supports Linux first-class.
+> happens, use Option 2 (WSL) — Airflow supports Linux first-class. The
+> integrity tests themselves don't actually need Airflow installed when
+> the DAG files only import from `airflow.sdk` / providers that ship pure
+> Python.
 
 ---
 
@@ -93,50 +96,11 @@ airflow dags test example_02_taskflow_etl 2026-01-01
 That last command is the closest you'll get to "just run my DAG and show me
 the output" — no UI required.
 
----
+To exercise a single task in the foreground (fastest debug loop):
 
-## Option 3 — Docker Compose (closest to production)
-
-Use this when you need to test things the standalone mode can't cover:
-multiple workers, sensors, retries-with-backoff timing, the actual API server.
-
-### Prerequisites
-
-- Docker Desktop with the WSL2 backend enabled
-- 4 GB RAM allocated to Docker (Settings → Resources)
-
-### Bring it up
-
-```powershell
-cd airflow_mgmt
-copy .env.example .env
-docker compose up airflow-init     # one-shot DB migrate + create admin
-docker compose up -d               # start scheduler/api-server/dag-processor
+```bash
+airflow tasks test example_02_taskflow_etl extract 2026-01-01
 ```
-
-UI: http://localhost:8080  (user: `airflow`, pass: `airflow`)
-
-The compose file mounts `./dags` into the container, so editing a DAG file
-on Windows updates the running Airflow within seconds (the dag-processor
-re-parses it).
-
-### Tear down
-
-```powershell
-docker compose down       # stop containers, keep DB
-docker compose down -v    # also wipe the postgres volume (start fresh)
-```
-
-### Useful commands inside the container
-
-```powershell
-docker compose exec airflow-scheduler airflow dags list
-docker compose exec airflow-scheduler airflow dags test example_01_hello_world 2026-01-01
-docker compose exec airflow-scheduler airflow tasks test example_02_taskflow_etl extract 2026-01-01
-```
-
-`airflow tasks test` runs a single task in the foreground — fastest way to
-debug one task without triggering the whole DAG.
 
 ---
 
@@ -145,11 +109,11 @@ debug one task without triggering the whole DAG.
 | Situation | Use |
 |---|---|
 | "Will this DAG even load on the company platform?" | Option 1 |
-| "Does my Python logic produce the right output?" | Option 1 (unit test the function) or `airflow dags test` (Option 2/3) |
+| "Does my Python logic produce the right output?" | Option 1 (unit-test the function) or `airflow dags test` (Option 2) |
 | "Does my schedule + retry config work as I expect?" | Option 2 |
-| "I'm using a sensor / trigger / multi-DAG dependency" | Option 3 |
-| "I need to demo this to a teammate" | Option 3 (full UI) |
+| "I'm using a sensor / trigger / multi-DAG dependency" | Option 2 |
 
-The default workflow once you're moving fast: **Option 1 in CI, Option 2 on
-your laptop**, drop down to Option 3 only when something Option 2 can't
-reproduce shows up.
+Default workflow: **Option 1 in CI and on every save, Option 2 on your laptop**
+when you need the scheduler in the loop. Anything you can't reproduce in
+Option 2 has to be tested by deploying to a non-prod folder on the actual
+company Airflow platform.

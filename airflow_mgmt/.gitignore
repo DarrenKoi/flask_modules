@@ -3,10 +3,9 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
+# Local Airflow metadata when running `airflow standalone` in WSL
+.airflow/
 logs/
-plugins/
-config/
-# Local Airflow metadata when running standalone outside docker
 airflow.db
 airflow.cfg
 webserver_config.py
