@@ -174,7 +174,7 @@ class MinioObject(MinioBase):
         key: str,
         *,
         bucket: str | None = None,
-        expires: timedelta = timedelta(hours=1),
+        expires: timedelta = timedelta(days=7),
         response_headers: dict[str, str] | None = None,
         version_id: str | None = None,
     ) -> str:
@@ -200,7 +200,7 @@ class MinioObject(MinioBase):
         key: str,
         *,
         bucket: str | None = None,
-        expires: timedelta = timedelta(hours=1),
+        expires: timedelta = timedelta(days=7),
     ) -> str:
         """Return a temporary URL a client can ``PUT`` raw bytes to.
 
