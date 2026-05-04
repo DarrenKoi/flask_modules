@@ -11,19 +11,33 @@ local development and never deployed.
 ```
 airflow_mgmt/
 ├── dags/                       # ← register THIS folder with your Airflow platform
+│   ├── lib/                    # cross-topic helpers (pure Python)
+│   │   └── orders.py
+│   ├── ftp_ingest/             # topic: download files from FTP servers
+│   │   ├── sources.py          # config registry (200 entries in prod)
+│   │   ├── lib/
+│   │   │   └── downloader.py   # pure-Python ftplib wrapper
+│   │   ├── ingest_dag.py       # @task version (runs on worker)
+│   │   └── ingest_kpo_dag.py   # KubernetesPodOperator version
+│   ├── diagnostics/            # topic: inspect the Airflow runtime
+│   │   └── inspect_packages_dag.py  # list installed Python packages
 │   ├── example_01_hello_world.py
 │   ├── example_02_taskflow_etl.py
 │   ├── example_03_bash_operator.py
 │   ├── example_04_branching.py
 │   ├── example_05_scheduled_etl.py
-│   └── example_06_xcom_and_params.py
+│   ├── example_06_xcom_and_params.py
+│   └── example_07_external_module.py   # imports from lib/ — keeps DAGs thin
 ├── tests/                      # pytest / unittest — run anywhere, no Airflow server
 │   ├── conftest.py
-│   └── test_dag_integrity.py
+│   ├── test_dag_integrity.py
+│   ├── test_orders_lib.py
+│   └── test_ftp_downloader.py
 ├── scripts/
 │   └── validate_dags.py        # quick parse-only check, no scheduler
 ├── docs/
-│   └── windows_local_setup.md  # 2 ways to run Airflow on Windows
+│   ├── windows_local_setup.md  # 2 ways to run Airflow on Windows
+│   └── keeping_dags_thin.md    # extract long Python into helper modules
 └── requirements.txt            # versions matched to your platform
 ```
 
