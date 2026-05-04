@@ -3,14 +3,19 @@
 Runnable standalone (local dev). The same shape drops into an Airflow @task
 unchanged — replace the `__main__` block with a `@task` wrapper.
 
-Key idea: scratch storage lives in `tempfile.TemporaryDirectory`, never in
-an OS-branched constant. Cleanup is guaranteed on every exit path
-(success, exception, SIGTERM, KeyboardInterrupt).
+Key idea: scratch storage lives in a uniquely-named subdir of ROOT_DIR,
+created at the start of the run and removed in a `finally` block. Files
+stay inspectable during the run (useful for debugging) and are gone the
+moment the function returns — success or failure.
+
+Airflow does NOT auto-clean task working files. Without an explicit cleanup,
+downloaded files would accumulate on the worker forever.
 """
 
 import asyncio
+import shutil
 import sys
-import tempfile
+import uuid
 from pathlib import Path
 from platform import system
 from typing import TypedDict
@@ -88,13 +93,24 @@ def upload_results(result: DownloadResult, cwd_folder: Path, bucket: str) -> dic
     return {"uploaded": uploaded, "failed": failed, "ok": len(uploaded), "ng": len(failed)}
 
 
+def cleanup_folder(path: Path) -> None:
+    # Refuse to delete anything outside ROOT_DIR — guards against a caller
+    # accidentally passing ROOT_DIR itself or "/". relative_to() raises
+    # ValueError if `path` is not under ROOT_DIR, and we also reject the
+    # root itself (relative path == ".").
+    resolved = path.resolve()
+    rel = resolved.relative_to(ROOT_DIR.resolve())
+    if rel == Path("."):
+        raise ValueError(f"refusing to remove ROOT_DIR itself: {resolved}")
+    shutil.rmtree(resolved, ignore_errors=True)
+
+
 def collect_logs(ips: list[str]) -> dict:
-    # ignore_cleanup_errors avoids a Windows PermissionError if a handle is
-    # still open at __exit__ — the OS reclaims the dir later anyway.
-    with tempfile.TemporaryDirectory(
-        prefix="recipe_logs_", ignore_cleanup_errors=True
-    ) as tmp:
-        cwd_folder = Path(tmp)
+    # uuid4 isolates concurrent task instances (e.g. .expand() fan-out) so
+    # they never share a directory.
+    cwd_folder = ROOT_DIR / "recipe_logs" / uuid.uuid4().hex
+    cwd_folder.mkdir(parents=True, exist_ok=True)
+    try:
         targets = build_targets(cwd_folder, ips)
         result = asyncio.run(
             ftp_download_async(
@@ -102,6 +118,8 @@ def collect_logs(ips: list[str]) -> dict:
             )
         )
         return upload_results(result, cwd_folder, MINIO_BUCKET)
+    finally:
+        cleanup_folder(cwd_folder)
 
 
 if __name__ == "__main__":
