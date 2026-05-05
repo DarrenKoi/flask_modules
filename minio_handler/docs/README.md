@@ -13,6 +13,8 @@
   URL / multipart upload / 비동기 처리 / CORS / 보안 함정
 - `usage.md`: `minio_handler` wrapper 자체의 설정 방법, CRUD 예제, presigned
   URL, lifecycle wrapper, 자주 하는 실수 정리
+- `recipes.md`: 작업 단위 cookbook. exists 후 삭제, prefix 일괄 삭제,
+  최신 객체 찾기, copy/move, JSON/Pickle/DataFrame 캐싱 등 짧은 코드 조각 모음
 - `serialization.md`: `pandas.DataFrame` ↔ Parquet (`put_dataframe` /
   `get_dataframe`) 그리고 PNG / JPEG / WebP / TIFF 이미지를 `PIL.Image` /
   로컬 파일과 주고받는 패턴
