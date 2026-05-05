@@ -23,10 +23,10 @@ DAGs folder as a **top-level script**, not as part of a package. That means:
    production.
 
 The fix: **before importing anything repo-local, make sure `airflow_mgmt/`
-is on `sys.path`.** Once it is, every `scripts/`, `minio_handler/`,
-`utils/` package becomes importable as a top-level name, and the same
-`from minio_handler import MinioObject` works in DAGs, in `pytest`, and in
-standalone scripts.
+is on `sys.path`.** Once it is, every `scripts/`, `minio_handler/`, and
+any future repo-local package becomes importable as a top-level name, and
+the same `from minio_handler import MinioObject` works in DAGs, in
+`pytest`, and in standalone scripts.
 
 ---
 
@@ -42,7 +42,7 @@ from pathlib import Path
 
 # ── sys.path bootstrap ──────────────────────────────────────────────────────
 ROOT_DIR = Path(os.getenv("AIRFLOW_MGMT_ROOT") or next(
-    (str(p) for p in Path(__file__).resolve().parents if p.name == "airflow_mgmt"),
+    (str(p) for p in Path(__file__).resolve().parents if (p / "project_root.txt").is_file()),
     "",
 )).resolve()
 if not ROOT_DIR.is_dir():
@@ -53,8 +53,20 @@ if str(ROOT_DIR) not in sys.path:
 
 # repo-local imports go here, after the bootstrap
 from minio_handler import MinioObject     # noqa: E402
-from utils.orders import daily_summary    # noqa: E402
 ```
+
+The marker file is `airflow_mgmt/project_root.txt` — a small sentinel file
+whose only job is to exist. It contains the literal text `do not remove`
+so anyone who opens it understands what it's for; the bootstrap doesn't
+read the contents, only checks `is_file()`. The walk goes up from
+`__file__` and stops at the first parent directory that *contains* the
+marker. The parent folder can be called anything (`airflow_mgmt/`,
+`repo/`, `dags_repo/`, an Airflow-mounted path like
+`/opt/airflow/dags/repo/...`) — only the marker inside has to be there.
+
+The same `project_root.txt` convention works for any project that needs
+sys.path or "find the repo root" behavior — it isn't airflow-specific.
+Drop the file at the project root, walk parents looking for it, done.
 
 Reading it line by line:
 
@@ -62,9 +74,9 @@ Reading it line by line:
    variable is set, use it verbatim (no auto-detect). Returns `None` if
    the variable isn't defined.
 2. **`or next(...)`** — fall back to walking up from this file looking
-   for a parent directory named `airflow_mgmt`. This is what makes the
-   stub work on any worker where the file lives somewhere under an
-   `airflow_mgmt/` folder.
+   for a parent directory that contains the `project_root.txt` marker
+   file. This is rename-safe: the bootstrap doesn't care what the parent
+   directory is named, only that it has the marker.
 3. **`""` default**: if the walk finds nothing, `next(...)` returns `""`,
    which becomes `Path("").resolve()` → `cwd`. The next check catches
    that.
@@ -78,6 +90,24 @@ Reading it line by line:
    "module-level import not at top of file". The flag is intentional;
    the bootstrap *must* run first.
 
+### Why a marker file instead of matching the folder name?
+
+The earlier version of this stub walked up looking for a parent named
+literally `airflow_mgmt`. That broke in two scenarios:
+
+1. **Renames during clone or container packaging.** `git clone <url> repo`
+   or an Airflow git-sync that mounts the checkout as
+   `/opt/airflow/dags/repo/` produces a tree where no ancestor is called
+   `airflow_mgmt`, so the walk finds nothing and the env-var override
+   becomes mandatory.
+2. **Ambiguous ancestors.** If any unrelated parent directory is *also*
+   called `airflow_mgmt` (a monorepo folder, a packaging staging dir),
+   the walk stops at the wrong one.
+
+A sentinel file collapses both problems: the directory you control is
+the one with the marker in it, full stop. Same pattern Git uses with
+`.git/`, Bazel with `WORKSPACE`, and Python tooling with `pyproject.toml`.
+
 ---
 
 ## The full chain: DAG → script → helper
@@ -87,7 +117,7 @@ Reading it line by line:
                                  │
                                  ▼
 airflow_mgmt/  ──── added to sys.path ────►  Python can now import
-    │                                         scripts/, minio_handler/, utils/
+    │                                         scripts/, minio_handler/, ...
     │
     ├── dags/<topic>/foo_dag.py
     │       [bootstrap stub]
@@ -130,8 +160,7 @@ entry points — they inherit the caller's `sys.path`.
 Not every DAG needs the stub. The right rule:
 
 > If the DAG file imports nothing from `scripts/`, `minio_handler/`,
-> `utils/`, or any other repo-local package, **don't include the
-> bootstrap stub**.
+> or any other repo-local package, **don't include the bootstrap stub**.
 
 `dags/diagnostics/inspect_packages_dag.py` is the model. It only uses
 stdlib (`importlib.metadata.distributions`) and `airflow.sdk`, so it
@@ -193,8 +222,11 @@ block — wherever the scheduler / dag-processor / worker processes are
 launched.
 
 Set `AIRFLOW_MGMT_ROOT` only when auto-detect fails (the parent walk
-can't find a directory named `airflow_mgmt`). Set
-`AIRFLOW_MGMT_SCRATCH_ROOT` when `/tmp` is the wrong filesystem
+can't find a directory containing `project_root.txt`). The most common
+reasons are that the marker got renamed/deleted, or the bootstrap is
+running from a file that isn't actually a descendant of the project root
+(e.g. an Airflow worker that mounts only `dags/` and not the parent).
+Set `AIRFLOW_MGMT_SCRATCH_ROOT` when `/tmp` is the wrong filesystem
 (too small, slow, or wrong volume).
 
 ---
@@ -203,6 +235,11 @@ can't find a directory named `airflow_mgmt`). Set
 
 1. **`sys.path.append("/some/hard/coded/path")`** — works on one Airflow
    cluster, breaks on the next. Use the stub.
+1a. **Deleting or renaming `airflow_mgmt/project_root.txt`** — that's
+   the sentinel the auto-detect walk looks for. Without it the stub
+   silently falls back to `cwd` and then raises `RuntimeError` at parse
+   time. If you must remove it, set `AIRFLOW_MGMT_ROOT` explicitly on
+   every worker.
 2. **`from .helpers import x`** in a DAG file — relative imports fail
    because dag-processor parses each DAG as a top-level script, not as
    part of a package.
@@ -214,9 +251,9 @@ can't find a directory named `airflow_mgmt`). Set
 5. **Forgetting `# noqa: E402` on the post-bootstrap imports** — flake8
    will flag them. The `noqa` is intentional; the bootstrap must run
    before any repo-local import.
-6. **Reaching into Airflow internals from `utils/`** — keeps the helper
-   layer Airflow-free so the DAG layer alone adapts to Airflow API
-   changes.
+6. **Reaching into Airflow internals from helper modules** (`minio_handler/`,
+   future `utils/`, etc.) — keeps the helper layer Airflow-free so the DAG
+   layer alone adapts to Airflow API changes.
 
 ---
 
@@ -235,7 +272,7 @@ the only logic worth sharing right now is `~3 lines`. A module with that
 much code in it would be more indirection than help.
 
 Templates also need to be **copy-pasteable**: dropping
-`templates/taskflow_decorator_template.py` into `dags/<topic>/foo_dag.py`
+`dag_templates/taskflow_decorator_template.py` into `dags/<topic>/foo_dag.py`
 should produce a working DAG with no edits to other files. A shared
 helper module would force every template-copy operation to also pull in
 that module's path — defeating the point.
@@ -251,9 +288,6 @@ trade-off.
 ```bash
 # DAG integrity — every DAG file parses cleanly
 python -m pytest airflow_mgmt/tests/test_dag_integrity.py -v
-
-# Helper unit tests — pure Python, no Airflow needed
-python -m pytest airflow_mgmt/tests/test_orders_lib.py -v
 
 # Quick parse-only check before pushing
 python airflow_mgmt/scripts/validate_dags.py

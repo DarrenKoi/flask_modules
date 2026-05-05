@@ -29,12 +29,15 @@ from typing import TypedDict
 
 
 # ── sys.path bootstrap ──────────────────────────────────────────────────────
-# Find airflow_mgmt/ on disk and put it on sys.path so repo-local packages
-# (minio_handler/, utils/, ...) become importable as top-level names.
+# Find airflow_mgmt/ on disk (the directory holding the project_root.txt
+# marker file) and put it on sys.path so repo-local packages
+# (minio_handler/, ...) become importable as top-level names.
+# Marker-file lookup is rename-safe — the parent folder can be called anything
+# (repo/, dags_repo/, ...), only the marker inside has to be there.
 # AIRFLOW_MGMT_ROOT env var overrides auto-detect — set it on Airflow workers
-# if the parent walk can't find the airflow_mgmt directory.
+# if the parent walk can't find the marker file.
 ROOT_DIR = Path(os.getenv("AIRFLOW_MGMT_ROOT") or next(
-    (str(p) for p in Path(__file__).resolve().parents if p.name == "airflow_mgmt"),
+    (str(p) for p in Path(__file__).resolve().parents if (p / "project_root.txt").is_file()),
     "",
 )).resolve()
 if not ROOT_DIR.is_dir():
