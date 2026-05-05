@@ -68,6 +68,42 @@ example_hourly()
 `"@hourly"`는 가장 읽기 쉽습니다. 하지만 "2시간마다", "4시간마다", "평일만" 같은
 조건은 cron으로 명확하게 쓰는 편이 좋습니다.
 
+## 여러 DAG가 같은 시간에 뜨는 경우
+
+`"@hourly"`는 `0 * * * *`와 같으므로, 여러 DAG가 모두 `"@hourly"`이면 매시 00분에
+한꺼번에 실행 후보가 됩니다. Airflow가 worker slot, pool, DAG별 active run 제한을
+무시하고 모두 동시에 실행하는 것은 아니지만, scheduler queue, worker, metadata DB,
+그리고 OpenSearch, DB, FTP, MinIO 같은 외부 시스템에는 순간 부하가 생길 수 있습니다.
+
+무거운 운영 DAG는 같은 정각에 몰아넣기보다 cron으로 분산합니다.
+
+| 목적 | 예시 |
+|---|---|
+| 매시간 실행하되 정각 피하기 | `5 * * * *`, `15 * * * *`, `35 * * * *` |
+| 같은 외부 시스템을 치는 task 제한 | Airflow pool 사용, task에 `pool="..."` 지정 |
+| 같은 DAG의 겹치는 실행 방지 | `max_active_runs=1` |
+| 과거 누락 run이 한꺼번에 생성되는 것 방지 | `catchup=False` |
+
+task 안에서 `sleep()`으로 시간을 미루면 worker slot을 붙잡은 채 대기하게 됩니다. 단순히
+시작 시점을 나누려는 목적이면 task 내부 대기보다 cron minute을 다르게 두는 편이 좋습니다.
+
+```python
+@dag(
+    dag_id="example_staggered_hourly",
+    start_date=datetime(2026, 1, 1),
+    schedule="15 * * * *",
+    catchup=False,
+    max_active_runs=1,
+    max_active_tasks=2,
+)
+def example_staggered_hourly():
+    @task(pool="shared_opensearch_pool")
+    def run() -> None:
+        ...
+
+    run()
+```
+
 ## cron 형식
 
 Airflow cron은 일반적인 5칸 형식입니다.
