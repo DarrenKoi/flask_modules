@@ -28,6 +28,16 @@ def _lifecycle_imports() -> dict[str, Any]:
     }
 
 
+_MISSING_LIFECYCLE_CODES = {
+    "NoSuchLifecycleConfiguration",
+    "NoSuchBucketLifecycle",
+}
+
+
+def _is_error_code(exc: Exception, codes: set[str]) -> bool:
+    return getattr(exc, "code", None) in codes
+
+
 class MinioObject(MinioBase):
     """File-style CRUD wrapper for MinIO objects.
 
@@ -62,6 +72,10 @@ class MinioObject(MinioBase):
         else:
             stream = data
             data_length = -1 if length is None else length
+            if data_length == -1 and part_size <= 0:
+                raise ValueError(
+                    "part_size is required when stream length is unknown."
+                )
 
         return self.client.put_object(
             bucket_name,
@@ -298,6 +312,13 @@ class MinioObject(MinioBase):
         wipes everything under ``kpo/runs/``.
         """
 
+        scoped_prefix = self._resolve_key(prefix) if prefix else self.default_prefix
+        if not scoped_prefix:
+            raise ValueError(
+                "delete_prefix requires a non-empty prefix or a configured "
+                "default prefix."
+            )
+
         bucket_name = self._resolve_bucket(bucket)
         delete_object = _delete_object_class()
         targets = [
@@ -387,7 +408,12 @@ class MinioObject(MinioBase):
         """
 
         bucket_name = self._resolve_bucket(bucket)
-        return self.client.get_bucket_lifecycle(bucket_name)
+        try:
+            return self.client.get_bucket_lifecycle(bucket_name)
+        except Exception as exc:
+            if _is_error_code(exc, _MISSING_LIFECYCLE_CODES):
+                return None
+            raise
 
     def set_lifecycle(self, config: Any, *, bucket: str | None = None) -> None:
         """Replace the bucket's lifecycle policy with ``config`` (raw API).
@@ -447,7 +473,7 @@ class MinioObject(MinioBase):
             expiration=imports["Expiration"](days=days),
         )
 
-        existing = self.client.get_bucket_lifecycle(bucket_name)
+        existing = self.get_lifecycle(bucket=bucket_name)
         if existing is None:
             merged_rules = [new_rule]
         else:

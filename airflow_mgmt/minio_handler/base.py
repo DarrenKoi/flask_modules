@@ -1,5 +1,6 @@
 """Base MinIO config, client factory, and shared service class."""
 
+import importlib
 import os
 from dataclasses import dataclass, field, replace
 from typing import Any, Self
@@ -35,9 +36,12 @@ def _module_values(attr_map: dict[str, str]) -> dict[str, Any]:
     works on a fresh clone where the gitignored config file is absent.
     """
 
+    module_name = f"{__package__}.minio_config"
     try:
-        from . import minio_config as mod
-    except ImportError:
+        mod = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name != module_name:
+            raise
         return {}
 
     values: dict[str, Any] = {}
