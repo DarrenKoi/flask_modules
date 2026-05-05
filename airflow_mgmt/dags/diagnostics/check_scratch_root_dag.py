@@ -1,15 +1,9 @@
 """Check whether the Airflow scratch directory is actually writable.
 
-Trigger this DAG manually after deployment. It resolves the same scratch
-directory convention used by the recipe-log helpers:
-
-1. AIRFLOW_MGMT_SCRATCH_ROOT, if set.
-2. SCRATCH_ROOT, if set as a shorter local override.
-3. /tmp/airflow_mgmt on Airflow workers.
-
-The task logs the resolved path, cwd, user, and sys.path, then performs a real
-mkdir/write/read/delete probe. If the probe fails, the task fails red in the
-Airflow UI.
+Trigger this DAG manually after deployment. It resolves the scratch
+directory the same way the recipe-log helpers do (utils.scratch.scratch_root)
+and probes mkdir/write/read/delete against it. If the probe fails, the task
+fails red in the Airflow UI.
 """
 
 import getpass
@@ -17,7 +11,6 @@ import logging
 import os
 import platform
 import sys
-import tempfile
 import uuid
 from contextlib import suppress
 from datetime import datetime
@@ -28,11 +21,24 @@ from airflow.sdk import dag, task
 log = logging.getLogger(__name__)
 
 
-def _resolve_scratch_root() -> Path:
-    env = os.getenv("AIRFLOW_MGMT_SCRATCH_ROOT") or os.getenv("SCRATCH_ROOT")
-    if env:
-        return Path(env).expanduser().resolve()
-    return Path(tempfile.gettempdir()).resolve() / "airflow_mgmt"
+# ── sys.path bootstrap ──────────────────────────────────────────────────────
+def _find_root(marker: str = "project_root.txt") -> Path:
+    try:
+        start = Path(__file__).resolve().parent
+    except NameError:  # REPL / python -c / exec()
+        start = Path.cwd().resolve()
+    for p in (start, *start.parents):
+        if (p / marker).is_file():
+            return p
+    raise RuntimeError(f"{marker!r} not found above {start}")
+
+
+ROOT_DIR = _find_root()
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+# ────────────────────────────────────────────────────────────────────────────
+
+from utils.scratch import scratch_root  # noqa: E402
 
 
 @dag(
@@ -47,8 +53,8 @@ def _resolve_scratch_root() -> Path:
 def check_scratch_root():
     @task
     def probe_scratch_root() -> dict:
-        scratch_root = _resolve_scratch_root()
-        probe_dir = scratch_root / ".write_probe" / uuid.uuid4().hex
+        target = scratch_root(ROOT_DIR)
+        probe_dir = target / ".write_probe" / uuid.uuid4().hex
         fake_data_file = probe_dir / "fake_data.txt"
         fake_payload = (
             "this is fake Airflow SCRATCH_ROOT probe data\n"
@@ -64,16 +70,15 @@ def check_scratch_root():
         log.info("uid/gid: %s/%s", uid, gid)
         log.info("user: %s", getpass.getuser())
 
-        log.info("AIRFLOW_MGMT_SCRATCH_ROOT=%r", os.getenv("AIRFLOW_MGMT_SCRATCH_ROOT"))
-        log.info("SCRATCH_ROOT=%r", os.getenv("SCRATCH_ROOT"))
-        log.info("resolved scratch_root=%s", scratch_root)
+        log.info("ROOT_DIR=%s", ROOT_DIR)
+        log.info("resolved scratch_root=%s", target)
         log.info("sys.path entries:")
         for item in sys.path:
             log.info("  %s", item)
 
         try:
-            log.info("creating scratch root if missing: %s", scratch_root)
-            scratch_root.mkdir(parents=True, exist_ok=True)
+            log.info("creating scratch root if missing: %s", target)
+            target.mkdir(parents=True, exist_ok=True)
             log.info("creating fake-data probe directory: %s", probe_dir)
             probe_dir.mkdir(parents=True, exist_ok=False)
 
@@ -100,7 +105,7 @@ def check_scratch_root():
             if probe_dir.exists():
                 raise RuntimeError(f"probe directory still exists after rmdir: {probe_dir}")
         except Exception:
-            log.exception("SCRATCH_ROOT probe failed for %s", scratch_root)
+            log.exception("SCRATCH_ROOT probe failed for %s", target)
             raise
         finally:
             with suppress(FileNotFoundError):
@@ -110,9 +115,9 @@ def check_scratch_root():
             with suppress(OSError):
                 probe_dir.parent.rmdir()
 
-        stat = scratch_root.stat()
+        stat = target.stat()
         result = {
-            "scratch_root": str(scratch_root),
+            "scratch_root": str(target),
             "writable": True,
             "fake_write_read_remove_ok": True,
             "mode": oct(stat.st_mode & 0o777),

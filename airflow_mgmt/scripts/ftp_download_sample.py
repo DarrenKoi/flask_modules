@@ -7,8 +7,8 @@ Two filesystem locations, two purposes:
   - ROOT_DIR     → where the code lives (sys.path target). On Airflow this
                    is the read-only git mount, so we never write here.
   - SCRATCH_ROOT → where we write runtime files (downloads, working data).
-                   On Airflow this defaults under /tmp; on dev boxes it's a subdir of
-                   ROOT_DIR so the files stay inspectable.
+                   On Airflow it's /tmp/<root_dir.name>; on dev boxes it's
+                   ROOT_DIR/scratch so files stay inspectable in the IDE.
 
 Conflating these two is the classic "PermissionError: cannot mkdir under
 the dags folder" bug — the airflow user has read access to the git mount
@@ -19,10 +19,8 @@ working files; without explicit cleanup, downloads accumulate on the worker.
 """
 
 import asyncio
-import os
 import shutil
 import sys
-import tempfile
 import uuid
 from pathlib import Path
 from typing import TypedDict
@@ -50,29 +48,11 @@ if str(ROOT_DIR) not in sys.path:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _scratch_root() -> Path:
-    """Writable runtime dir. Never under ROOT_DIR on Airflow (read-only mount).
-
-    Order: AIRFLOW_MGMT_SCRATCH_ROOT env wins; else /tmp/airflow_mgmt on
-    Airflow workers; else ROOT_DIR/scratch for local dev (inspectable).
-    """
-    env = os.getenv("AIRFLOW_MGMT_SCRATCH_ROOT")
-    if env:
-        return Path(env).expanduser().resolve()
-    in_airflow = (
-        any(os.getenv(n) for n in ("AIRFLOW_HOME", "AIRFLOW_CTX_DAG_ID", "AIRFLOW__CORE__DAGS_FOLDER"))
-        or any(s in Path.cwd().as_posix() for s in ("/opt/airflow", "/ops/airflow"))
-    )
-    if in_airflow:
-        return Path(tempfile.gettempdir()).resolve() / "airflow_mgmt"
-    return ROOT_DIR / "scratch"
-
-
-SCRATCH_ROOT = _scratch_root()
-
-# Repo-local import: airflow_mgmt/minio_handler/ is importable as a top-level
-# package now that airflow_mgmt/ is on sys.path.
+# Repo-local imports: airflow_mgmt/ is on sys.path now.
 from minio_handler import MinioObject  # noqa: E402
+from utils.scratch import scratch_root  # noqa: E402
+
+SCRATCH_ROOT = scratch_root(ROOT_DIR)
 
 
 REMOTE_LOG_PATH = "/HITACHI/SYSFILE/LOG_RECIPE_EXE.log"

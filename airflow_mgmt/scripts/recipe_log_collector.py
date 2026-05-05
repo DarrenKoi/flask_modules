@@ -17,10 +17,8 @@ needs to expand into one target per file per IP; ask before that change.
 """
 
 import asyncio
-import os
 import shutil
 import sys
-import tempfile
 import uuid
 from datetime import datetime
 from ftplib import FTP
@@ -49,23 +47,10 @@ if str(ROOT_DIR) not in sys.path:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _scratch_root() -> Path:
-    """Writable runtime dir. Never under ROOT_DIR on Airflow (read-only mount)."""
-    env = os.getenv("AIRFLOW_MGMT_SCRATCH_ROOT")
-    if env:
-        return Path(env).expanduser().resolve()
-    in_airflow = (
-        any(os.getenv(n) for n in ("AIRFLOW_HOME", "AIRFLOW_CTX_DAG_ID", "AIRFLOW__CORE__DAGS_FOLDER"))
-        or any(s in Path.cwd().as_posix() for s in ("/opt/airflow", "/ops/airflow"))
-    )
-    if in_airflow:
-        return Path(tempfile.gettempdir()).resolve() / "airflow_mgmt"
-    return ROOT_DIR / "scratch"
-
-
-SCRATCH_ROOT = _scratch_root()
-
 from minio_handler import MinioObject  # noqa: E402
+from utils.scratch import scratch_root  # noqa: E402
+
+SCRATCH_ROOT = scratch_root(ROOT_DIR)
 
 
 REMOTE_LOG_PATH = "/HITACHI/SYSFILE/LOG_RECIPE_EXE.log"
