@@ -352,8 +352,8 @@ upload_url = mo.presigned_put_url("uploads/raw.bin", expires=timedelta(minutes=1
 ## 정기 cleanup (lifecycle 대용)
 
 > 사내 환경에서는 bucket lifecycle 정책을 직접 등록할 권한이 없습니다.
-> `mo.set_expiration(...)`은 `AccessDenied` 403을 돌려주므로, retention은
-> Airflow DAG / cron으로 직접 돌리는 cleanup job으로 처리합니다.
+> wrapper에서도 lifecycle 메서드는 제거했습니다. retention은 Airflow DAG
+> 또는 cron으로 직접 돌리는 cleanup job으로 처리합니다.
 
 ### N일 지난 객체 삭제
 
@@ -442,25 +442,6 @@ def report_purge_candidates(mo, prefix, days):
             total += obj.size
     print(f"would delete {n} objects, {total / 1_048_576:.1f} MiB")
 ```
-
-## Lifecycle wrapper (admin only — 사내에서는 사용 불가)
-
-> 우리 service account에 `s3:PutBucketLifecycle` 권한이 없어 호출 시
-> `AccessDenied` 403이 납니다. bucket admin 권한이 있는 환경에서만 의미가
-> 있는 메서드들입니다. 호환성/완성도 차원에서 wrapper에 남겨 둔 형태이며,
-> 사내 batch retention은 위의 "정기 cleanup" 패턴을 쓰세요.
-
-```python
-mo.set_expiration(180)                              # 우리 prefix 전체 → 180일
-mo.set_expiration(30,  prefix="2067928/scratch/")   # 하위만 → 30일
-mo.set_expiration(365, prefix="2067928/archive/")   # 다른 하위 → 365일
-
-config = mo.get_lifecycle()                         # ← read는 권한 OK
-for r in (config.rules if config else []):
-    print(r.rule_id, r.rule_filter.prefix, r.expiration.days)
-```
-
-자세한 권한/scan 동작/주의점은 `usage.md`의 "Lifecycle" 섹션을 보세요.
 
 ## 관련 문서
 
