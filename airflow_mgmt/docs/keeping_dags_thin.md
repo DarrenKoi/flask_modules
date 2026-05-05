@@ -29,8 +29,7 @@ airflow_mgmt/
 ├── minio_handler/                    # MinIO / S3 호환 client wrapper
 ├── utils/                            # 추후 helper 추가 시 사용할 빈 placeholder
 ├── scripts/
-│   ├── ftp_download_sample.py        # 학습용 reference (deploy 대상 아님)
-│   └── validate_dags.py              # DAG parse-only 검증 스크립트
+│   └── ftp_download_sample.py        # 학습용 reference (deploy 대상 아님)
 ├── dag_templates/                    # 학습용 DAG 작성 패턴 boilerplate (auto-load 안 됨)
 ├── requirements/                     # @task.virtualenv용 task별 pip 요구사항
 │   └── probe_task.txt
@@ -175,9 +174,8 @@ placeholder입니다).
 
 ```powershell
 python -m pytest tests/test_dag_integrity.py -v
-python scripts\validate_dags.py
 ```
 
-`test_dag_integrity.py`와 `scripts/validate_dags.py`는 Airflow scheduler를 띄우지 않고
-DagBag으로 DAG import만 검증합니다. import error가 있으면 운영 UI에서 DAG가 보이지
-않는 문제를 배포 전에 잡을 수 있습니다.
+`test_dag_integrity.py`는 Airflow scheduler를 띄우지 않고 DagBag으로 DAG import만
+검증합니다. import error가 있으면 운영 UI에서 DAG가 보이지 않는 문제를 배포 전에
+잡을 수 있습니다.

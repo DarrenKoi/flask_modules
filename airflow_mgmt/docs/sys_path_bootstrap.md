@@ -288,11 +288,8 @@ trade-off.
 ```bash
 # DAG integrity — every DAG file parses cleanly
 python -m pytest airflow_mgmt/tests/test_dag_integrity.py -v
-
-# Quick parse-only check before pushing
-python airflow_mgmt/scripts/validate_dags.py
 ```
 
 If a DAG silently disappears in the production UI, that means it failed
-to import. Run `validate_dags.py` locally — it will reproduce the parse
+to import. Run the test above locally — it will reproduce the parse
 error and tell you which file.

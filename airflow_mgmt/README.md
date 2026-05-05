@@ -19,7 +19,6 @@ differently:
 |---|---|---|
 | `dags/` | **REAL** | Registered with the company Airflow via Bitbucket. Files here will actually run (currently only `dags/diagnostics/inspect_packages_dag.py`). |
 | `minio_handler/` | **REAL** | Repo-local package, importable from DAGs after the `sys.path` bootstrap. |
-| `scripts/validate_dags.py` | **REAL** | Local DagBag parse-only check; useful as a pre-push sanity check. |
 | `tests/` | **REAL** | DAG integrity tests — run anywhere, no Airflow server needed. |
 | `dag_templates/` | **EDUCATIONAL** | Copy-paste boilerplate showing four DAG-authoring styles. Lives outside `dags/` so Airflow never auto-loads it. Nothing here runs on the company Airflow. |
 | `scripts/ftp_download_sample.py` | **EDUCATIONAL** | Reference example of the FTP → MinIO pattern; not deployed. |
@@ -57,8 +56,7 @@ airflow_mgmt/
 ├── minio_handler/                   # repo-local MinIO/S3 wrapper (importable from DAGs)
 ├── utils/                           # empty placeholder for future repo-local helpers
 ├── scripts/
-│   ├── ftp_download_sample.py       # EDUCATIONAL — FTP→MinIO reference example
-│   └── validate_dags.py             # real: DagBag parse-only check, no scheduler
+│   └── ftp_download_sample.py       # EDUCATIONAL — FTP→MinIO reference example
 ├── tests/                           # pytest — run anywhere, no Airflow server
 │   ├── conftest.py
 │   └── test_dag_integrity.py        # every DAG in dags/ must import cleanly
