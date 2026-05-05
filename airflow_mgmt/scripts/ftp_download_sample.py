@@ -29,19 +29,22 @@ from typing import TypedDict
 
 
 # ── sys.path bootstrap ──────────────────────────────────────────────────────
-# Find airflow_mgmt/ on disk (the directory holding the project_root.txt
-# marker file) and put it on sys.path so repo-local packages
-# (minio_handler/, ...) become importable as top-level names.
-# Marker-file lookup is rename-safe — the parent folder can be called anything
-# (repo/, dags_repo/, ...), only the marker inside has to be there.
-# AIRFLOW_MGMT_ROOT env var overrides auto-detect — set it on Airflow workers
-# if the parent walk can't find the marker file.
-ROOT_DIR = Path(os.getenv("AIRFLOW_MGMT_ROOT") or next(
-    (str(p) for p in Path(__file__).resolve().parents if (p / "project_root.txt").is_file()),
-    "",
-)).resolve()
-if not ROOT_DIR.is_dir():
-    raise RuntimeError("Cannot find airflow_mgmt root. Set AIRFLOW_MGMT_ROOT.")
+# Walks parents of this file (or cwd when run from a REPL) for the marker
+# file and puts that directory on sys.path so repo-local packages
+# (minio_handler/, ...) import as top-level names. Marker-file lookup is
+# rename-safe — the parent folder can be called anything.
+def _find_root(marker: str = "project_root.txt") -> Path:
+    try:
+        start = Path(__file__).resolve().parent
+    except NameError:  # REPL / python -c / exec()
+        start = Path.cwd().resolve()
+    for p in (start, *start.parents):
+        if (p / marker).is_file():
+            return p
+    raise RuntimeError(f"{marker!r} not found above {start}")
+
+
+ROOT_DIR = _find_root()
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 # ────────────────────────────────────────────────────────────────────────────

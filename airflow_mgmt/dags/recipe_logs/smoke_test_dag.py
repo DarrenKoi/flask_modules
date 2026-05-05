@@ -15,7 +15,6 @@ and byte size. A failed run raises so the task instance turns red.
 """
 
 import logging
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -27,12 +26,18 @@ log = logging.getLogger(__name__)
 
 
 # ── sys.path bootstrap ──────────────────────────────────────────────────────
-ROOT_DIR = Path(os.getenv("AIRFLOW_MGMT_ROOT") or next(
-    (str(p) for p in Path(__file__).resolve().parents if (p / "project_root.txt").is_file()),
-    "",
-)).resolve()
-if not ROOT_DIR.is_dir():
-    raise RuntimeError("Cannot find airflow_mgmt root. Set AIRFLOW_MGMT_ROOT.")
+def _find_root(marker: str = "project_root.txt") -> Path:
+    try:
+        start = Path(__file__).resolve().parent
+    except NameError:  # REPL / python -c / exec()
+        start = Path.cwd().resolve()
+    for p in (start, *start.parents):
+        if (p / marker).is_file():
+            return p
+    raise RuntimeError(f"{marker!r} not found above {start}")
+
+
+ROOT_DIR = _find_root()
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 # ────────────────────────────────────────────────────────────────────────────
