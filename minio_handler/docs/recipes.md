@@ -349,15 +349,114 @@ upload_url = mo.presigned_put_url("uploads/raw.bin", expires=timedelta(minutes=1
 자세한 운영 패턴(만료 정책, 7일 초과 우회, Flask 통합)은
 `usage.md`의 "Presigned URL" 섹션을 보세요.
 
-## Lifecycle 짧은 레시피
+## 정기 cleanup (lifecycle 대용)
+
+> 사내 환경에서는 bucket lifecycle 정책을 직접 등록할 권한이 없습니다.
+> `mo.set_expiration(...)`은 `AccessDenied` 403을 돌려주므로, retention은
+> Airflow DAG / cron으로 직접 돌리는 cleanup job으로 처리합니다.
+
+### N일 지난 객체 삭제
+
+```python
+from datetime import datetime, timedelta, timezone
+
+def purge_older_than(mo: MinioObject, prefix: str, days: int) -> int:
+    """prefix 아래에서 last_modified 기준 N일 지난 객체를 모두 삭제.
+
+    삭제 건수를 돌려줍니다. delete_many가 prefix를 다시 합성하지 않도록
+    short key로 변환해서 넘깁니다.
+    """
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    base = (mo.default_prefix or "") + ("/" if mo.default_prefix else "")
+
+    targets: list[str] = []
+    for obj in mo.list(prefix):
+        if obj.last_modified >= cutoff:
+            continue
+        # object_name은 default_prefix가 이미 붙은 full key
+        targets.append(obj.object_name.removeprefix(base))
+
+    if not targets:
+        return 0
+
+    errors = mo.delete_many(targets)
+    for err in errors:
+        print("failed:", err)
+    return len(targets) - len(errors)
+```
+
+호출 예:
+
+```python
+purge_older_than(mo, "scratch/",  days=7)    # scratch/ 아래 7일 지난 것
+purge_older_than(mo, "logs/",     days=30)   # logs/ 아래 30일 지난 것
+purge_older_than(mo, "archive/",  days=365)  # archive/ 아래 1년 지난 것
+```
+
+### Airflow DAG에서
+
+이미 있는 `airflow_mgmt`의 `minio_purge` DAG가 이 패턴입니다. 새 prefix가
+필요하면 거기 task 하나를 추가하는 식으로 운영하세요.
+
+```python
+# dags/example_purge.py (참고용 스케치)
+from datetime import datetime
+from airflow.sdk import dag, task
+
+@dag(
+    schedule="0 3 * * *",   # 매일 03:00 KST
+    start_date=datetime(2026, 5, 1),
+    catchup=False,
+)
+def scratch_purge():
+    @task
+    def purge():
+        from minio_handler import MinioObject
+        mo = MinioObject()
+        return purge_older_than(mo, "scratch/", days=7)
+
+    purge()
+
+scratch_purge()
+```
+
+### 빈 디렉터리 (prefix) 정리
+
+S3에는 디렉터리가 없으므로 "빈 디렉터리 삭제"라는 동작 자체가 필요하지
+않습니다. 안에 객체가 0개면 prefix는 listing 결과에 나타나지 않습니다.
+어쩌다 placeholder 파일 (`.keep` 등)을 남겨 두는 컨벤션이라면, 그 placeholder만
+직접 `mo.delete(...)`로 지우면 됩니다.
+
+### 통계만 보고 싶을 때
+
+cleanup을 실제로 돌리기 전에 영향 범위를 미리 보는 dry-run 패턴입니다.
+
+```python
+def report_purge_candidates(mo, prefix, days):
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    n, total = 0, 0
+    for obj in mo.list(prefix):
+        if obj.last_modified < cutoff:
+            n += 1
+            total += obj.size
+    print(f"would delete {n} objects, {total / 1_048_576:.1f} MiB")
+```
+
+## Lifecycle wrapper (admin only — 사내에서는 사용 불가)
+
+> 우리 service account에 `s3:PutBucketLifecycle` 권한이 없어 호출 시
+> `AccessDenied` 403이 납니다. bucket admin 권한이 있는 환경에서만 의미가
+> 있는 메서드들입니다. 호환성/완성도 차원에서 wrapper에 남겨 둔 형태이며,
+> 사내 batch retention은 위의 "정기 cleanup" 패턴을 쓰세요.
 
 ```python
 mo.set_expiration(180)                              # 우리 prefix 전체 → 180일
 mo.set_expiration(30,  prefix="2067928/scratch/")   # 하위만 → 30일
 mo.set_expiration(365, prefix="2067928/archive/")   # 다른 하위 → 365일
 
-config = mo.get_lifecycle()
-for r in config.rules:
+config = mo.get_lifecycle()                         # ← read는 권한 OK
+for r in (config.rules if config else []):
     print(r.rule_id, r.rule_filter.prefix, r.expiration.days)
 ```
 
