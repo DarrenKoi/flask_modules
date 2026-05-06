@@ -73,4 +73,9 @@ this script copies documents, not index metadata. Create the destination
 index (or its template + write alias) ahead of time.
 
 Requires the `elasticsearch` Python package on the source side in addition to
-`opensearch-py` on the destination side.
+`opensearch-py` on the destination side. The source cluster is Elasticsearch
+7.x, so pin the client to the matching major to avoid the 8.x product-check:
+
+```bash
+pip install "elasticsearch>=7,<8"
+```
