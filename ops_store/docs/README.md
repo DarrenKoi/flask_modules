@@ -1,19 +1,29 @@
 # ops_store 문서
 
-이 폴더는 `ops_store` 패키지와 함께 들어 있는 작은 Flask service를
-설명합니다.
+이 폴더는 `ops_store`를 **Airflow `with DAG(...) as dag:` 형식에서 사용하는
+방법**만 다룹니다. 예전처럼 Flask app, standalone script, mapping reference,
+ISM reference, logging strategy를 파일별로 나누지 않습니다.
 
-이 폴더의 문서:
+## 문서 구성
 
-- `codebase.md`: repository 구조, module 역할, runtime 흐름 설명
-- `usage.md`: 설정 방법, 예제, 권장 사용 패턴, 자주 하는 실수 정리
-- `mapping.md`: OpenSearch mapping(field type, parameter, dynamic template)
-  예제 모음. `enabled`, `index`, `keyword` 비교와 object vs nested 포함
-- `policy.md`: ISM policy의 state/action/transition 개념과
-  `create_ism_policy` 해설, four-tier lifecycle 예제
-- `logging_strategy.md`: OpenSearch를 로그 저장소로 쓸 때의 권장 아키텍처와
-  운영 전략
+- `with_dag_usage.md`: DAG 파일 구조, `ops_store` import, OpenSearch 연결,
+  index bootstrap, bulk ingest, search, rollover/ISM, logging/testing 규칙
 
-프로젝트 구조부터 이해하고 싶다면 `codebase.md`부터 읽는 것이 좋습니다.
-바로 OpenSearch helper를 app이나 script에서 사용하고 싶다면 `usage.md`부터
-보면 됩니다.
+## 기준
+
+- DAG 예제는 모두 `from airflow.sdk import DAG`와
+  `with DAG(...) as dag:` context manager 형식을 사용합니다.
+- Python 실행 task는 `PythonOperator`로 명시합니다.
+- `@dag`, `@task` TaskFlow 예제는 이 문서 범위에 넣지 않습니다.
+- `ops_store`는 OpenSearch client를 얇게 감싼 helper입니다. OpenSearch의
+  mapping, query, alias, rollover body를 숨기지 않습니다.
+- Airflow worker에서 읽히는 `OPENSEARCH_*` OS environment variable을 기본
+  연결 방식으로 봅니다. Airflow UI Variable은 `ops_store`가 자동으로 읽지
+  않습니다.
+
+## 언제 이 문서를 보면 되는가
+
+- Airflow DAG에서 OpenSearch index를 만들거나 확인해야 할 때
+- DAG task에서 record를 OpenSearch에 bulk indexing 해야 할 때
+- DAG task에서 최신 document, sample, aggregation 결과를 조회해야 할 때
+- rollover alias 또는 간단한 ISM policy를 DAG 운영 흐름에 연결해야 할 때
