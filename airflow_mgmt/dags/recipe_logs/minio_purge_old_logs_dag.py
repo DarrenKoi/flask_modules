@@ -18,7 +18,8 @@ from datetime import datetime
 from pathlib import Path
 
 from airflow.models import Variable
-from airflow.sdk import dag, task
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import DAG
 
 log = logging.getLogger(__name__)
 
@@ -58,33 +59,31 @@ def _resolve_dry_run() -> bool:
     return raw not in {"false", "0", "no", "off"}
 
 
-@dag(
+def purge() -> dict:
+    dry_run = _resolve_dry_run()
+    storage = MinioObject(bucket=BUCKET)
+    result = purge_older_than(storage, RETENTION_DAYS, dry_run=dry_run, logger=log)
+
+    log.info(
+        "%s: %d partitions older than %s",
+        "DRY-RUN" if dry_run else "DELETED",
+        result["candidate_count"],
+        result["cutoff"],
+    )
+    if result["errors"]:
+        raise RuntimeError(f"delete errors: {result['errors']}")
+    return result
+
+
+with DAG(
     dag_id="minio_purge_old_logs",
     description=f"Daily purge of date partitions older than {RETENTION_DAYS} days",
     start_date=datetime(2026, 1, 1),
     schedule="@daily",
     catchup=False,
     tags=["recipe-logs", "maintenance"],
-)
-def minio_purge_old_logs():
-
-    @task
-    def purge() -> dict:
-        dry_run = _resolve_dry_run()
-        storage = MinioObject(bucket=BUCKET)
-        result = purge_older_than(storage, RETENTION_DAYS, dry_run=dry_run, logger=log)
-
-        log.info(
-            "%s: %d partitions older than %s",
-            "DRY-RUN" if dry_run else "DELETED",
-            result["candidate_count"],
-            result["cutoff"],
-        )
-        if result["errors"]:
-            raise RuntimeError(f"delete errors: {result['errors']}")
-        return result
-
-    purge()
-
-
-minio_purge_old_logs()
+) as dag:
+    PythonOperator(
+        task_id="purge",
+        python_callable=purge,
+    )

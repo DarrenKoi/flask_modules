@@ -1,18 +1,18 @@
 """
 template / taskflow_decorator_template.
 
-Boilerplate for a TaskFlow DAG that calls helper functions defined
-elsewhere in the repo — e.g., a long script in scripts/ or a shared
-helper module added under airflow_mgmt/.
+Boilerplate for a classic with-DAG PythonOperator workflow that calls helper
+functions defined elsewhere in the repo — e.g., a long script in scripts/ or a
+shared helper module added under airflow_mgmt/.
 
 Use this when:
   - Your script's main() has been refactored into an importable function
     (collect_logs, run, process, ...).
   - All packages it needs are installed on the worker.
-  - You want clean Python-style XCom passing between tasks.
+  - You prefer explicit operator objects and manual XCom wiring.
 
 Do NOT use this when:
-  - The helper needs packages NOT on the worker → use @task.virtualenv
+  - The helper needs packages NOT on the worker -> use PythonVirtualenvOperator
     (see virtualenv_task_template.py).
   - You're calling shell commands → use BashOperator instead.
 
@@ -30,7 +30,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from airflow.sdk import dag, task
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import DAG
 
 log = logging.getLogger(__name__)
 
@@ -61,40 +62,46 @@ if str(ROOT_DIR) not in sys.path:
 from scripts.ftp_download_sample import collect_logs  # noqa: E402
 
 
-@dag(
+def list_targets() -> list[str]:
+    # Real DAGs read this from a config file, Airflow Variable, or DB.
+    return ["10.0.0.1", "10.0.0.2"]
+
+
+def download_and_upload(**ctx) -> dict:
+    ti = ctx["ti"]
+    ips = ti.xcom_pull(task_ids="list_targets")
+    summary = collect_logs(ips)
+    log.info("uploaded=%d failed=%d", summary["ok"], summary["ng"])
+    return summary  # XCom return value must be JSON-serializable.
+
+
+def report(**ctx) -> None:
+    ti = ctx["ti"]
+    summary = ti.xcom_pull(task_ids="download_and_upload")
+    if summary["ng"]:
+        log.warning("FTP failures: %s", summary["failed"])
+    log.info("done: ok=%d ng=%d", summary["ok"], summary["ng"])
+
+
+with DAG(
     dag_id="template_taskflow_decorator",
-    description="Template: TaskFlow @task wrapping an imported helper",
+    description="Template: with-DAG PythonOperator wrapping an imported helper",
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
     tags=["template"],
-)
-def template_taskflow_decorator():
+) as dag:
+    list_targets_task = PythonOperator(
+        task_id="list_targets",
+        python_callable=list_targets,
+    )
+    download_and_upload_task = PythonOperator(
+        task_id="download_and_upload",
+        python_callable=download_and_upload,
+    )
+    report_task = PythonOperator(
+        task_id="report",
+        python_callable=report,
+    )
 
-    @task
-    def list_targets() -> list[str]:
-        # Real DAGs read this from a config file, Airflow Variable, or DB.
-        return ["10.0.0.1", "10.0.0.2"]
-
-    @task
-    def download_and_upload(ips: list[str]) -> dict:
-        # The @task wrapper stays thin on purpose: orchestration lives
-        # here, business logic stays in the importable module so it can
-        # be unit-tested without Airflow.
-        summary = collect_logs(ips)
-        log.info("uploaded=%d failed=%d", summary["ok"], summary["ng"])
-        return summary  # → XCom (must be JSON-serializable)
-
-    @task
-    def report(summary: dict) -> None:
-        if summary["ng"]:
-            log.warning("FTP failures: %s", summary["failed"])
-        log.info("done: ok=%d ng=%d", summary["ok"], summary["ng"])
-
-    # Plain Python composition — TaskFlow tracks the XCom dependencies.
-    targets = list_targets()
-    summary = download_and_upload(targets)
-    report(summary)
-
-
-template_taskflow_decorator()
+    list_targets_task >> download_and_upload_task >> report_task

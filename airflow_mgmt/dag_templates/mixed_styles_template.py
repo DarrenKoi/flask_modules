@@ -1,21 +1,18 @@
 """
 template / mixed_styles_template.
 
-Demonstrates that @task (TaskFlow) and classic operators (BashOperator,
-PythonOperator, sensors) can live together inside a single DAG. The
-DAG container chooses the syntax; the operators inside follow whatever
-"current DAG" context is active.
+Demonstrates a classic with-DAG file that mixes PythonOperator with another
+operator type (BashOperator). This is the explicit-operator version of a
+small FTP ingest flow.
 
 Two equivalent variants are defined in this file so you can see them
 side by side:
 
-  1. dag_id = "template_mixed_via_at_dag"   — uses @dag + @task + BashOperator
-  2. dag_id = "template_mixed_via_with_dag" — uses with DAG(...) + @task + BashOperator
+  1. dag_id = "template_mixed_via_with_dag_a"
+  2. dag_id = "template_mixed_via_with_dag_b"
 
-Both produce the same task graph. Pick the style that matches the bulk
-of your tasks. Rule of thumb:
-  - mostly Python work → @dag (lower ceremony, nicer XCom)
-  - mostly shell / sensor / pod work → with DAG(...) as dag
+Both produce the same task graph. Pick this style when you want explicit
+operator objects, manual XCom pulls, or several non-Python operator types.
 
 This file lives OUTSIDE airflow_mgmt/dags/ so Airflow does not auto-load
 it. Copy into dags/<topic>/ and rename when you adapt it.
@@ -27,7 +24,8 @@ from datetime import datetime
 from pathlib import Path
 
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.sdk import DAG, dag, task
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import DAG
 
 log = logging.getLogger(__name__)
 
@@ -58,86 +56,83 @@ if str(ROOT_DIR) not in sys.path:
 from scripts.ftp_download_sample import collect_logs  # noqa: E402
 
 
-# ---------------------------------------------------------------------------
-# Variant 1: @dag decorator with mixed task styles
-# ---------------------------------------------------------------------------
-@dag(
-    dag_id="template_mixed_via_at_dag",
-    description="@dag containing @task AND a classic BashOperator",
-    start_date=datetime(2026, 1, 1),
-    schedule=None,
-    catchup=False,
-    tags=["template"],
-)
-def template_mixed_via_at_dag():
-
-    # Classic operator inside @dag — it auto-attaches because the
-    # decorator established a "current DAG" context. No dag= argument.
-    announce = BashOperator(
-        task_id="announce_start",
-        bash_command='echo "FTP ingest starting at $(date -Iseconds)"',
-    )
-
-    @task
-    def list_targets() -> list[str]:
-        return ["10.0.0.1", "10.0.0.2"]
-
-    @task
-    def download_and_upload(ips: list[str]) -> dict:
-        return collect_logs(ips)
-
-    cleanup_marker = BashOperator(
-        task_id="touch_done_marker",
-        bash_command='touch /tmp/ftp_done_$(date +%Y%m%d).flag',
-    )
-
-    # Bridging classic ↔ TaskFlow with `>>`. The @task return value
-    # (an XComArg) chains to a classic operator the same way two
-    # classic operators chain.
-    targets = list_targets()
-    summary = download_and_upload(targets)
-    announce >> targets
-    summary >> cleanup_marker
+def _list_targets() -> list[str]:
+    return ["10.0.0.1", "10.0.0.2"]
 
 
-template_mixed_via_at_dag()
+def _download_and_upload(**ctx) -> dict:
+    ti = ctx["ti"]
+    ips = ti.xcom_pull(task_ids="list_targets")
+    return collect_logs(ips)
+
+
+def _list_targets_v2() -> list[str]:
+    return ["10.0.0.1", "10.0.0.2"]
+
+
+def _download_and_upload_v2(**ctx) -> dict:
+    ti = ctx["ti"]
+    ips = ti.xcom_pull(task_ids="list_targets")
+    return collect_logs(ips)
 
 
 # ---------------------------------------------------------------------------
-# Variant 2: with DAG(...) context manager, same mix of task styles
+# Variant 1: with DAG(...) context manager and explicit operators
 # ---------------------------------------------------------------------------
 with DAG(
-    dag_id="template_mixed_via_with_dag",
-    description="with DAG(...) containing @task AND a classic BashOperator",
+    dag_id="template_mixed_via_with_dag_a",
+    description="with DAG(...) containing PythonOperator and BashOperator",
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
     tags=["template"],
-) as dag_obj:
-
+) as dag_a:
     announce = BashOperator(
         task_id="announce_start",
         bash_command='echo "FTP ingest starting at $(date -Iseconds)"',
     )
-
-    # @task ALSO works inside `with DAG(...)` — the decorator just
-    # registers against whichever DAG context is active. This is the
-    # "rule" in action: operators look up the current context, they
-    # don't care which syntax created it.
-    @task
-    def list_targets_v2() -> list[str]:
-        return ["10.0.0.1", "10.0.0.2"]
-
-    @task
-    def download_and_upload_v2(ips: list[str]) -> dict:
-        return collect_logs(ips)
-
+    targets = PythonOperator(
+        task_id="list_targets",
+        python_callable=_list_targets,
+    )
+    summary = PythonOperator(
+        task_id="download_and_upload",
+        python_callable=_download_and_upload,
+    )
     cleanup_marker = BashOperator(
         task_id="touch_done_marker",
         bash_command='touch /tmp/ftp_done_$(date +%Y%m%d).flag',
     )
 
-    targets_v2 = list_targets_v2()
-    summary_v2 = download_and_upload_v2(targets_v2)
-    announce >> targets_v2
-    summary_v2 >> cleanup_marker
+    announce >> targets >> summary >> cleanup_marker
+
+
+# ---------------------------------------------------------------------------
+# Variant 2: with DAG(...) context manager, same graph
+# ---------------------------------------------------------------------------
+with DAG(
+    dag_id="template_mixed_via_with_dag_b",
+    description="with DAG(...) containing PythonOperator and BashOperator",
+    start_date=datetime(2026, 1, 1),
+    schedule=None,
+    catchup=False,
+    tags=["template"],
+) as dag_b:
+    announce = BashOperator(
+        task_id="announce_start",
+        bash_command='echo "FTP ingest starting at $(date -Iseconds)"',
+    )
+    targets_v2 = PythonOperator(
+        task_id="list_targets",
+        python_callable=_list_targets_v2,
+    )
+    summary_v2 = PythonOperator(
+        task_id="download_and_upload",
+        python_callable=_download_and_upload_v2,
+    )
+    cleanup_marker = BashOperator(
+        task_id="touch_done_marker",
+        bash_command='touch /tmp/ftp_done_$(date +%Y%m%d).flag',
+    )
+
+    announce >> targets_v2 >> summary_v2 >> cleanup_marker

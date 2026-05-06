@@ -20,7 +20,8 @@ from datetime import datetime
 from pathlib import Path
 
 from airflow.hooks.base import BaseHook
-from airflow.sdk import dag, task
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import DAG
 
 log = logging.getLogger(__name__)
 
@@ -52,44 +53,42 @@ SMOKE_IP = "10.0.0.1"
 FTP_CONN_ID = "recipe_ftp"
 
 
-@dag(
+def run_one() -> dict:
+    conn = BaseHook.get_connection(FTP_CONN_ID)
+    log.info("smoke-testing one IP: %s (port=%s)", SMOKE_IP, conn.port or 21)
+
+    summary = collect_logs(
+        [SMOKE_IP],
+        user=conn.login,
+        password=conn.password,
+        port=conn.port or 21,
+    )
+
+    log.info("uploaded=%d failed=%d", summary["ok"], summary["ng"])
+    for u in summary["uploaded"]:
+        log.info("  OK   key=%s size=%d", u["key"], u["size"])
+    for f in summary["failed"]:
+        log.info("  FAIL %s", f)
+
+    # If the only IP failed, raise so the task instance is red.
+    # Mixed success/failure cannot happen with one IP, but the guard
+    # is intentional: copy-pasting this DAG to a multi-IP version
+    # should not silently swallow total failures.
+    if summary["ng"] and not summary["ok"]:
+        raise RuntimeError(f"smoke test: all uploads failed: {summary['failed']}")
+
+    return summary
+
+
+with DAG(
     dag_id="recipe_logs_smoke_test",
     description="Single-IP end-to-end smoke test — manual trigger only",
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
     tags=["recipe-logs", "smoke-test"],
-)
-def recipe_logs_smoke_test():
-
-    @task
-    def run_one() -> dict:
-        conn = BaseHook.get_connection(FTP_CONN_ID)
-        log.info("smoke-testing one IP: %s (port=%s)", SMOKE_IP, conn.port or 21)
-
-        summary = collect_logs(
-            [SMOKE_IP],
-            user=conn.login,
-            password=conn.password,
-            port=conn.port or 21,
-        )
-
-        log.info("uploaded=%d failed=%d", summary["ok"], summary["ng"])
-        for u in summary["uploaded"]:
-            log.info("  OK   key=%s size=%d", u["key"], u["size"])
-        for f in summary["failed"]:
-            log.info("  FAIL %s", f)
-
-        # If the only IP failed, raise so the task instance is red.
-        # Mixed success/failure cannot happen with one IP, but the guard
-        # is intentional: copy-pasting this DAG to a multi-IP version
-        # should not silently swallow total failures.
-        if summary["ng"] and not summary["ok"]:
-            raise RuntimeError(f"smoke test: all uploads failed: {summary['failed']}")
-
-        return summary
-
-    run_one()
-
-
-recipe_logs_smoke_test()
+) as dag:
+    PythonOperator(
+        task_id="run_one",
+        python_callable=run_one,
+    )

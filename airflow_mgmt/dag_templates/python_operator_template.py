@@ -2,13 +2,11 @@
 template / python_operator_template.
 
 Boilerplate for a classic PythonOperator DAG that calls helper
-functions defined elsewhere in the repo. Functionally equivalent to
-the TaskFlow @task style — use this if you prefer explicit operator
-objects, or are working alongside other operator types
+functions defined elsewhere in the repo. Use this if you prefer explicit
+operator objects, or are working alongside other operator types
 (BashOperator, EmailOperator, etc.).
 
-Prefer the TaskFlow (@task) variant for new code. PythonOperator is
-more verbose for the same orchestration and forces manual XCom plumbing.
+PythonOperator is verbose but keeps task creation and XCom plumbing explicit.
 
 This file lives OUTSIDE airflow_mgmt/dags/ so Airflow does not auto-load
 it. Copy into dags/<topic>/ and rename when you adapt it.
@@ -59,8 +57,7 @@ def _list_targets(**ctx) -> list[str]:
 
 
 def _download_and_upload(**ctx) -> dict:
-    # With PythonOperator you pull XCom by hand. The TaskFlow API does
-    # this implicitly when you write `summary = download_and_upload(targets)`.
+    # With PythonOperator you pull XCom by hand.
     ti = ctx["ti"]
     ips = ti.xcom_pull(task_ids="list_targets")
     summary = collect_logs(ips)

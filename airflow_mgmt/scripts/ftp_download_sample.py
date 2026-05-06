@@ -1,7 +1,8 @@
 """Cross-OS safe FTP download + MinIO upload reference.
 
-Runnable standalone (local dev). The same shape drops into an Airflow @task
-unchanged — replace the `__main__` block with a `@task` wrapper.
+Runnable standalone (local dev). The same shape drops into an Airflow
+PythonOperator unchanged — replace the `__main__` block with an operator
+callable wrapper.
 
 Two filesystem locations, two purposes:
   - ROOT_DIR     → where the code lives (sys.path target). On Airflow this

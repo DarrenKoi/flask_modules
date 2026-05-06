@@ -30,7 +30,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from airflow.sdk import dag, task
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import DAG
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +60,45 @@ def _marker_path(run_id: str) -> Path:
     return scratch_root(ROOT_DIR) / "check_executor" / run_id / "marker.txt"
 
 
-@dag(
+def write_marker(**ctx) -> None:
+    from airflow.configuration import conf
+
+    marker = _marker_path(ctx["dag_run"].run_id)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    payload = f"hostname={socket.gethostname()}\nrun_id={ctx['dag_run'].run_id}\n"
+    marker.write_text(payload, encoding="utf-8")
+
+    log.info("wrote marker: %s", marker)
+    log.info("hostname: %s", socket.gethostname())
+    log.info("configured executor: %s", conf.get("core", "executor"))
+
+
+def read_marker(**ctx) -> None:
+    marker = _marker_path(ctx["dag_run"].run_id)
+    log.info("hostname: %s", socket.gethostname())
+    log.info("looking for marker: %s", marker)
+
+    try:
+        content = marker.read_text(encoding="utf-8")
+        log.info("MARKER FOUND — filesystem is shared between tasks")
+        log.info("marker contents:\n%s", content)
+    except FileNotFoundError:
+        log.error(
+            "MARKER MISSING — tasks do NOT share a filesystem. "
+            "Cleanup-at-end-of-DAG will not work. Keep cleanup in-process "
+            "with the download, or ask ops for a shared volume mount."
+        )
+        raise
+    finally:
+        from contextlib import suppress
+
+        with suppress(FileNotFoundError):
+            marker.unlink()
+        with suppress(OSError):
+            marker.parent.rmdir()
+
+
+with DAG(
     dag_id="diagnostics_check_executor",
     description="Verify whether tasks share filesystem state across the executor",
     start_date=datetime(2026, 1, 1),
@@ -67,47 +106,14 @@ def _marker_path(run_id: str) -> Path:
     catchup=False,
     max_active_runs=1,
     tags=["diagnostics", "executor"],
-)
-def check_executor():
+) as dag:
+    write_marker_task = PythonOperator(
+        task_id="write_marker",
+        python_callable=write_marker,
+    )
+    read_marker_task = PythonOperator(
+        task_id="read_marker",
+        python_callable=read_marker,
+    )
 
-    @task
-    def write_marker(**ctx) -> None:
-        from airflow.configuration import conf
-
-        marker = _marker_path(ctx["dag_run"].run_id)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        payload = f"hostname={socket.gethostname()}\nrun_id={ctx['dag_run'].run_id}\n"
-        marker.write_text(payload, encoding="utf-8")
-
-        log.info("wrote marker: %s", marker)
-        log.info("hostname: %s", socket.gethostname())
-        log.info("configured executor: %s", conf.get("core", "executor"))
-
-    @task
-    def read_marker(**ctx) -> None:
-        marker = _marker_path(ctx["dag_run"].run_id)
-        log.info("hostname: %s", socket.gethostname())
-        log.info("looking for marker: %s", marker)
-
-        try:
-            content = marker.read_text(encoding="utf-8")
-            log.info("MARKER FOUND — filesystem is shared between tasks")
-            log.info("marker contents:\n%s", content)
-        except FileNotFoundError:
-            log.error(
-                "MARKER MISSING — tasks do NOT share a filesystem. "
-                "Cleanup-at-end-of-DAG will not work. Keep cleanup in-process "
-                "with the download, or ask ops for a shared volume mount."
-            )
-            raise
-        finally:
-            from contextlib import suppress
-            with suppress(FileNotFoundError):
-                marker.unlink()
-            with suppress(OSError):
-                marker.parent.rmdir()
-
-    write_marker() >> read_marker()
-
-
-check_executor()
+    write_marker_task >> read_marker_task
