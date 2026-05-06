@@ -127,6 +127,12 @@ class MinioObject(MinioBase):
     ) -> Any:
         """Serialize ``obj`` to JSON (UTF-8) and upload.
 
+        Use this when ``obj`` is a live Python value (dict, list, ...).
+        If you already have JSON bytes or a ``.json`` file on disk, call
+        ``put`` / ``upload`` directly with
+        ``content_type="application/json; charset=utf-8"`` — otherwise
+        ``put_json`` would re-encode and double-quote your payload.
+
         ``default`` is forwarded to ``json.dumps`` so non-native types
         (datetime, Decimal, ...) can be handled by the caller.
         """
@@ -165,6 +171,12 @@ class MinioObject(MinioBase):
     ) -> Any:
         """Pickle a Python object and upload it.
 
+        Use this when ``obj`` is a live Python value. If you already have
+        pickled bytes in memory, call ``put`` directly; if you already have
+        a ``.pkl`` file on disk, call ``upload``. Passing pre-pickled bytes
+        here would pickle them a second time and you'd have to unpickle
+        twice on the way out.
+
         Only safe for objects produced by trusted code — ``get_pickle`` will
         execute whatever's in the payload.
         """
@@ -195,7 +207,15 @@ class MinioObject(MinioBase):
         bucket: str | None = None,
         metadata: dict[str, str] | None = None,
     ) -> Any:
-        """Serialize a pandas DataFrame to parquet (pyarrow) and upload."""
+        """Serialize a pandas DataFrame to parquet (pyarrow) and upload.
+
+        Use this when ``df`` is a live ``pd.DataFrame``. If you already
+        have a ``.parquet`` file on disk, call ``upload`` (it streams via
+        ``fput_object`` and avoids loading the whole frame into RAM); if
+        you already have parquet bytes in memory, call ``put``. In both
+        cases pass ``content_type="application/vnd.apache.parquet"`` so
+        downstream MIME-sniffing tools recognize it.
+        """
 
         buf = io.BytesIO()
         df.to_parquet(buf, engine="pyarrow")
