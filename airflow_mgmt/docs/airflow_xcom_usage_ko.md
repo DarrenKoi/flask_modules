@@ -312,7 +312,7 @@ Airflow UI에서는 DAG run의 task instance 상세 화면에서 XCom 값을 확
 
 ## 이 repo에서 권장하는 사용 방식
 
-1. 새 DAG는 `airflow_mgmt/dag_templates/taskflow_decorator_template.py` 스타일을 우선 사용합니다.
+1. 새 DAG는 `airflow_mgmt/dag_templates/taskflow_decorator_template.py`를 기본 출발점으로 사용합니다.
 2. `@task` return value로 작은 dict를 넘깁니다.
 3. 큰 데이터는 `minio_handler/`로 object storage에 쓰고 object key만 XCom에 둡니다.
 4. 조건부 실행은 `@task.branch` 또는 `@task.short_circuit`로 표현합니다.

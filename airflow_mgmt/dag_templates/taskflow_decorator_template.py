@@ -1,25 +1,26 @@
 """
 template / taskflow_decorator_template.
 
-Boilerplate for a classic with-DAG PythonOperator workflow that calls helper
-functions defined elsewhere in the repo — e.g., a long script in scripts/ or a
-shared helper module added under airflow_mgmt/.
+Default boilerplate for Python-heavy DAGs in this repo.
 
 Use this when:
-  - Your script's main() has been refactored into an importable function
-    (collect_logs, run, process, ...).
-  - All packages it needs are installed on the worker.
-  - You prefer explicit operator objects and manual XCom wiring.
+  - Your task logic can be expressed as normal Python functions.
+  - The worker already has every required package installed.
+  - You want task return values to flow to downstream tasks without manual
+    xcom_pull() calls.
+  - You need to call repo-local helpers from scripts/, minio_handler/, or utils/.
 
 Do NOT use this when:
-  - The helper needs packages NOT on the worker -> use PythonVirtualenvOperator
-    (see virtualenv_task_template.py).
-  - You're calling shell commands → use BashOperator instead.
+  - A task needs packages NOT installed on the worker. Use
+    virtualenv_task_template.py instead.
+  - The workflow is mostly non-Python operators. Keep those operators explicit
+    and only wrap Python glue with @task.
 
-How to refactor an existing main()-style script:
-  1. Wrap main()'s body in a function with explicit args + return value.
-  2. Keep `if __name__ == "__main__": run(...)` for local debugging.
-  3. Import that function from the DAG (after the sys.path bootstrap).
+How to adapt:
+  1. Copy this file into dags/<topic>/<name>_dag.py.
+  2. Replace list_targets(), download_and_upload(), and report() with your
+     workflow tasks.
+  3. Keep the sys.path bootstrap above repo-local imports.
 
 This file lives OUTSIDE airflow_mgmt/dags/ so Airflow does not auto-load
 it. Copy into dags/<topic>/ and rename when you adapt it.
@@ -30,8 +31,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from airflow.providers.standard.operators.python import PythonOperator
-from airflow.sdk import DAG
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.sdk import dag, task
 
 log = logging.getLogger(__name__)
 
@@ -62,46 +63,42 @@ if str(ROOT_DIR) not in sys.path:
 from scripts.ftp_download_sample import collect_logs  # noqa: E402
 
 
-def list_targets() -> list[str]:
-    # Real DAGs read this from a config file, Airflow Variable, or DB.
-    return ["10.0.0.1", "10.0.0.2"]
-
-
-def download_and_upload(**ctx) -> dict:
-    ti = ctx["ti"]
-    ips = ti.xcom_pull(task_ids="list_targets")
-    summary = collect_logs(ips)
-    log.info("uploaded=%d failed=%d", summary["ok"], summary["ng"])
-    return summary  # XCom return value must be JSON-serializable.
-
-
-def report(**ctx) -> None:
-    ti = ctx["ti"]
-    summary = ti.xcom_pull(task_ids="download_and_upload")
-    if summary["ng"]:
-        log.warning("FTP failures: %s", summary["failed"])
-    log.info("done: ok=%d ng=%d", summary["ok"], summary["ng"])
-
-
-with DAG(
+@dag(
     dag_id="template_taskflow_decorator",
-    description="Template: with-DAG PythonOperator wrapping an imported helper",
+    description="Template: TaskFlow DAG wrapping repo-local helper code",
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
-    tags=["template"],
-) as dag:
-    list_targets_task = PythonOperator(
-        task_id="list_targets",
-        python_callable=list_targets,
-    )
-    download_and_upload_task = PythonOperator(
-        task_id="download_and_upload",
-        python_callable=download_and_upload,
-    )
-    report_task = PythonOperator(
-        task_id="report",
-        python_callable=report,
+    tags=["template", "taskflow"],
+)
+def template_taskflow_decorator() -> None:
+    announce_start = BashOperator(
+        task_id="announce_start",
+        bash_command='echo "FTP ingest starting at $(date -Iseconds)"',
     )
 
-    list_targets_task >> download_and_upload_task >> report_task
+    @task
+    def list_targets() -> list[str]:
+        # Real DAGs read this from a config file, Airflow Variable, or DB.
+        return ["10.0.0.1", "10.0.0.2"]
+
+    @task
+    def download_and_upload(ips: list[str]) -> dict:
+        summary = collect_logs(ips)
+        log.info("uploaded=%d failed=%d", summary["ok"], summary["ng"])
+        return summary
+
+    @task
+    def report(summary: dict) -> None:
+        if summary["ng"]:
+            log.warning("FTP failures: %s", summary["failed"])
+        log.info("done: ok=%d ng=%d", summary["ok"], summary["ng"])
+
+    targets = list_targets()
+    summary = download_and_upload(targets)
+
+    announce_start >> targets
+    report(summary)
+
+
+template_taskflow_decorator()

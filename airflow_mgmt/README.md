@@ -20,7 +20,7 @@ differently:
 | `dags/` | **REAL** | Registered with the company Airflow via Bitbucket. Files here will actually run (currently only `dags/diagnostics/inspect_packages_dag.py`). |
 | `minio_handler/` | **REAL** | Repo-local package, importable from DAGs after the `sys.path` bootstrap. |
 | `tests/` | **REAL** | DAG integrity tests — run anywhere, no Airflow server needed. |
-| `dag_templates/` | **EDUCATIONAL** | Copy-paste boilerplate showing four DAG-authoring styles. Lives outside `dags/` so Airflow never auto-loads it. Nothing here runs on the company Airflow. |
+| `dag_templates/` | **EDUCATIONAL** | Copy-paste boilerplate for the two supported starting points: normal TaskFlow DAGs and isolated virtualenv tasks. Lives outside `dags/` so Airflow never auto-loads it. Nothing here runs on the company Airflow. |
 | `scripts/ftp_download_sample.py` | **EDUCATIONAL** | Reference example of the FTP → MinIO pattern; not deployed. |
 | `utils/` | empty | Placeholder for future repo-local pure-Python helpers. |
 
@@ -47,9 +47,7 @@ airflow_mgmt/
 │       └── inspect_packages_dag.py  # list installed Python packages on the worker
 ├── dag_templates/                   # EDUCATIONAL — copy-paste DAG boilerplate (never auto-loaded)
 │   ├── taskflow_decorator_template.py
-│   ├── python_operator_template.py
-│   ├── virtualenv_task_template.py  # requirements list inlined in the operator
-│   └── mixed_styles_template.py
+│   └── virtualenv_task_template.py  # requirements list inlined in the operator
 ├── minio_handler/                   # repo-local MinIO/S3 wrapper (importable from DAGs)
 ├── utils/                           # empty placeholder for future repo-local helpers
 ├── scripts/

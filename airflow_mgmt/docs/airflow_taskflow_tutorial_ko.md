@@ -454,8 +454,8 @@ def example_taskflow_mixed():
 example_taskflow_mixed()
 ```
 
-이 repo에도 `airflow_mgmt/dag_templates/mixed_styles_template.py`가 같은 목적의 학습용
-template로 있습니다.
+이 repo의 `airflow_mgmt/dag_templates/taskflow_decorator_template.py`도 같은 이유로
+TaskFlow task와 `BashOperator`를 한 파일 안에서 섞어 둔 기본 template입니다.
 
 ## 같은 task 함수를 재사용하기
 
@@ -501,13 +501,14 @@ def call_with_isolated_dependency() -> dict:
 
 새 업무 DAG를 만들 때는 다음 순서를 권장합니다.
 
-1. `airflow_mgmt/dag_templates/taskflow_decorator_template.py`를 참고합니다.
+1. `airflow_mgmt/dag_templates/taskflow_decorator_template.py`를 기본 출발점으로 사용합니다.
 2. 실제 배포할 DAG는 `airflow_mgmt/dags/<topic>/<name>_dag.py` 아래에 둡니다.
 3. DAG 파일에는 `@dag`, `@task`, schedule, dependency wiring만 남깁니다.
 4. 긴 업무 로직은 `minio_handler/`, 추후 `utils/`, 또는 import 가능한 helper로 분리합니다.
-5. repo-local import가 필요하면 `docs/sys_path_bootstrap.md`의 bootstrap stub 규칙을 따릅니다.
-6. 큰 데이터는 XCom에 넣지 않고 MinIO/S3, DB, 파일 경로, object key로 넘깁니다.
-7. 변경 후에는 `airflow_mgmt/tests/test_dag_integrity.py`로 DAG import를 검증합니다.
+5. 특정 task에 worker에 없는 package가 필요할 때만 `virtualenv_task_template.py`를 참고합니다.
+6. repo-local import가 필요하면 `docs/sys_path_bootstrap.md`의 bootstrap stub 규칙을 따릅니다.
+7. 큰 데이터는 XCom에 넣지 않고 MinIO/S3, DB, 파일 경로, object key로 넘깁니다.
+8. 변경 후에는 `airflow_mgmt/tests/test_dag_integrity.py`로 DAG import를 검증합니다.
 
 ## 흔한 실수
 
