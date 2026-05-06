@@ -20,6 +20,7 @@ it. Copy into dags/<topic>/ and rename when you adapt it.
 """
 
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,17 @@ from airflow.providers.standard.operators.python import PythonVirtualenvOperator
 from airflow.sdk import DAG
 
 log = logging.getLogger(__name__)
+
+
+NEXUS_PYPI_INDEX_URL = "http://nexus.skhynix.com:8081/repository/pypi-group/simple"
+NEXUS_PYPI_HOST = "nexus.skhynix.com"
+
+# Airflow 3 uses uv when it is available. Set uv's default index before the
+# operator creates its cached virtualenv, so seed packages also come from Nexus.
+os.environ.setdefault("UV_DEFAULT_INDEX", NEXUS_PYPI_INDEX_URL)
+os.environ.setdefault("UV_INDEX_URL", NEXUS_PYPI_INDEX_URL)
+os.environ.setdefault("UV_INSECURE_HOST", NEXUS_PYPI_HOST)
+os.environ.setdefault("PIP_INDEX_URL", NEXUS_PYPI_INDEX_URL)
 
 
 # ── sys.path bootstrap ──────────────────────────────────────────────────────
@@ -135,6 +147,7 @@ with DAG(
             "opensearch-py==2.6.0",
             "redis==5.0.8",
         ],
+        index_urls=[NEXUS_PYPI_INDEX_URL],
         system_site_packages=False,
         # Cache key = hash(requirements + python_version + system_site_packages).
         # Pinned versions in the requirements file mean repeated runs hit the
