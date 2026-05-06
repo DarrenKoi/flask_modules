@@ -14,6 +14,13 @@ REMOTE_LOG_PATH is still a placeholder — replace with the real path on
 the FTP servers before deploying. If the real workflow involves a
 directory of timestamped files (rather than one fixed path), build_targets
 needs to expand into one target per file per IP; ask before that change.
+
+Deployment note: this Airflow 3.x setup isolates each task's filesystem
+(verified via diagnostics_check_executor — different hostnames, marker
+files don't cross task boundaries). Cleanup MUST stay in-process inside
+collect_logs(); a separate end-of-DAG cleanup task can't see the files.
+For "skip already done" behavior across retries, check MinIO state — not
+local disk — since the local FS is fresh on every task instance.
 """
 
 import asyncio

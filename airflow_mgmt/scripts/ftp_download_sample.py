@@ -16,6 +16,13 @@ but not write access, by ops design.
 
 Cleanup runs in a `finally` block. Airflow does not auto-clean task
 working files; without explicit cleanup, downloads accumulate on the worker.
+
+Deployment note: this Airflow 3.x setup isolates each task's filesystem
+(verified via diagnostics_check_executor — different hostnames, marker
+files don't cross task boundaries). Cleanup MUST stay in-process inside
+collect_logs(); a separate end-of-DAG cleanup task can't see the files.
+For "skip already done" behavior across retries, check MinIO state — not
+local disk — since the local FS is fresh on every task instance.
 """
 
 import asyncio
