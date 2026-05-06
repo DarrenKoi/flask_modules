@@ -11,9 +11,15 @@ Use this when:
   - You want strict isolation from worker globals
 
 Do NOT use this when:
-  - The function needs your repo's local packages (minio_handler/, ...).
-    Use a plain PythonOperator instead — those run in the worker process
-    and can see the sys.path bootstrap.
+  - The function mainly exists to call repo-local packages (minio_handler/, ...).
+    Prefer a plain PythonOperator — those run in the worker process and can see
+    the DAG-file sys.path bootstrap.
+
+If a virtualenv task must import another Python file from this repo, pass the
+repo root as a plain string and add it to sys.path inside the callable. Do not
+call module-level helpers such as _find_root() from inside the callable:
+PythonVirtualenvOperator executes the callable from a generated temporary script,
+so module globals from this DAG file are not part of the virtualenv runtime.
 
 This file lives OUTSIDE airflow_mgmt/dags/ so Airflow does not auto-load
 it. Copy into dags/<topic>/ and rename when you adapt it.
@@ -64,15 +70,24 @@ if str(ROOT_DIR) not in sys.path:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def probe_os_and_redis(os_cfg: dict, redis_cfg: dict) -> dict:
+def probe_os_and_redis(os_cfg: dict, redis_cfg: dict, root_dir: str) -> dict:
     # ALL imports must be inside this function — they run in the venv,
     # not in the DAG-parsing process.
     import logging
+    import sys
+    from pathlib import Path
 
     import redis
     from opensearchpy import OpenSearch
 
     log = logging.getLogger("airflow.task")
+
+    repo_root = Path(root_dir)
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    # Repo-local pure-Python helpers can now be imported here, inside the venv.
+    # Example:
+    # from scripts.my_virtualenv_helper import build_payload
 
     os_client = OpenSearch(
         hosts=[{"host": os_cfg["host"], "port": os_cfg["port"]}],
@@ -138,7 +153,7 @@ with DAG(
     PythonVirtualenvOperator(
         task_id="probe_os_and_redis",
         python_callable=probe_os_and_redis,
-        op_kwargs={"os_cfg": OS_CFG, "redis_cfg": REDIS_CFG},
+        op_kwargs={"os_cfg": OS_CFG, "redis_cfg": REDIS_CFG, "root_dir": str(ROOT_DIR)},
         # Pin every version — the cache key hashes this list, so unpinned
         # entries can resolve to a new version on a later run and force a
         # cold rebuild. Keep this list short; if it grows past ~5 lines or

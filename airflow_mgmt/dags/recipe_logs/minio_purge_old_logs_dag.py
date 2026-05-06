@@ -17,9 +17,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from airflow.models import Variable
 from airflow.providers.standard.operators.python import PythonOperator
-from airflow.sdk import DAG
+from airflow.sdk import DAG, Variable
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +54,7 @@ def _resolve_dry_run() -> bool:
     # "off" stays in dry-run mode — safe direction. The failure mode of
     # a misread Variable is "nothing got deleted", not "everything got
     # deleted".
-    raw = Variable.get(DRY_RUN_VAR, default_var="true").strip().lower()
+    raw = Variable.get(DRY_RUN_VAR, default="true").strip().lower()
     return raw not in {"false", "0", "no", "off"}
 
 
