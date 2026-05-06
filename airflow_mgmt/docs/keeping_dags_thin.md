@@ -31,8 +31,6 @@ airflow_mgmt/
 ├── scripts/
 │   └── ftp_download_sample.py        # 학습용 참고 코드 (배포 대상 아님)
 ├── dag_templates/                    # 학습용 DAG 작성 기본 틀 (자동 로드 안 됨)
-├── requirements/                     # @task.virtualenv용 task별 pip 요구사항
-│   └── probe_task.txt
 └── tests/
     ├── conftest.py                   # pytest에서 AIRFLOW_MGMT_ROOT 기본값 설정
     └── test_dag_integrity.py         # DagBag 기반 DAG import 검증

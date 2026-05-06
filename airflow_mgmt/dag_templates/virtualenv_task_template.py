@@ -52,27 +52,6 @@ if str(ROOT_DIR) not in sys.path:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _load_requirements(path: Path) -> list[str]:
-    """Read a pip-style requirements file → list of requirement strings.
-
-    Handles blank lines and `# comment` lines; preserves version pins
-    so the cache key remains deterministic. Errors here surface at DAG
-    parse time, not at first task execution.
-    """
-    return [
-        line.split("#", 1)[0].strip()
-        for line in path.read_text().splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-
-
-# Per-task requirements file lives beside the project, NOT the top-level
-# airflow_mgmt/requirements.txt (that one carries Airflow + dev tools, far
-# too much for an isolated task venv). One file per PythonVirtualenvOperator
-# use case.
-PROBE_REQUIREMENTS = _load_requirements(ROOT_DIR / "requirements" / "probe_task.txt")
-
-
 def probe_os_and_redis(os_cfg: dict, redis_cfg: dict) -> dict:
     # ALL imports must be inside this function — they run in the venv,
     # not in the DAG-parsing process.
@@ -148,10 +127,14 @@ with DAG(
         task_id="probe_os_and_redis",
         python_callable=probe_os_and_redis,
         op_kwargs={"os_cfg": OS_CFG, "redis_cfg": REDIS_CFG},
-        # Loaded from airflow_mgmt/requirements/probe_task.txt at parse
-        # time, so the cache key is deterministic and edits to that file
-        # invalidate the cache as expected.
-        requirements=PROBE_REQUIREMENTS,
+        # Pin every version — the cache key hashes this list, so unpinned
+        # entries can resolve to a new version on a later run and force a
+        # cold rebuild. Keep this list short; if it grows past ~5 lines or
+        # gets reused across DAGs, promote it to a module-level constant.
+        requirements=[
+            "opensearch-py==2.6.0",
+            "redis==5.0.8",
+        ],
         system_site_packages=False,
         # Cache key = hash(requirements + python_version + system_site_packages).
         # Pinned versions in the requirements file mean repeated runs hit the
