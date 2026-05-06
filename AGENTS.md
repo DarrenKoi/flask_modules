@@ -1,50 +1,50 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
-This repository is a small Flask service with a reusable OpenSearch helper package.
+## Project structure
 
-- `index.py`: local app entrypoint
-- `api/`: Flask blueprint registration and HTTP routes
-- `config.py`: Flask configuration from environment variables
-- `ops_store/`: class-based OpenSearch helpers (`base.py`, `document.py`, `index.py`, `search.py`, `logging.py`)
-- `tests/`: unit tests for `ops_store`
-- `README.md`: local run and usage notes
-- `logs/`: runtime log output, ignored by git
+Personal toolbox of work-supporting Python modules. Each top-level package is independent.
 
-Keep new web-facing code in `api/` and reusable search/storage logic in `ops_store/`.
+- `ops_store/` — class-based OpenSearch helpers (`base.py`, `document.py`, `index.py`, `search.py`)
+- `minio_handler/` — class-based MinIO / S3-compatible client (`base.py`, `object.py`, `minio_config.py`)
+- `ops_index_mgmt/` — operational scripts that materialize specific OpenSearch indices
+- `airflow_mgmt/` — Airflow 3.1.8 DAGs, repo-local helpers, vendored `minio_handler`, templates, scripts (see `airflow_mgmt/README.md`)
+- `tests/` — unit tests for the top-level modules
 
-## Build, Test, and Development Commands
-- `python3.11 -m venv .venv && source .venv/bin/activate`: create and activate a local environment
-- `pip install -r requirements.txt`: install Flask and `opensearch-py`
-- `python index.py`: run the Flask app locally on port `8000` by default
-- `python3 -m unittest discover -s tests -v`: run the test suite
-- `python3 -m compileall ops_store tests`: quick import/syntax validation
+The repository name `flask_modules` is historical; there is no Flask app.
 
-Use `index:app` as the WSGI callable for deployments.
+## Build / test commands
 
-## Coding Style & Naming Conventions
-Use 4-space indentation and standard Python typing. Follow the existing style:
+- `python3.11 -m venv .venv && source .venv/bin/activate` — create and activate a local environment
+- `pip install -r requirements.txt` — install runtime deps (`opensearch-py`, `minio`, `redis`)
+- `python3 -m unittest discover -s tests -v` — full unit-test suite
+- `python3 -m compileall ops_store minio_handler ops_index_mgmt tests` — quick syntax/import validation
+- `python3 -m pytest airflow_mgmt/tests -v` — Airflow DAG integrity tests (no server needed)
 
-- modules and packages: lowercase with underscores
-- tests: `test_*.py`
-- OpenSearch service classes: short names such as `OSDoc`, `OSIndex`, `OSSearch`
+## Coding style
 
-Keep functions small and direct. Prefer explicit imports and avoid `from __future__ import annotations` in this repository.
+- Python 3.11. Use `Self`, PEP 604 unions (`str | None`), `slots=True` dataclasses.
+- Do **not** use `from __future__ import annotations`.
+- 4-space indent, explicit imports, small direct functions.
+- Filesystem paths: always `pathlib.Path`. No `os.path`, `os.sep`, or string concatenation.
+- No preemptive guardrails — don't add validation/warnings for parameters that are only wrong in the current environment. Trust the caller.
+- Module / package names: `lowercase_with_underscores`. Test files: `test_*.py`. Service class names stay short: `OSDoc`, `OSIndex`, `OSSearch`, `MinioObject`.
 
-## Testing Guidelines
-Tests use the standard library `unittest` framework with `unittest.mock` for client isolation. Add unit tests for new `ops_store` behavior and mock external OpenSearch calls rather than requiring a live cluster.
+## Testing
 
-Name test cases by behavior, for example `test_bulk_index_builds_actions`. Cover both return values and key client call arguments.
+Tests use the standard library `unittest` + `unittest.mock`. Never require a live OpenSearch cluster or live MinIO — mock the client (for `ops_store`, patch `ops_store.base._opensearch_class` or `_bulk_helper`).
 
-## Commit & Pull Request Guidelines
-Current history uses short, imperative, lowercase commit subjects, for example `scaffold flask blueprint app`. Keep commit messages concise and focused on one change.
+Name tests by behavior, e.g. `test_bulk_index_builds_actions`. Cover both return values and key client call kwargs.
+
+## Commits & pull requests
+
+Short, imperative, lowercase commit subjects (`add put_dataframe to minio_handler`). One change per commit.
 
 Pull requests should include:
 
 - a short summary of the change
-- affected modules or routes
+- affected modules
 - test commands run and their result
-- sample request/response notes if API behavior changes
 
-## Security & Configuration Tips
-Load secrets and cluster settings from environment variables such as `OPENSEARCH_HOST`, `OPENSEARCH_USER`, and `OPENSEARCH_PASSWORD`. Do not commit credentials or generated log files under `logs/`.
+## Configuration
+
+Load secrets and connection settings from environment variables. Don't commit credentials. See `CLAUDE.md` for the full env-var surface (`OPENSEARCH_*`, MinIO config, `AIRFLOW_MGMT_*`).

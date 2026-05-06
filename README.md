@@ -1,50 +1,39 @@
 # flask_modules
 
-Flask project skeleton for Python 3.11 with:
+Personal toolbox of work-supporting Python modules. The directory name is historical — there is no Flask app here. Each top-level package is independent and meant to be imported from notebooks, scripts, or Airflow tasks.
 
-- root `index.py` entrypoint
-- `api/` package for Blueprints
-- root `wsgi.ini` for WSGI/uWSGI-style cloud deployments
-- `ops_store/` package with class-based OpenSearch helpers
+## Modules
 
-## Run locally
+- `ops_store/` — class-based `opensearch-py` wrapper (`OSDoc`, `OSIndex`, `OSSearch`).
+- `minio_handler/` — class-based MinIO / S3-compatible client (`MinioObject`, presigned URLs, parquet round-trip, image helpers).
+- `ops_index_mgmt/` — operational scripts that materialize specific OpenSearch indices on the company cluster.
+- `airflow_mgmt/` — sandbox + production-bound code for the company Airflow 3.1.8 platform. See `airflow_mgmt/README.md`.
+
+## Setup
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python index.py
 ```
 
-## Flask Logging
+## Tests
 
-For application-wide file logging outside `ops_store`, use the root-level
-`logging_config.py` helper.
+```bash
+# Full suite
+python3 -m unittest discover -s tests -v
 
-```python
-from flask import Flask
+# Single case
+python3 -m unittest tests.test_ops_store_services.OSDocTests -v
 
-from logging_config import configure_flask_logging
+# Quick syntax check
+python3 -m compileall ops_store minio_handler ops_index_mgmt tests
 
-app = Flask(__name__)
-configure_flask_logging(app, log_dir="logs/flask", log_name="server")
+# Airflow DAG integrity (no Airflow server needed)
+python3 -m pytest airflow_mgmt/tests -v
 ```
 
-That creates `logs/flask/server.log`, rotates it at midnight, and keeps the
-latest three rotated log files by default. If you want to target the root or a
-named logger instead of `app.logger`, use `configure_logging(...)`.
-
-For older code that already expects `setup_logger(path_dir, name)`, that
-compatibility entrypoint is also available and uses `name` as both the logger
-name and log filename base.
-
-For message-style conventions such as when to use `%s` placeholders instead of
-f-strings in `logger.info(...)`, see [docs/flask_logging.md](docs/flask_logging.md).
-
-## OpenSearch Helpers
-
-The project includes a class-based `ops_store` package built on top of
-`opensearch-py`.
+## Quick reference — `ops_store`
 
 ```python
 from ops_store import OSDoc, OSIndex, OSSearch
@@ -62,50 +51,13 @@ index_crud.create(
     }
 )
 
-document_crud.index({"title": "Hello", "tags": ["flask"]}, doc_id="post-1")
+document_crud.index({"title": "Hello", "tags": ["airflow"]}, doc_id="post-1")
 document_crud.upsert("post-2", {"title": "Updated later"})
 result = search_service.match("title", "Hello")
 ```
 
-`OSIndex.exists()` now treats either a concrete index name or an alias name as an
-existing target by default. If you only want to check for a physical index, use
-`include_aliases=False`.
+`OSIndex.exists()` treats either a concrete index name or an alias as an existing target by default. Pass `include_aliases=False` for index-only checks. `OSIndex.describe(name)` summarizes whether the name is an index or alias, its backing indices, attached aliases, and whether a rollover write alias is configured.
 
-When you need to inspect how a target is wired, `OSIndex.describe()` summarizes
-whether the name is an index or alias, which backing indices it resolves to,
-which aliases exist on those indices, and whether there is a rollover-style
-write alias.
+`ops_store` does not log its own calls — observe the cluster through OpenSearch / Kibana.
 
-```python
-summary = index_crud.describe("articles")
-
-# Example summary keys:
-# {
-#     "resource_type": "alias",
-#     "backing_indices": ["articles-000001", "articles-000002"],
-#     "searchable_names": ["articles", "articles-000001", "articles-000002"],
-#     "rollover": {
-#         "alias": "articles",
-#         "write_index": "articles-000002",
-#         "ready": True,
-#     },
-# }
-```
-
-`ops_store` does not log OpenSearch calls itself. Observe the cluster through
-OpenSearch/Kibana dashboards or a dedicated monitoring service. For Flask
-application logs, use the root-level `logging_config.py` helper.
-
-Connection settings are read from environment variables such as
-`OPENSEARCH_HOST`, `OPENSEARCH_PORT`, `OPENSEARCH_USER`,
-`OPENSEARCH_PASSWORD`, and `OPENSEARCH_USE_SSL`.
-
-## Routes
-
-- `GET /`
-- `GET /api/health`
-- `GET /api/ping`
-
-## Cloud entrypoint
-
-Use `index:app` as the WSGI callable.
+Connection settings come from env vars: `OPENSEARCH_HOST`, `OPENSEARCH_PORT`, `OPENSEARCH_USER`, `OPENSEARCH_PASSWORD`, `OPENSEARCH_USE_SSL`, and the rest listed in `CLAUDE.md`.
