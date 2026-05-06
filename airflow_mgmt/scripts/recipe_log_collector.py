@@ -24,6 +24,7 @@ local disk — since the local FS is fresh on every task instance.
 """
 
 import asyncio
+import logging
 import shutil
 import sys
 import uuid
@@ -31,6 +32,8 @@ from datetime import datetime
 from ftplib import FTP
 from pathlib import Path
 from typing import TypedDict
+
+log = logging.getLogger(__name__)
 
 
 # ── sys.path bootstrap ──────────────────────────────────────────────────────
@@ -142,6 +145,7 @@ def upload_results(result: DownloadResult, cwd_folder: Path, bucket: str) -> dic
     storage = MinioObject(bucket=bucket)
 
     uploaded: list[dict] = []
+    upload_failed: list[dict] = []
     for item in result["files"]["success"]:
         local_path = Path(item["path"])
         # Date partition first so MinIO lifecycle rules and "today's data"
@@ -151,13 +155,42 @@ def upload_results(result: DownloadResult, cwd_folder: Path, bucket: str) -> dic
         ip = local_path.parent.name
         key = f"{partition}/{ip}/{local_path.name}"
 
-        storage.upload(key=key, file_path=local_path)
-        uploaded.append(
-            {"ip": ip, "key": key, "size": local_path.stat().st_size}
+        try:
+            storage.upload(key=key, file_path=local_path)
+            uploaded.append(
+                {"ip": ip, "key": key, "size": local_path.stat().st_size}
+            )
+        except Exception as exc:
+            log.exception("MinIO upload failed for %s -> %s", local_path, key)
+            upload_failed.append(
+                {"ip": ip, "key": key, "error": f"{type(exc).__name__}: {exc}"}
+            )
+
+    download_failed = result["files"].get("failed", [])
+    summary = {
+        "uploaded": uploaded,
+        "download_failed": download_failed,
+        "upload_failed": upload_failed,
+        "ok": len(uploaded),
+        "ng": len(download_failed) + len(upload_failed),
+    }
+
+    # Fail the task on ANY failure (download or upload). Airflow retries
+    # the whole task; MinIO PUT is idempotent so re-uploading already-
+    # uploaded files just replaces them with identical content. The cost
+    # is one extra round of FTP downloads on retry — acceptable, since
+    # checking MinIO existence per-file would add LAN round-trips on
+    # every successful run too.
+    if download_failed or upload_failed:
+        raise RuntimeError(
+            f"recipe_log_collector partial failure: "
+            f"{len(uploaded)} uploaded, "
+            f"{len(download_failed)} ftp-failed, "
+            f"{len(upload_failed)} upload-failed. "
+            f"summary={summary}"
         )
 
-    failed = result["files"].get("failed", [])
-    return {"uploaded": uploaded, "failed": failed, "ok": len(uploaded), "ng": len(failed)}
+    return summary
 
 
 def cleanup_folder(path: Path) -> None:
