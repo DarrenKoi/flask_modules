@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A personal toolbox of work-supporting Python modules. Each top-level package solves one piece of the day-to-day workflow (search, object storage, Airflow scaffolding, index setup). Packages are independent — pick one up and use it from a notebook, a script, or an Airflow task without dragging the rest along.
 
-The directory name `flask_modules` is historical. There is no Flask app here anymore.
+The directory name `flask_modules` is historical. The `url_shortner/` package introduces a Flask app, but the rest of the repo is plain Python modules.
 
 ## Modules
 
@@ -14,6 +14,7 @@ The directory name `flask_modules` is historical. There is no Flask app here any
 - **`minio_handler/`** — class-based MinIO / S3-compatible client. `MinioConfig` + `MinioBase` + `MinioObject` (CRUD, presigned URLs, DataFrame parquet round-trip via `put_dataframe` / `get_dataframe`, image helpers). Public API in `minio_handler/__init__.py`. Vendored copy lives under `airflow_mgmt/minio_handler/` so DAGs can import it without depending on the repo root being installed.
 - **`ops_index_mgmt/`** — operational scripts that materialize specific OpenSearch indices (mappings, ISM policies, etc.) for the company cluster. One file per index/use case (e.g. `hitachi_sem_msr_info.py`).
 - **`airflow_mgmt/`** — sandbox + production-bound code for the company Airflow 3.1.8 platform. Real DAGs in `dags/`, repo-local helpers in `utils/`, vendored `minio_handler/`, copy-paste scaffolding in `dag_templates/`, reference scripts in `scripts/`. See `airflow_mgmt/README.md` for the real-vs-educational split and `airflow_mgmt/docs/sys_path_bootstrap.md` for the marker-file `sys.path` trick every DAG uses.
+- **`url_shortner/`** — internal URL shortener Flask service. `MongoConfig` + `RedisConfig` (env-driven dataclasses, `slots=True`), `MongoBase` + `RedisBase`, services `URLMapping` (Mongo CRUD), `CacheLayer` (Redis read-through cache), `ClickAnalytics` (composes `ops_store.OSDoc` for click-event logging), `ShortenerService` (orchestrator with collision-retry + read-through cache + fire-and-forget click logging), and `create_app()` (Flask factory: `GET /` form, `POST /shorten`, `GET /<code>` redirect). 7-char base62 random codes plus optional custom aliases. Tests patch `url_shortner.base._mongo_client_class` / `_redis_client_class`; service-level tests inject mocked `URLMapping` / `CacheLayer` / `ClickAnalytics` directly.
 
 ## Conventions
 
@@ -55,5 +56,8 @@ Env vars read by the modules — keep this list in sync if you add new ones:
 - **OpenSearch tuning** (`ops_store`): `OPENSEARCH_BULK_CHUNK`, `OPENSEARCH_TIMEOUT`, `OPENSEARCH_MAX_RETRIES`, `OPENSEARCH_RETRY_ON_TIMEOUT`, `OPENSEARCH_HTTP_COMPRESS`
 - **MinIO** (`minio_handler`): see `minio_handler/minio_config.py` (endpoint, access key, secret, secure flag, default bucket)
 - **Airflow scratch** (`airflow_mgmt`): `AIRFLOW_MGMT_ROOT` (override marker-walk root), `AIRFLOW_MGMT_SCRATCH_ROOT` (writable scratch dir; defaults to `/tmp/airflow_mgmt/` on workers, `airflow_mgmt/scratch/` locally)
+- **MongoDB** (`url_shortner`): `MONGODB_HOST`, `MONGODB_PORT`, `MONGODB_USER`, `MONGODB_PASSWORD`, `MONGODB_DATABASE`, `MONGODB_COLLECTION`, `MONGODB_AUTH_SOURCE`, `MONGODB_TIMEOUT_MS`, `MONGODB_MAX_POOL_SIZE`
+- **Redis** (`url_shortner`): `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD`, `REDIS_SSL`, `REDIS_TIMEOUT`, `REDIS_TTL`
+- **URL shortener app** (`url_shortner`): `URLSHORTNER_BASE_URL` (origin used to render `short_url` in responses), `URLSHORTNER_ANALYTICS_INDEX` (OpenSearch click-events index, default `url_shortner_clicks`)
 
-Note: there is no WSGI/Flask entrypoint anymore. `requirements.txt` no longer pins Flask.
+Run the shortener locally with `FLASK_APP=url_shortner.app:create_app flask run` once Mongo/Redis/OpenSearch env vars are set.

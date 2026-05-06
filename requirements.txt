@@ -1,3 +1,5 @@
+flask
 minio
 opensearch-py
+pymongo
 redis

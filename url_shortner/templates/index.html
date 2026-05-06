@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>URL Shortener</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 540px; margin: 4rem auto; padding: 0 1rem; }
+        h1 { font-size: 1.4rem; margin-bottom: 1.5rem; }
+        label { display: block; margin: 0.75rem 0 0.25rem; font-size: 0.9rem; color: #444; }
+        input[type=text], input[type=url] { width: 100%; padding: 0.5rem; box-sizing: border-box; font-size: 1rem; }
+        button { margin-top: 1rem; padding: 0.5rem 1rem; font-size: 1rem; cursor: pointer; }
+        #result { margin-top: 1.5rem; padding: 0.75rem; background: #f4f4f4; border-radius: 4px; word-break: break-all; }
+        #result a { color: #0366d6; }
+        .error { background: #ffe9e9; color: #a40000; }
+    </style>
+</head>
+<body>
+    <h1>Internal URL Shortener</h1>
+    <form id="shorten-form">
+        <label for="url">Long URL</label>
+        <input id="url" name="url" type="url" required placeholder="https://wiki.company.local/page">
+
+        <label for="alias">Custom alias (optional)</label>
+        <input id="alias" name="alias" type="text" placeholder="q3-roadmap">
+
+        <button type="submit">Shorten</button>
+    </form>
+    <div id="result" hidden></div>
+
+    <script>
+        const form = document.getElementById('shorten-form');
+        const result = document.getElementById('result');
+        const baseUrl = {{ base_url|tojson }};
+
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            result.hidden = false;
+            result.classList.remove('error');
+            result.textContent = 'Working...';
+
+            const body = { url: form.url.value };
+            if (form.alias.value.trim()) body.alias = form.alias.value.trim();
+
+            try {
+                const response = await fetch('/shorten', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    result.classList.add('error');
+                    result.textContent = data.error || 'Failed to shorten URL.';
+                    return;
+                }
+                const shortUrl = data.short_url || (baseUrl ? baseUrl + '/' + data.code : data.code);
+                result.innerHTML = 'Short URL: <a href="' + shortUrl + '">' + shortUrl + '</a>';
+            } catch (err) {
+                result.classList.add('error');
+                result.textContent = 'Network error: ' + err.message;
+            }
+        });
+    </script>
+</body>
+</html>
