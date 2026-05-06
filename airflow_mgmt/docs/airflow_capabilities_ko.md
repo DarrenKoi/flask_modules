@@ -71,13 +71,15 @@ Airflow DAG는 "workflow 정의"입니다. runtime 값에 따라 어떤 task를 
 | `dags/` | 회사 Airflow가 실제로 읽고 실행하는 DAG |
 | `dags/diagnostics/inspect_packages_dag.py` | worker 설치 package를 로그로 출력하는 실제 진단 DAG |
 | `dag_templates/taskflow_decorator_template.py` | 일반 업무 DAG의 기본 template. `@dag`, `@task`, repo-local helper import, 필요한 classic operator 혼합을 포함합니다. |
+| `dag_templates/with_dag_template.py` | `with DAG(...)`, `PythonOperator`, manual XCom pull을 명시적으로 쓰는 classic template |
 | `dag_templates/virtualenv_task_template.py` | worker에 없는 package가 필요한 task용 isolated virtualenv template |
 | `docs/keeping_dags_thin.md` | DAG 파일을 얇게 유지하는 repo-local 원칙 |
 
 새 업무 DAG를 만들 때는 먼저 `taskflow_decorator_template.py`를 복사해
-`dags/<topic>/<name>_dag.py`로 옮깁니다. 특정 task에 worker에 없는 package가 필요할 때만
-`virtualenv_task_template.py`를 사용합니다. 긴 업무 로직은 `minio_handler/`나 추후 `utils/`
-같은 repo-local helper로 분리합니다.
+`dags/<topic>/<name>_dag.py`로 옮깁니다. operator 객체와 XCom pull을 명시적으로 보고
+싶으면 `with_dag_template.py`를 사용합니다. 특정 task에 worker에 없는 package가 필요할
+때만 `virtualenv_task_template.py`를 사용합니다. 긴 업무 로직은 `minio_handler/`나 추후
+`utils/` 같은 repo-local helper로 분리합니다.
 
 ## 작은 예시
 
