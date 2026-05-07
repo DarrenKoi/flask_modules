@@ -428,6 +428,23 @@ class OSSearch(OSBase):
         }
         return self.search_raw(body, index=index)
 
+    def sample_to_dataframe(
+        self,
+        *,
+        index: str | None = None,
+        size: int = 10,
+        query: dict[str, Any] | None = None,
+        seed: int | None = None,
+        include_meta: bool = False,
+    ) -> Any:
+        result = self.sample(
+            index=index,
+            size=size,
+            query=query,
+            seed=seed,
+        )
+        return self.to_dataframe(result, include_meta=include_meta)
+
     def unique_values(
         self,
         field: str,

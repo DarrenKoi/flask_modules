@@ -1033,6 +1033,54 @@ class OSSearchTests(unittest.TestCase):
             },
         )
 
+    def test_sample_to_dataframe_wraps_sample_result(self) -> None:
+        client = Mock()
+        client.search.return_value = {
+            "hits": {
+                "hits": [
+                    {
+                        "_id": "doc-1",
+                        "_index": "events",
+                        "_score": 0.25,
+                        "_source": {"status": "ok"},
+                    }
+                ]
+            }
+        }
+        service = OSSearch(client=client, index="events")
+
+        with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
+            dataframe = service.sample_to_dataframe(
+                size=3,
+                query={"term": {"status": "ok"}},
+                seed=42,
+                include_meta=True,
+            )
+
+        client.search.assert_called_once_with(
+            index="events",
+            body={
+                "size": 3,
+                "query": {
+                    "function_score": {
+                        "query": {"term": {"status": "ok"}},
+                        "random_score": {"seed": 42, "field": "_seq_no"},
+                    }
+                },
+            },
+        )
+        self.assertEqual(
+            dataframe.records,
+            [
+                {
+                    "status": "ok",
+                    "_id": "doc-1",
+                    "_index": "events",
+                    "_score": 0.25,
+                }
+            ],
+        )
+
     def test_unique_values_returns_terms_bucket_keys(self) -> None:
         client = Mock()
         client.search.return_value = {
