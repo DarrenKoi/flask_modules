@@ -6,16 +6,18 @@ from ops_index_mgmt import hitachi_sem_msr_info as mgmt
 
 class SemMsrInfoIndexMgmtTests(unittest.TestCase):
     def test_build_index_settings_uses_requested_cluster_shape(self) -> None:
-        settings = mgmt.build_index_settings("cdsem_msr_info")
+        settings = mgmt.build_index_settings("meas_hist_cdsem")
 
         self.assertEqual(settings["number_of_shards"], 3)
         self.assertEqual(settings["number_of_replicas"], 1)
         self.assertEqual(
             settings["plugins.index_state_management.rollover_alias"],
-            "cdsem_msr_info",
+            "meas_hist_cdsem",
         )
 
-    def test_build_ism_policy_rolls_over_at_15gb_and_deletes_after_50d(self) -> None:
+    def test_build_ism_policy_rolls_over_after_60d_and_deletes_after_365d(
+        self,
+    ) -> None:
         body = mgmt.build_ism_policy_body()
         policy = body["policy"]
         hot_state = policy["states"][0]
@@ -25,33 +27,33 @@ class SemMsrInfoIndexMgmtTests(unittest.TestCase):
             policy["ism_template"],
             [
                 {
-                    "index_patterns": ["cdsem_msr_info-*", "hvsem_msr_info-*"],
+                    "index_patterns": ["meas_hist_cdsem-*", "meas_hist_hvsem-*"],
                     "priority": 100,
                 }
             ],
         )
         self.assertEqual(
             hot_state["actions"],
-            [{"rollover": {"min_size": "15gb"}}],
+            [{"rollover": {"min_index_age": "60d"}}],
         )
         self.assertEqual(
             hot_state["transitions"],
             [
                 {
                     "state_name": "delete",
-                    "conditions": {"min_index_age": "50d"},
+                    "conditions": {"min_index_age": "365d"},
                 }
             ],
         )
         self.assertEqual(delete_state["actions"], [{"delete": {}}])
 
     def test_build_index_template_sets_per_alias_rollover_alias(self) -> None:
-        body = mgmt.build_index_template_body("hvsem_msr_info")
+        body = mgmt.build_index_template_body("meas_hist_hvsem")
 
-        self.assertEqual(body["index_patterns"], ["hvsem_msr_info-*"])
+        self.assertEqual(body["index_patterns"], ["meas_hist_hvsem-*"])
         self.assertEqual(
             body["template"]["settings"],
-            mgmt.build_index_settings("hvsem_msr_info"),
+            mgmt.build_index_settings("meas_hist_hvsem"),
         )
 
     def test_create_client_reads_connection_from_module_variables(self) -> None:
@@ -95,18 +97,18 @@ class SemMsrInfoIndexMgmtTests(unittest.TestCase):
             [
                 call(
                     "PUT",
-                    "/_plugins/_ism/policies/sem_msr_info_retention_policy",
+                    "/_plugins/_ism/policies/sem_meas_hist_retention_policy",
                     body=mgmt.build_ism_policy_body(),
                 ),
                 call(
                     "PUT",
-                    "/_index_template/cdsem_msr_info_template",
-                    body=mgmt.build_index_template_body("cdsem_msr_info"),
+                    "/_index_template/meas_hist_cdsem_template",
+                    body=mgmt.build_index_template_body("meas_hist_cdsem"),
                 ),
                 call(
                     "PUT",
-                    "/_index_template/hvsem_msr_info_template",
-                    body=mgmt.build_index_template_body("hvsem_msr_info"),
+                    "/_index_template/meas_hist_hvsem_template",
+                    body=mgmt.build_index_template_body("meas_hist_hvsem"),
                 ),
             ]
         )
@@ -117,17 +119,17 @@ class SemMsrInfoIndexMgmtTests(unittest.TestCase):
         client.indices.exists_alias.return_value = False
         client.indices.create.return_value = {"acknowledged": True}
 
-        result = mgmt.ensure_rollover_index(client, "cdsem_msr_info")
+        result = mgmt.ensure_rollover_index(client, "meas_hist_cdsem")
 
         self.assertTrue(result["created"])
-        self.assertEqual(result["alias"], "cdsem_msr_info")
-        self.assertEqual(result["write_index"], "cdsem_msr_info-000001")
+        self.assertEqual(result["alias"], "meas_hist_cdsem")
+        self.assertEqual(result["write_index"], "meas_hist_cdsem-000001")
         client.indices.create.assert_called_once_with(
-            index="cdsem_msr_info-000001",
+            index="meas_hist_cdsem-000001",
             body={
-                "settings": mgmt.build_index_settings("cdsem_msr_info"),
+                "settings": mgmt.build_index_settings("meas_hist_cdsem"),
                 "aliases": {
-                    "cdsem_msr_info": {
+                    "meas_hist_cdsem": {
                         "is_write_index": True,
                     }
                 },
@@ -140,38 +142,38 @@ class SemMsrInfoIndexMgmtTests(unittest.TestCase):
         client.indices.exists_alias.side_effect = [True, True]
         client.indices.get_alias.side_effect = [
             {
-                "hvsem_msr_info-000001": {
+                "meas_hist_hvsem-000001": {
                     "aliases": {
-                        "hvsem_msr_info": {"is_write_index": True}
+                        "meas_hist_hvsem": {"is_write_index": True}
                     }
                 }
             },
             {
-                "hvsem_msr_info-000001": {
+                "meas_hist_hvsem-000001": {
                     "aliases": {
-                        "hvsem_msr_info": {"is_write_index": True}
+                        "meas_hist_hvsem": {"is_write_index": True}
                     }
                 }
             },
         ]
 
-        result = mgmt.ensure_rollover_index(client, "hvsem_msr_info")
+        result = mgmt.ensure_rollover_index(client, "meas_hist_hvsem")
 
         self.assertFalse(result["created"])
-        self.assertEqual(result["write_index"], "hvsem_msr_info-000001")
+        self.assertEqual(result["write_index"], "meas_hist_hvsem-000001")
         client.indices.create.assert_not_called()
 
     def test_ensure_rollover_index_rejects_non_rollover_existing_index(self) -> None:
         client = Mock()
         client.indices.exists.return_value = True
         client.indices.get.return_value = {
-            "cdsem_msr_info": {
+            "meas_hist_cdsem": {
                 "aliases": {},
             }
         }
 
         with self.assertRaises(RuntimeError):
-            mgmt.ensure_rollover_index(client, "cdsem_msr_info")
+            mgmt.ensure_rollover_index(client, "meas_hist_cdsem")
 
     def test_ensure_rollover_indices_creates_both_aliases(self) -> None:
         client = Mock()
@@ -182,7 +184,7 @@ class SemMsrInfoIndexMgmtTests(unittest.TestCase):
 
         self.assertEqual(
             sorted(result),
-            ["cdsem_msr_info", "hvsem_msr_info"],
+            ["meas_hist_cdsem", "meas_hist_hvsem"],
         )
         self.assertEqual(client.indices.create.call_count, 2)
 

@@ -6,20 +6,20 @@ Operational OpenSearch index setup scripts.
 
 `hitachi_sem_msr_info.py` creates:
 
-- shared ISM policy `sem_msr_info_retention_policy`
-- index template `cdsem_msr_info_template`
-- index template `hvsem_msr_info_template`
-- first backing index `cdsem_msr_info-000001`
-- first backing index `hvsem_msr_info-000001`
-- write/search alias `cdsem_msr_info`
-- write/search alias `hvsem_msr_info`
+- shared ISM policy `sem_meas_hist_retention_policy`
+- index template `meas_hist_cdsem_template`
+- index template `meas_hist_hvsem_template`
+- first backing index `meas_hist_cdsem-000001`
+- first backing index `meas_hist_hvsem-000001`
+- write/search alias `meas_hist_cdsem`
+- write/search alias `meas_hist_hvsem`
 
 Settings:
 
 - primary shards: `3`
 - replicas: `1`
-- rollover: `15gb` total primary shard storage
-- retention: delete backing indices after `50d`
+- rollover: backing index age reaches `60d`
+- retention: delete backing indices after `365d`
 
 Connection values are declared near the top of
 `ops_index_mgmt/hitachi_sem_msr_info.py`:
@@ -37,12 +37,35 @@ python -m ops_index_mgmt.hitachi_sem_msr_info --dry-run
 python -m ops_index_mgmt.hitachi_sem_msr_info
 ```
 
-The aliases `cdsem_msr_info` and `hvsem_msr_info` should be used by ingest and
+The aliases `meas_hist_cdsem` and `meas_hist_hvsem` should be used by ingest and
 query code. OpenSearch writes to the current backing index through each alias
-and rolls them to `cdsem_msr_info-000002`, `hvsem_msr_info-000002`, and so on.
+and rolls them to `meas_hist_cdsem-000002`, `meas_hist_hvsem-000002`, and so on.
 
-Retention is index-age based. It removes whole backing indices after 50 days,
-so exact document-level expiry depends on how much time each backing index spans.
+Rollover and retention are index-age based. The policy rolls each backing index
+after 60 days and removes whole backing indices after 365 days, so exact
+document-level expiry depends on how much time each backing index spans.
+
+After the aliases exist, pandas DataFrames can be inserted through
+`ops_store.OSDoc.bulk_index_dataframe()`:
+
+```python
+from ops_store import OSDoc
+
+doc_service = OSDoc(client=client)
+
+doc_service.bulk_index_dataframe(
+    cdsem_df,
+    index="meas_hist_cdsem",
+    id_field="doc_id",
+    op_type="create",
+)
+doc_service.bulk_index_dataframe(
+    hvsem_df,
+    index="meas_hist_hvsem",
+    id_field="doc_id",
+    op_type="create",
+)
+```
 
 ## Elasticsearch → OpenSearch reindex
 
