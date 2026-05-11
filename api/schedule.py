@@ -19,11 +19,11 @@ from api.extension import (
     redis_lock,
     scheduler,
 )
-from api.tasks import restart_uwsgi, task1, task2
+from api.tasks import purge_old_logs, restart_uwsgi, task1, task2
 
 bp = Blueprint("schedule", __name__)
 
-TOKEN_ENV = "API_SCHEDULE_TOKEN"
+SCHEDULE_TOKEN = ""
 TOKEN_HEADER = "X-API-Token"
 
 # `lock_ttl=None` falls back to ApiRedisConfig.lock_ttl (default 1200s).
@@ -50,6 +50,13 @@ JOB_FUNCTIONS: dict[str, dict[str, Any]] = {
         # Reload-the-service action: keep it on the scheduler's clock only.
         # Reachable manual dispatch would let any caller bounce the process.
         "manual_dispatch": False,
+    },
+    "purge_old_logs": {
+        "fn": purge_old_logs,
+        # 2 AM — after restart_uwsgi (1 AM) has rolled today's log file.
+        "trigger": CronTrigger(hour=2, minute=0),
+        "lock_ttl": 300,
+        "manual_dispatch": True,
     },
 }
 
@@ -234,14 +241,13 @@ def jobs_logs() -> Any:
 
 @bp.post("/jobs/run_job")
 def run_job() -> Any:
-    # Fail-closed auth: if no token is configured, manual dispatch is
-    # disabled outright. uWSGI binds 0.0.0.0:8000, so an unauthenticated
-    # endpoint here is reachable by anyone who can route to the service.
-    expected = current_app.config.get(TOKEN_ENV)
-    if not expected:
+    # Fail-closed auth: empty SCHEDULE_TOKEN disables manual dispatch outright.
+    # uWSGI binds 0.0.0.0:8000, so this endpoint is reachable by anyone who can
+    # route to the service.
+    if not SCHEDULE_TOKEN:
         return jsonify(error="manual dispatch disabled"), 403
     presented = request.headers.get(TOKEN_HEADER, "")
-    if not hmac.compare_digest(presented, expected):
+    if not hmac.compare_digest(presented, SCHEDULE_TOKEN):
         return jsonify(error="unauthorized"), 401
 
     payload = request.get_json(silent=True) or {}

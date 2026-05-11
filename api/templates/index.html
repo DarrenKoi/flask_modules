@@ -24,6 +24,7 @@
   <h1>API scheduler</h1>
   <p>Registered jobs: {% for j in jobs %}<code>{{ j }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</p>
   <p>Health: <span id="health-badge" class="badge">checking…</span> <small id="health-detail"></small></p>
+  <p><small>Heartbeat: <span id="heartbeat">—</span> · Role: <span id="role">—</span></small></p>
 
   <h2>Recent task runs</h2>
   <table>
@@ -41,6 +42,10 @@
         badge.className = 'badge ' + (j.status === 'ok' ? 'ok' : 'bad');
         document.getElementById('health-detail').textContent =
           `redis=${j.redis} · scheduler=${j.scheduler.running ? 'running' : 'stopped'} · jobs=${j.scheduler.jobs.join(',') || 'none'}`;
+        const hb = j.scheduler.heartbeat;
+        document.getElementById('heartbeat').textContent =
+          hb ? `${hb} (${Math.round((Date.now() - Date.parse(hb)) / 1000)}s ago)` : 'missing';
+        document.getElementById('role').textContent = j.scheduler.role || '—';
       } catch (e) {
         const badge = document.getElementById('health-badge');
         badge.textContent = 'unreachable';

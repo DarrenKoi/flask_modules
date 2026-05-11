@@ -7,7 +7,7 @@ from flask import Flask
 
 from api import extension, schedule
 from api.extension import ApiRedisConfig, TaskLogger
-from api.schedule import TOKEN_ENV, TOKEN_HEADER
+from api.schedule import TOKEN_HEADER
 
 
 def _build_test_app(test_case, *, lock_held: bool = False, redis_ok: bool = True):
@@ -162,23 +162,24 @@ class JobsLogsRouteTests(unittest.TestCase):
 
 class RunJobRouteTests(unittest.TestCase):
     """The /jobs/run_job route is shared-secret authenticated. Manual dispatch
-    is disabled outright when ``TOKEN_ENV`` is absent from ``app.config``.
+    is disabled outright when ``schedule.SCHEDULE_TOKEN`` is empty.
     """
 
     AUTH = {TOKEN_HEADER: "secret"}
 
-    def _app(self, **kwargs):
-        app, client, lock_client, scheduler_mock = _build_test_app(self, **kwargs)
-        app.config[TOKEN_ENV] = "secret"
-        return app, client, lock_client, scheduler_mock
+    def _app_with_token(self, **kwargs):
+        patcher = patch.object(schedule, "SCHEDULE_TOKEN", "secret")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return _build_test_app(self, **kwargs)
 
     def test_missing_header_returns_401(self) -> None:
-        _, client, _, _ = self._app()
+        _, client, _, _ = self._app_with_token()
         resp = client.post("/jobs/run_job", json={"job_name": "task1"})
         self.assertEqual(resp.status_code, 401)
 
     def test_wrong_token_returns_401(self) -> None:
-        _, client, _, _ = self._app()
+        _, client, _, _ = self._app_with_token()
         resp = client.post(
             "/jobs/run_job",
             json={"job_name": "task1"},
@@ -186,9 +187,7 @@ class RunJobRouteTests(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 401)
 
-    def test_disabled_when_config_token_unset(self) -> None:
-        # No app.config[TOKEN_ENV] → manual dispatch fully disabled (403),
-        # even when a header is presented.
+    def test_disabled_when_token_empty(self) -> None:
         _, client, _, _ = _build_test_app(self)
         resp = client.post(
             "/jobs/run_job",
@@ -198,8 +197,7 @@ class RunJobRouteTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 403)
 
     def test_restart_uwsgi_blocked_from_manual_dispatch(self) -> None:
-        # Even with a valid token, jobs flagged manual_dispatch=False are 403.
-        _, client, _, _ = self._app()
+        _, client, _, _ = self._app_with_token()
         resp = client.post(
             "/jobs/run_job",
             json={"job_name": "restart_uwsgi"},

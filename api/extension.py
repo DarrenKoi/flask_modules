@@ -2,7 +2,6 @@
 
 import json
 import logging
-import os
 import sys
 import time
 import uuid
@@ -10,7 +9,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, Self
+from typing import Any, Callable
 
 
 # ── sys.path bootstrap ──────────────────────────
@@ -31,15 +30,6 @@ if str(ROOT_DIR) not in sys.path:
 # ─────────────────────────────────────
 
 log = logging.getLogger(__name__)
-
-
-def parse_bool(value: str) -> bool:
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "t", "yes", "y", "on"}:
-        return True
-    if normalized in {"0", "false", "f", "no", "n", "off"}:
-        return False
-    raise ValueError(f"Invalid boolean value: {value!r}")
 
 
 @dataclass(slots=True)
@@ -75,53 +65,6 @@ class ApiRedisConfig:
         kwargs.update(self.extra_client_kwargs)
         return kwargs
 
-    @classmethod
-    def from_env(cls, **overrides: Any) -> Self:
-        values: dict[str, Any] = {}
-
-        host = os.getenv("API_REDIS_HOST")
-        if host:
-            values["host"] = host
-
-        port = os.getenv("API_REDIS_PORT")
-        if port:
-            values["port"] = int(port)
-
-        db = os.getenv("API_REDIS_DB")
-        if db:
-            values["db"] = int(db)
-
-        lock_db = os.getenv("API_REDIS_LOCK_DB")
-        if lock_db:
-            values["lock_db"] = int(lock_db)
-
-        password = os.getenv("API_REDIS_PASSWORD")
-        if password is not None:
-            values["password"] = password or None
-
-        ssl = os.getenv("API_REDIS_SSL")
-        if ssl is not None:
-            values["ssl"] = parse_bool(ssl)
-
-        socket_timeout = os.getenv("API_REDIS_TIMEOUT")
-        if socket_timeout:
-            values["socket_timeout"] = float(socket_timeout)
-
-        lock_ttl = os.getenv("API_REDIS_LOCK_TTL")
-        if lock_ttl:
-            values["lock_ttl"] = int(lock_ttl)
-
-        log_list_max = os.getenv("API_REDIS_LOG_MAX")
-        if log_list_max:
-            values["log_list_max"] = int(log_list_max)
-
-        values.update(overrides)
-        return cls(**values)
-
-
-def load_api_redis_config(**overrides: Any) -> ApiRedisConfig:
-    return ApiRedisConfig.from_env(**overrides)
-
 
 def _redis_client_class() -> type[Any]:
     from redis import Redis
@@ -134,8 +77,8 @@ def create_lock_client(
     **overrides: Any,
 ) -> Any:
     if config is None:
-        config = load_api_redis_config(**overrides)
-    elif overrides:
+        config = ApiRedisConfig()
+    if overrides:
         config = replace(config, **overrides)
     return _redis_client_class()(**config.to_lock_client_kwargs())
 

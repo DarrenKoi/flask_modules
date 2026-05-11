@@ -1,5 +1,4 @@
 import json
-import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -38,17 +37,15 @@ class ApiRedisConfigTests(unittest.TestCase):
         self.assertEqual(cfg.log_list_key, "api_skewnono:logs:tasks")
         self.assertEqual(cfg.log_list_max, 500)
 
-    def test_from_env_overrides(self) -> None:
-        env = {
-            "API_REDIS_HOST": "redis.internal",
-            "API_REDIS_PORT": "6380",
-            "API_REDIS_DB": "2",
-            "API_REDIS_LOCK_DB": "3",
-            "API_REDIS_LOCK_TTL": "900",
-            "API_REDIS_LOG_MAX": "100",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            cfg = ApiRedisConfig.from_env()
+    def test_overrides_via_constructor(self) -> None:
+        cfg = ApiRedisConfig(
+            host="redis.internal",
+            port=6380,
+            db=2,
+            lock_db=3,
+            lock_ttl=900,
+            log_list_max=100,
+        )
         self.assertEqual(cfg.host, "redis.internal")
         self.assertEqual(cfg.port, 6380)
         self.assertEqual(cfg.db, 2)

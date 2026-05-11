@@ -1,4 +1,3 @@
-import os
 import unittest
 from unittest.mock import patch
 
@@ -18,21 +17,10 @@ class TaskSmokeTests(unittest.TestCase):
 
 
 class RestartUwsgiTests(unittest.TestCase):
-    def test_touches_path_from_env(self) -> None:
-        with patch.dict(os.environ, {"UWSGI_RESTART_PATH": "/tmp/api_test_restart.txt"}):
-            with patch("api.tasks.many_tasks.Path") as PathMock:
-                instance = PathMock.return_value
-                restart_uwsgi()
-                PathMock.assert_called_once_with("/tmp/api_test_restart.txt")
-                instance.touch.assert_called_once()
-
-    def test_falls_back_to_default_path(self) -> None:
-        # Clear the env var if set, then verify the default path is used.
-        env = {k: v for k, v in os.environ.items() if k != "UWSGI_RESTART_PATH"}
-        with patch.dict(os.environ, env, clear=True):
-            with patch("api.tasks.many_tasks.Path") as PathMock:
-                restart_uwsgi()
-                PathMock.assert_called_once_with("/project/workSpace/restart.txt")
+    def test_touches_hardcoded_restart_path(self) -> None:
+        with patch.object(many_tasks.UWSGI_RESTART_PATH, "touch") as touch_mock:
+            restart_uwsgi()
+            touch_mock.assert_called_once()
 
 
 if __name__ == "__main__":
