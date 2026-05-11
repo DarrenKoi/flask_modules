@@ -4,8 +4,8 @@
 emits a single ``skip`` record (not ``start``/``skip``/``end``).
 """
 
+import hashlib
 import hmac
-import zlib
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -32,12 +32,13 @@ def slot_minute(name: str, modulus: int = 60) -> int:
     """Stable minute-of-the-hour slot derived from the job name.
 
     Use for jobs where "any time within this hour is fine" — spreads N jobs
-    across N slots without manual bookkeeping. CRC32 is stable across
-    interpreter restarts (unlike builtin ``hash()``, which is randomized
-    per-process). Reserve manual ``minute=`` values for jobs whose ordering
-    matters (e.g. purge after restart).
+    across N slots without manual bookkeeping. MD5's first 4 bytes give a
+    stable 32-bit int across interpreter restarts (unlike builtin ``hash()``,
+    which is randomized per-process). Reserve manual ``minute=`` values for
+    jobs whose ordering matters (e.g. purge after restart).
     """
-    return zlib.crc32(name.encode()) % modulus
+    digest = hashlib.md5(name.encode()).digest()[:4]
+    return int.from_bytes(digest, "big") % modulus
 
 
 # `lock_ttl=None` falls back to ApiRedisConfig.lock_ttl (default 1200s).
