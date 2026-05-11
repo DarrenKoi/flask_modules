@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>API scheduler dashboard</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: 0.25rem; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.85rem; }
+    .ok { background: #d4edda; color: #155724; }
+    .bad { background: #f8d7da; color: #721c24; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #eee; }
+    th { background: #f4f4f4; }
+    .event-start { color: #555; }
+    .event-end { color: #155724; }
+    .event-skip { color: #856404; }
+    .event-error { color: #721c24; font-weight: 600; }
+    code { background: #f4f4f4; padding: 1px 4px; border-radius: 3px; }
+    small { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>API scheduler</h1>
+  <p>Registered jobs: {% for j in jobs %}<code>{{ j }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  <p>Health: <span id="health-badge" class="badge">checking…</span> <small id="health-detail"></small></p>
+
+  <h2>Recent task runs</h2>
+  <table>
+    <thead><tr><th>Time (UTC)</th><th>Job</th><th>Event</th><th>Duration (ms)</th><th>Detail</th></tr></thead>
+    <tbody id="logs-body"><tr><td colspan="5">loading…</td></tr></tbody>
+  </table>
+
+  <script>
+    async function refreshHealth() {
+      try {
+        const r = await fetch('/health');
+        const j = await r.json();
+        const badge = document.getElementById('health-badge');
+        badge.textContent = j.status;
+        badge.className = 'badge ' + (j.status === 'ok' ? 'ok' : 'bad');
+        document.getElementById('health-detail').textContent =
+          `redis=${j.redis} · scheduler=${j.scheduler.running ? 'running' : 'stopped'} · jobs=${j.scheduler.jobs.join(',') || 'none'}`;
+      } catch (e) {
+        const badge = document.getElementById('health-badge');
+        badge.textContent = 'unreachable';
+        badge.className = 'badge bad';
+      }
+    }
+    async function refreshLogs() {
+      try {
+        const r = await fetch('/jobs/logs?limit=100');
+        const records = await r.json();
+        const body = document.getElementById('logs-body');
+        if (!records.length) {
+          body.innerHTML = '<tr><td colspan="5"><em>no runs yet</em></td></tr>';
+          return;
+        }
+        body.innerHTML = records.map(rec => `
+          <tr>
+            <td>${rec.ts}</td>
+            <td><code>${rec.job}</code></td>
+            <td class="event-${rec.event}">${rec.event}</td>
+            <td>${rec.duration_ms ?? ''}</td>
+            <td>${rec.error ?? rec.message ?? ''}</td>
+          </tr>`).join('');
+      } catch (e) { /* leave previous render */ }
+    }
+    function tick() { refreshHealth(); refreshLogs(); }
+    tick();
+    setInterval(tick, 5000);
+  </script>
+</body>
+</html>

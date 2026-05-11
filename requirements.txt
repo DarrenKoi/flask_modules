@@ -1,5 +1,7 @@
 flask
+Flask-APScheduler
 minio
 opensearch-py
 pymongo
 redis
+uwsgi
