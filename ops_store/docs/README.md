@@ -9,8 +9,9 @@ ISM reference, logging strategy를 파일별로 나누지 않습니다.
 - `with_dag_usage.md`: DAG 파일 구조, `ops_store` import, OpenSearch 연결,
   index bootstrap, bulk ingest, search, rollover/ISM, logging/testing 규칙
 - `search_all_usage.md`: `OSSearch`의 DataFrame 조회 메서드(`search_dataframe`,
-  `range_dataframe`, `search_dataframe_all`, `match_dataframe_all`) 사용법과
-  10k 한계 우회, `max_rows` 안전 cap, scroll batch_size 튜닝
+  `range_dataframe`, `range_dataframe_all`, `search_dataframe_all`,
+  `match_dataframe_all`) 사용법과 10k 한계 우회, `max_rows` 안전 cap,
+  scroll batch_size 튜닝
 
 ## 기준
 

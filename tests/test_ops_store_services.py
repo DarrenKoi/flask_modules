@@ -1042,6 +1042,68 @@ class OSSearchTests(unittest.TestCase):
             ],
         )
 
+    def test_range_dataframe_all_scrolls_with_range_filter_and_sort(self) -> None:
+        client = Mock()
+        client.search.return_value = {
+            "_scroll_id": "scroll-1",
+            "hits": {
+                "hits": [
+                    {"_id": "a", "_source": {"timestamp": "2026-05-10", "v": 1}},
+                ]
+            },
+        }
+        client.scroll.return_value = {
+            "_scroll_id": "scroll-1",
+            "hits": {"hits": []},
+        }
+        service = OSSearch(client=client, index="events")
+
+        with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
+            dataframe = service.range_dataframe_all(
+                days=14,
+                batch_size=500,
+                max_rows=1000,
+            )
+
+        client.search.assert_called_once_with(
+            index="events",
+            body={
+                "query": {
+                    "range": {"timestamp": {"gte": "now-14d", "lte": "now"}}
+                },
+                "sort": [{"timestamp": {"order": "desc"}}],
+                "size": 500,
+            },
+            scroll="2m",
+        )
+        self.assertEqual(
+            dataframe.records,
+            [{"timestamp": "2026-05-10", "v": 1}],
+        )
+
+    def test_range_dataframe_all_wraps_caller_query_in_bool_filter(self) -> None:
+        client = Mock()
+        client.search.return_value = {
+            "_scroll_id": "scroll-1",
+            "hits": {"hits": []},
+        }
+        service = OSSearch(client=client, index="events")
+
+        with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
+            service.range_dataframe_all(
+                time_field="event_tm",
+                days=3,
+                query={"term": {"status": "ok"}},
+            )
+
+        body = client.search.call_args.kwargs["body"]
+        self.assertEqual(body["query"]["bool"]["must"], [{"term": {"status": "ok"}}])
+        self.assertEqual(
+            body["query"]["bool"]["filter"],
+            [{"range": {"event_tm": {"gte": "now-3d", "lte": "now"}}}],
+        )
+        self.assertEqual(body["sort"], [{"event_tm": {"order": "desc"}}])
+
     def test_sample_uses_random_score_with_match_all(self) -> None:
         client = Mock()
         service = OSSearch(client=client, index="events")
