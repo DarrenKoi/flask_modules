@@ -988,7 +988,7 @@ class OSSearchTests(unittest.TestCase):
                 "query": {
                     "range": {"timestamp": {"gte": "now-7d", "lte": "now"}}
                 },
-                "size": 10000,
+                "size": 90000,
                 "sort": [{"timestamp": {"order": "desc"}}],
             },
         )
