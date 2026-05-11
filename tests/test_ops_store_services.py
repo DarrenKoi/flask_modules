@@ -976,6 +976,72 @@ class OSSearchTests(unittest.TestCase):
 
         self.assertIsNone(service.latest("event_tm"))
 
+    def test_range_search_defaults_to_timestamp_and_seven_days(self) -> None:
+        client = Mock()
+        service = OSSearch(client=client, index="events")
+
+        service.range_search()
+
+        client.search.assert_called_once_with(
+            index="events",
+            body={
+                "query": {
+                    "range": {"timestamp": {"gte": "now-7d", "lte": "now"}}
+                },
+                "size": 10000,
+                "sort": [{"timestamp": {"order": "desc"}}],
+            },
+        )
+
+    def test_range_search_uses_custom_field_and_days(self) -> None:
+        client = Mock()
+        service = OSSearch(client=client, index="events")
+
+        service.range_search(time_field="event_tm", days=30, size=50)
+
+        body = client.search.call_args.kwargs["body"]
+        self.assertEqual(
+            body["query"]["range"], {"event_tm": {"gte": "now-30d", "lte": "now"}}
+        )
+        self.assertEqual(body["sort"], [{"event_tm": {"order": "desc"}}])
+        self.assertEqual(body["size"], 50)
+
+    def test_range_search_wraps_caller_query_in_bool_filter(self) -> None:
+        client = Mock()
+        service = OSSearch(client=client, index="events")
+
+        service.range_search(query={"term": {"status": "ok"}})
+
+        body = client.search.call_args.kwargs["body"]
+        self.assertEqual(body["query"]["bool"]["must"], [{"term": {"status": "ok"}}])
+        self.assertEqual(
+            body["query"]["bool"]["filter"],
+            [{"range": {"timestamp": {"gte": "now-7d", "lte": "now"}}}],
+        )
+
+    def test_range_dataframe_returns_dataframe_from_hits(self) -> None:
+        client = Mock()
+        client.search.return_value = {
+            "hits": {
+                "hits": [
+                    {"_id": "a", "_source": {"timestamp": "2026-05-10T00:00:00Z", "v": 1}},
+                    {"_id": "b", "_source": {"timestamp": "2026-05-09T00:00:00Z", "v": 2}},
+                ]
+            }
+        }
+        service = OSSearch(client=client, index="events")
+
+        with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
+            dataframe = service.range_dataframe()
+
+        self.assertEqual(
+            dataframe.records,
+            [
+                {"timestamp": "2026-05-10T00:00:00Z", "v": 1},
+                {"timestamp": "2026-05-09T00:00:00Z", "v": 2},
+            ],
+        )
+
     def test_sample_uses_random_score_with_match_all(self) -> None:
         client = Mock()
         service = OSSearch(client=client, index="events")

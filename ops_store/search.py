@@ -404,6 +404,48 @@ class OSSearch(OSBase):
         except NotFoundError:
             return None
 
+    def range_search(
+        self,
+        *,
+        time_field: str = "timestamp",
+        days: int = 7,
+        index: str | None = None,
+        query: dict[str, Any] | None = None,
+        size: int = 10000,
+    ) -> dict[str, Any]:
+        range_clause = {"range": {time_field: {"gte": f"now-{days}d", "lte": "now"}}}
+        if query is not None:
+            body_query: dict[str, Any] = {
+                "bool": {"must": [query], "filter": [range_clause]}
+            }
+        else:
+            body_query = range_clause
+        body = {
+            "query": body_query,
+            "size": size,
+            "sort": [{time_field: {"order": "desc"}}],
+        }
+        return self.search_raw(body, index=index)
+
+    def range_dataframe(
+        self,
+        *,
+        time_field: str = "timestamp",
+        days: int = 7,
+        index: str | None = None,
+        query: dict[str, Any] | None = None,
+        size: int = 10000,
+        include_meta: bool = False,
+    ) -> Any:
+        result = self.range_search(
+            time_field=time_field,
+            days=days,
+            index=index,
+            query=query,
+            size=size,
+        )
+        return self.to_dataframe(result, include_meta=include_meta)
+
     def sample(
         self,
         *,
