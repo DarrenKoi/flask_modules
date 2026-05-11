@@ -411,7 +411,7 @@ class OSSearch(OSBase):
         days: int = 7,
         index: str | None = None,
         query: dict[str, Any] | None = None,
-        size: int = 90000,
+        size: int = 10000,
     ) -> dict[str, Any]:
         range_clause = {"range": {time_field: {"gte": f"now-{days}d", "lte": "now"}}}
         if query is not None:
@@ -434,7 +434,7 @@ class OSSearch(OSBase):
         days: int = 7,
         index: str | None = None,
         query: dict[str, Any] | None = None,
-        size: int = 90000,
+        size: int = 10000,
         include_meta: bool = False,
     ) -> Any:
         result = self.range_search(
@@ -492,7 +492,7 @@ class OSSearch(OSBase):
         field: str,
         *,
         index: str | None = None,
-        size: int = 90000,
+        size: int = 10000,
         query: dict[str, Any] | None = None,
     ) -> list[Any]:
         result = self.aggregate(
