@@ -59,6 +59,68 @@ example_xcom_return_value()
 2. return dict가 XCom의 기본 key인 `return_value`에 저장됩니다.
 3. `consume` task가 실행될 때 Airflow가 그 값을 pull해서 인자로 넣습니다.
 
+## `context`와 `ti`가 뭔지
+
+방법 2 이후로는 `context`와 `ti`가 계속 등장합니다. API를 보기 전에 두 개념을 먼저 정리합니다.
+
+### `context`
+
+Airflow는 task를 실행할 때 그 run의 runtime 정보를 dict 하나로 모아서 넘겨줍니다. 그
+dict를 `context`라고 부릅니다. 자주 쓰는 key는 다음과 같습니다.
+
+| key | 내용 |
+|---|---|
+| `ti` | 현재 task instance. XCom push/pull, log, retry 정보 접근 |
+| `dag` | 현재 DAG 객체 |
+| `dag_run` | 현재 DAG run 객체 (run id, conf 등) |
+| `logical_date` | DAG run의 logical date (`datetime`) |
+| `ds` | logical date를 `YYYY-MM-DD` string으로 변환한 값 |
+| `params` | DAG에 정의한 params |
+
+`context`를 얻는 두 가지 방법이 있습니다. 결과는 같습니다.
+
+```python
+# (1) classic PythonOperator: Airflow가 **context로 keyword 인자에 펼쳐서 넘김
+def my_task(**context) -> None:
+    ti = context["ti"]
+
+# (2) TaskFlow @task: get_current_context()로 직접 호출
+from airflow.sdk import get_current_context, task
+
+@task
+def my_task() -> None:
+    context = get_current_context()
+    ti = context["ti"]
+```
+
+`**context`는 "Airflow가 넘기는 모든 keyword 인자를 `context`라는 dict로 받겠다"는
+Python 문법입니다. 필요한 key만 직접 받아도 됩니다.
+
+```python
+def my_task(ti, ds, **_) -> None:
+    print(ti.task_id, ds)
+```
+
+### `ti` (TaskInstance)
+
+`ti`는 "지금 실행 중인 이 task의 이 run"을 나타내는 객체입니다. XCom을 다룰 때 가장
+자주 사용합니다.
+
+```python
+# upstream에서 push
+ti.xcom_push(key="batch_id", value="orders_20260101")
+
+# downstream에서 pull
+batch_id = ti.xcom_pull(task_ids="prepare", key="batch_id")
+
+# key를 생략하면 기본 key인 return_value를 가져옴
+result = ti.xcom_pull(task_ids="prepare")
+```
+
+`task_ids`는 값을 만든 upstream task의 id이고, `key`는 그 task가 사용한 XCom key입니다.
+`@task`나 `PythonOperator`의 `return` 값은 자동으로 `return_value` key에 저장되므로
+`xcom_pull(task_ids="prepare")`만으로 읽을 수 있습니다.
+
 ## 방법 2: 직접 `xcom_push()`로 set
 
 여러 key를 명시적으로 나눠 저장하고 싶을 때는 `get_current_context()`로 현재 task
