@@ -1385,6 +1385,50 @@ class OSSearchTests(unittest.TestCase):
         )
         client.clear_scroll.assert_called_once_with(scroll_id="scroll-1")
 
+    def test_search_dataframe_all_caps_results_at_max_rows(self) -> None:
+        client = Mock()
+        client.search.return_value = {
+            "_scroll_id": "scroll-1",
+            "hits": {
+                "hits": [
+                    {"_id": f"doc-{i}", "_source": {"v": i}} for i in range(2)
+                ]
+            },
+        }
+        client.scroll.side_effect = [
+            {
+                "_scroll_id": "scroll-1",
+                "hits": {
+                    "hits": [
+                        {"_id": f"doc-{i}", "_source": {"v": i}} for i in range(2, 4)
+                    ]
+                },
+            },
+            {
+                "_scroll_id": "scroll-1",
+                "hits": {
+                    "hits": [
+                        {"_id": f"doc-{i}", "_source": {"v": i}} for i in range(4, 6)
+                    ]
+                },
+            },
+        ]
+        service = OSSearch(client=client, index="events")
+
+        with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
+            dataframe = service.search_dataframe_all(
+                {"query": {"match_all": {}}},
+                batch_size=2,
+                max_rows=3,
+            )
+
+        self.assertEqual(len(dataframe.records), 3)
+        self.assertEqual([r["v"] for r in dataframe.records], [0, 1, 2])
+        # Should stop scrolling once cap is reached — only one scroll call
+        # after the initial search (which already filled 2 of 3).
+        self.assertEqual(client.scroll.call_count, 1)
+        client.clear_scroll.assert_called_once_with(scroll_id="scroll-1")
+
     def test_search_dataframe_all_clears_scroll_on_error(self) -> None:
         client = Mock()
         client.search.return_value = {

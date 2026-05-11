@@ -114,6 +114,7 @@ class OSSearch(OSBase):
         index: str | None = None,
         batch_size: int = 1000,
         scroll: str = "2m",
+        max_rows: int | None = None,
     ) -> list[dict[str, Any]]:
         name = self._resolve_index(index)
         request_body = dict(body)
@@ -126,6 +127,8 @@ class OSSearch(OSBase):
 
         try:
             while page_hits and scroll_id is not None:
+                if max_rows is not None and len(all_hits) >= max_rows:
+                    break
                 response = self.client.scroll(scroll_id=scroll_id, scroll=scroll)
                 next_scroll_id = response.get("_scroll_id")
                 if next_scroll_id is not None:
@@ -136,6 +139,8 @@ class OSSearch(OSBase):
             if scroll_id is not None:
                 self.client.clear_scroll(scroll_id=scroll_id)
 
+        if max_rows is not None and len(all_hits) > max_rows:
+            return all_hits[:max_rows]
         return all_hits
 
     def search_dataframe(
@@ -156,6 +161,7 @@ class OSSearch(OSBase):
         batch_size: int = 1000,
         scroll: str = "2m",
         include_meta: bool = False,
+        max_rows: int | None = None,
     ) -> Any:
         _require_pandas()
         all_hits = self._search_all_hits(
@@ -163,6 +169,7 @@ class OSSearch(OSBase):
             index=index,
             batch_size=batch_size,
             scroll=scroll,
+            max_rows=max_rows,
         )
         return _records_to_dataframe(
             _records_from_hits(all_hits, include_meta=include_meta)
@@ -210,6 +217,7 @@ class OSSearch(OSBase):
         batch_size: int = 1000,
         scroll: str = "2m",
         include_meta: bool = False,
+        max_rows: int | None = None,
     ) -> Any:
         body = {"query": {"match": {field: query}}}
         return self.search_dataframe_all(
@@ -218,6 +226,7 @@ class OSSearch(OSBase):
             batch_size=batch_size,
             scroll=scroll,
             include_meta=include_meta,
+            max_rows=max_rows,
         )
 
     def term(
