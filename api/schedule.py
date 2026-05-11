@@ -4,7 +4,6 @@
 emits a single ``skip`` record (not ``start``/``skip``/``end``).
 """
 
-import hashlib
 import hmac
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -27,28 +26,13 @@ bp = Blueprint("schedule", __name__)
 SCHEDULE_TOKEN = ""
 TOKEN_HEADER = "X-API-Token"
 
-
-def slot_minute(name: str, modulus: int = 60) -> int:
-    """Stable minute-of-the-hour slot derived from the job name.
-
-    Use for jobs where "any time within this hour is fine" — spreads N jobs
-    across N slots without manual bookkeeping. MD5's first 4 bytes give a
-    stable 32-bit int across interpreter restarts (unlike builtin ``hash()``,
-    which is randomized per-process). Reserve manual ``minute=`` values for
-    jobs whose ordering matters (e.g. purge after restart).
-    """
-    digest = hashlib.md5(name.encode()).digest()[:4]
-    return int.from_bytes(digest, "big") % modulus
-
-
 # `lock_ttl=None` falls back to ApiRedisConfig.lock_ttl (default 1200s).
 # Cron triggers interpret `hour=` in scheduler timezone (Asia/Seoul).
 # `manual_dispatch=False` removes the job from the /jobs/run_job allow list;
 # the scheduler still fires it on the configured trigger via run_registered_job.
-# For "any time within this hour is fine" jobs, use ``slot_minute(name)`` to
-# spread across distinct minutes deterministically. The scheduler executor is
-# capped at max_workers=4 (extension.py), so colliding fires are paced by the
-# thread pool.
+# Pick `minute=` values manually to spread overlapping jobs; the scheduler
+# executor is capped at max_workers=4 (extension.py) so unavoidable collisions
+# get paced by the thread pool.
 JOB_FUNCTIONS: dict[str, dict[str, Any]] = {
     "task1": {
         "fn": task1,
