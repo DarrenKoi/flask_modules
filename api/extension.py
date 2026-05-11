@@ -89,6 +89,7 @@ scheduler = APScheduler()
 
 
 def configure_scheduler(app: Any, config: ApiRedisConfig) -> None:
+    from apscheduler.executors.pool import ThreadPoolExecutor
     from apscheduler.jobstores.redis import RedisJobStore
 
     # Forward the full connection posture (ssl, timeout, extras) so the
@@ -109,6 +110,13 @@ def configure_scheduler(app: Any, config: ApiRedisConfig) -> None:
     store_kwargs.update(config.extra_client_kwargs)
 
     app.config["SCHEDULER_JOBSTORES"] = {"default": RedisJobStore(**store_kwargs)}
+    # 2 CPU / 8 GiB cloud env, 4 uWSGI workers → ~2 GiB per worker. Cap the
+    # scheduler thread pool at 4 so the worker hosting it (worker_id=1) keeps
+    # headroom for HTTP traffic and doesn't OOM when long jobs (10-20 min,
+    # pandas/OpenSearch heavy) overlap.
+    app.config["SCHEDULER_EXECUTORS"] = {
+        "default": ThreadPoolExecutor(max_workers=4),
+    }
     app.config["SCHEDULER_JOB_DEFAULTS"] = {
         "coalesce": True,
         "max_instances": 1,
