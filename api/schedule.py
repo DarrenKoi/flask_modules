@@ -19,7 +19,7 @@ from api.extension import (
     redis_lock,
     scheduler,
 )
-from api.tasks import purge_old_logs, restart_uwsgi, task1, task2
+from api.tasks.many_tasks import purge_old_logs, restart_uwsgi, task1, task2
 
 bp = Blueprint("schedule", __name__)
 

@@ -18,6 +18,8 @@
     .event-error { color: #721c24; font-weight: 600; }
     code { background: #f4f4f4; padding: 1px 4px; border-radius: 3px; }
     small { color: #666; }
+    .controls { margin-top: 1rem; display: flex; gap: 0.75rem; align-items: center; font-size: 0.9rem; }
+    .controls select { padding: 4px 8px; font: inherit; }
   </style>
 </head>
 <body>
@@ -27,6 +29,18 @@
   <p><small>Heartbeat: <span id="heartbeat">—</span> · Role: <span id="role">—</span></small></p>
 
   <h2>Recent task runs</h2>
+  <div class="controls">
+    <label for="event-filter">Show:</label>
+    <select id="event-filter">
+      <option value="all">All events</option>
+      <option value="problems">Problems (error + skip)</option>
+      <option value="error">Errors only</option>
+      <option value="skip">Skips only</option>
+      <option value="end">Completed (end)</option>
+      <option value="start">Started</option>
+    </select>
+    <small id="filter-count"></small>
+  </div>
   <table>
     <thead><tr><th>Time (UTC)</th><th>Job</th><th>Event</th><th>Duration (ms)</th><th>Detail</th></tr></thead>
     <tbody id="logs-body"><tr><td colspan="5">loading…</td></tr></tbody>
@@ -52,23 +66,51 @@
         badge.className = 'badge bad';
       }
     }
+    let lastRecords = [];
+    const filterEl = document.getElementById('event-filter');
+    filterEl.value = localStorage.getItem('apiDashEventFilter') || 'problems';
+
+    function matchesFilter(rec, mode) {
+      if (mode === 'all') return true;
+      if (mode === 'problems') return rec.event === 'error' || rec.event === 'skip';
+      return rec.event === mode;
+    }
+
+    function renderLogs() {
+      const mode = filterEl.value;
+      const body = document.getElementById('logs-body');
+      const countEl = document.getElementById('filter-count');
+      if (!lastRecords.length) {
+        body.innerHTML = '<tr><td colspan="5"><em>no runs yet</em></td></tr>';
+        countEl.textContent = '';
+        return;
+      }
+      const filtered = lastRecords.filter(r => matchesFilter(r, mode));
+      countEl.textContent = `showing ${filtered.length} of ${lastRecords.length}`;
+      if (!filtered.length) {
+        body.innerHTML = '<tr><td colspan="5"><em>no records match this filter</em></td></tr>';
+        return;
+      }
+      body.innerHTML = filtered.map(rec => `
+        <tr>
+          <td>${rec.ts}</td>
+          <td><code>${rec.job}</code></td>
+          <td class="event-${rec.event}">${rec.event}</td>
+          <td>${rec.duration_ms ?? ''}</td>
+          <td>${rec.error ?? rec.message ?? ''}</td>
+        </tr>`).join('');
+    }
+
+    filterEl.addEventListener('change', () => {
+      localStorage.setItem('apiDashEventFilter', filterEl.value);
+      renderLogs();
+    });
+
     async function refreshLogs() {
       try {
         const r = await fetch('/jobs/logs?limit=100');
-        const records = await r.json();
-        const body = document.getElementById('logs-body');
-        if (!records.length) {
-          body.innerHTML = '<tr><td colspan="5"><em>no runs yet</em></td></tr>';
-          return;
-        }
-        body.innerHTML = records.map(rec => `
-          <tr>
-            <td>${rec.ts}</td>
-            <td><code>${rec.job}</code></td>
-            <td class="event-${rec.event}">${rec.event}</td>
-            <td>${rec.duration_ms ?? ''}</td>
-            <td>${rec.error ?? rec.message ?? ''}</td>
-          </tr>`).join('');
+        lastRecords = await r.json();
+        renderLogs();
       } catch (e) { /* leave previous render */ }
     }
     function tick() { refreshHealth(); refreshLogs(); }

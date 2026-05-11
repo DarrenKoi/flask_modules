@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from api.tasks import many_tasks, restart_uwsgi, task1, task2
+from api.tasks import many_tasks
+from api.tasks.many_tasks import restart_uwsgi, task1, task2
 
 
 class TaskSmokeTests(unittest.TestCase):
