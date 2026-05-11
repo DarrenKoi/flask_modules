@@ -75,7 +75,7 @@ df = search.search_dataframe_all(
 df = search.search_dataframe_all(
     body,
     batch_size=5000,
-    max_rows=50_000,   # 5만 개 이후로는 잘림
+    max_rows=50000,   # 5만 개 이후로는 잘림
 )
 ```
 
@@ -89,10 +89,10 @@ df = search.search_dataframe_all(
 
 ```python
 total = search.count({"range": {"timestamp": {"gte": "now-30d"}}})["count"]
-if total > 200_000:
+if total > 200000:
     raise RuntimeError(f"too many rows: {total}")
 
-df = search.search_dataframe_all(body, max_rows=200_000)
+df = search.search_dataframe_all(body, max_rows=200000)
 ```
 
 `count`는 hit를 받지 않고 매칭 수만 받아오는 가벼운 호출입니다.
@@ -107,7 +107,7 @@ df = search.match_dataframe_all(
     "title",
     "flask",
     batch_size=1000,
-    max_rows=20_000,
+    max_rows=20000,
     include_meta=True,   # _id, _index, _score 컬럼 포함
 )
 ```
@@ -130,7 +130,7 @@ df = search.range_dataframe_all(
     days=30,
     query={"term": {"status": "ok"}},  # range와 AND
     batch_size=2000,
-    max_rows=100_000,
+    max_rows=100000,
 )
 ```
 
