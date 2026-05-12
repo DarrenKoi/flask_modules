@@ -108,7 +108,11 @@ def run_registered_job(name: str) -> Any:
         wrapped: dict[str, Callable] = app.config.get("WRAPPED_JOBS", {})
         fn = wrapped.get(name)
         if fn is None:
-            raise KeyError(f"unknown job: {name}")
+            raise KeyError(
+                f"unknown job: {name!r} — present in scheduler jobstore "
+                f"but missing from JOB_FUNCTIONS. Likely an orphan from a "
+                f"previous deploy; reap_orphan_jobs() clears it on next boot."
+            )
         return fn()
 
 
@@ -181,6 +185,25 @@ def init_jobs(app: Flask, *, register_with_scheduler: bool = True) -> None:
             trigger=IntervalTrigger(seconds=cfg.heartbeat_interval),
             replace_existing=True,
         )
+
+
+def reap_orphan_jobs() -> None:
+    """Remove jobs in the Redis jobstore that no longer exist in JOB_FUNCTIONS.
+
+    ``RedisJobStore`` persists every registered job across restarts — that's
+    why a scheduled job keeps firing after uWSGI bounces. The flip side is
+    that removing a function from JOB_FUNCTIONS does NOT remove it from
+    Redis. The old job entry continues firing on its trigger and
+    ``run_registered_job`` raises ``KeyError`` because ``WRAPPED_JOBS`` is
+    rebuilt from the current registry on every boot.
+
+    Call once on the scheduler worker AFTER ``scheduler.start()`` — only
+    then does ``get_jobs()`` read the merged in-memory + jobstore view.
+    """
+    keep = set(JOB_FUNCTIONS.keys()) | {HEARTBEAT_JOB_ID}
+    for job in scheduler.get_jobs():
+        if job.id not in keep:
+            scheduler.remove_job(job.id)
 
 
 @bp.get("/")

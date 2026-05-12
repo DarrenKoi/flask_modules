@@ -21,7 +21,7 @@ from api.extension import (
     scheduler,
 )
 from api.schedule import bp as schedule_bp
-from api.schedule import init_jobs
+from api.schedule import init_jobs, reap_orphan_jobs
 
 __all__ = [
     "ApiRedisConfig",
@@ -60,6 +60,7 @@ def create_app(*, config: ApiRedisConfig | None = None) -> Flask:
     init_jobs(app, register_with_scheduler=is_scheduler_worker)
     if is_scheduler_worker:
         scheduler.start()
+        reap_orphan_jobs()
         atexit.register(_shutdown_scheduler)
 
     app.register_blueprint(schedule_bp)
