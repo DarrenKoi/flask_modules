@@ -68,8 +68,15 @@ def create_app(*, config: ApiRedisConfig | None = None) -> Flask:
 
 
 def _shutdown_scheduler() -> None:
+    # Pause before shutdown to close the race that produces sporadic
+    # "Error submitting job ... cannot schedule new futures after shutdown"
+    # logs on worker recycle. pause() flips state to STATE_PAUSED so the
+    # background trigger loop skips _process_jobs(); without it, a tick
+    # mid-flight can call executor.submit_job() AFTER shutdown(wait=False)
+    # has torn down the ThreadPoolExecutor.
     try:
         if scheduler.running:
+            scheduler.pause()
             scheduler.shutdown(wait=False)
     except Exception:
         pass

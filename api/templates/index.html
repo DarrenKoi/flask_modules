@@ -6,20 +6,29 @@
   <style>
     body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
     h1 { margin-bottom: 0.25rem; }
+    h3 { margin: 1.5rem 0 0.25rem; display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+    h3 .job-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1rem; background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }
+    h3 .job-summary { font-size: 0.85rem; color: #666; font-weight: normal; }
     .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.85rem; }
     .ok { background: #d4edda; color: #155724; }
     .bad { background: #f8d7da; color: #721c24; }
-    table { width: 100%; border-collapse: collapse; margin-top: 1rem; font-size: 0.9rem; }
+    table { width: 100%; border-collapse: collapse; margin-top: 0.25rem; font-size: 0.9rem; }
     th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #eee; }
     th { background: #f4f4f4; }
     .event-start { color: #555; }
     .event-end { color: #155724; }
     .event-skip { color: #856404; }
     .event-error { color: #721c24; font-weight: 600; }
+    .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 0.75rem; margin-right: 4px; }
+    .pill-error { background: #f8d7da; color: #721c24; }
+    .pill-skip { background: #fff3cd; color: #856404; }
+    .pill-end { background: #d4edda; color: #155724; }
+    .pill-start { background: #e2e3e5; color: #383d41; }
     code { background: #f4f4f4; padding: 1px 4px; border-radius: 3px; }
     small { color: #666; }
-    .controls { margin-top: 1rem; display: flex; gap: 0.75rem; align-items: center; font-size: 0.9rem; }
+    .controls { margin-top: 1rem; display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; font-size: 0.9rem; }
     .controls select { padding: 4px 8px; font: inherit; }
+    .empty { color: #777; font-style: italic; padding: 0.5rem 0; }
   </style>
 </head>
 <body>
@@ -30,7 +39,7 @@
 
   <h2>Recent task runs</h2>
   <div class="controls">
-    <label for="event-filter">Show:</label>
+    <label for="event-filter">Event:</label>
     <select id="event-filter">
       <option value="all">All events</option>
       <option value="problems">Problems (error + skip)</option>
@@ -39,12 +48,22 @@
       <option value="end">Completed (end)</option>
       <option value="start">Started</option>
     </select>
+    <label for="age-filter">Age:</label>
+    <select id="age-filter">
+      <option value="3600">last 1h</option>
+      <option value="21600">last 6h</option>
+      <option value="86400">last 24h</option>
+      <option value="604800">last 7d</option>
+      <option value="">all</option>
+    </select>
+    <label for="job-filter">Job:</label>
+    <select id="job-filter">
+      <option value="all">all jobs</option>
+      {% for j in jobs %}<option value="{{ j }}">{{ j }}</option>{% endfor %}
+    </select>
     <small id="filter-count"></small>
   </div>
-  <table>
-    <thead><tr><th>Time (UTC)</th><th>Job</th><th>Event</th><th>Duration (ms)</th><th>Detail</th></tr></thead>
-    <tbody id="logs-body"><tr><td colspan="5">loading…</td></tr></tbody>
-  </table>
+  <div id="logs-container"><p class="empty">loading…</p></div>
 
   <script>
     async function refreshHealth() {
@@ -58,7 +77,7 @@
           `redis=${j.redis} · scheduler=${j.scheduler.running ? 'running' : 'stopped'} · jobs=${j.scheduler.jobs.join(',') || 'none'}`;
         const hb = j.scheduler.heartbeat;
         document.getElementById('heartbeat').textContent =
-          hb ? `${hb} (${Math.round((Date.now() - Date.parse(hb)) / 1000)}s ago)` : 'missing';
+          hb ? `${toKst(hb)} (${Math.round((Date.now() - Date.parse(hb)) / 1000)}s ago)` : 'missing';
         document.getElementById('role').textContent = j.scheduler.role || '—';
       } catch (e) {
         const badge = document.getElementById('health-badge');
@@ -66,50 +85,151 @@
         badge.className = 'badge bad';
       }
     }
-    let lastRecords = [];
-    const filterEl = document.getElementById('event-filter');
-    filterEl.value = localStorage.getItem('apiDashEventFilter') || 'problems';
 
-    function matchesFilter(rec, mode) {
+    let lastRecords = [];
+    const eventEl = document.getElementById('event-filter');
+    const ageEl = document.getElementById('age-filter');
+    const jobEl = document.getElementById('job-filter');
+
+    eventEl.value = localStorage.getItem('apiDashEventFilter') || 'problems';
+    const savedAge = localStorage.getItem('apiDashAgeFilter');
+    ageEl.value = savedAge === null ? '86400' : savedAge;
+    let desiredJob = localStorage.getItem('apiDashJobFilter') || 'all';
+    if ([...jobEl.options].some(o => o.value === desiredJob)) {
+      jobEl.value = desiredJob;
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[c]));
+    }
+
+    // Records carry UTC ISO timestamps; display in KST for operators here.
+    function toKst(iso) {
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (isNaN(d)) return iso;
+      return d.toLocaleString('sv-SE', { timeZone: 'Asia/Seoul', hour12: false });
+    }
+
+    function matchesEvent(rec, mode) {
       if (mode === 'all') return true;
       if (mode === 'problems') return rec.event === 'error' || rec.event === 'skip';
       return rec.event === mode;
     }
 
+    function mergeUnknownJobs(records) {
+      const known = new Set([...jobEl.options].map(o => o.value));
+      const seen = [...new Set(records.map(r => r.job))]
+        .filter(j => j && !known.has(j))
+        .sort();
+      for (const j of seen) {
+        const opt = document.createElement('option');
+        opt.value = j;
+        opt.textContent = j + ' (orphan)';
+        jobEl.appendChild(opt);
+      }
+      jobEl.value = [...jobEl.options].some(o => o.value === desiredJob)
+        ? desiredJob
+        : 'all';
+    }
+
+    function summaryPills(records) {
+      const counts = { start: 0, end: 0, skip: 0, error: 0 };
+      for (const r of records) {
+        if (counts[r.event] !== undefined) counts[r.event]++;
+      }
+      const pills = [];
+      if (counts.error) pills.push(`<span class="pill pill-error">${counts.error} error</span>`);
+      if (counts.skip) pills.push(`<span class="pill pill-skip">${counts.skip} skip</span>`);
+      if (counts.end) pills.push(`<span class="pill pill-end">${counts.end} ok</span>`);
+      if (counts.start) pills.push(`<span class="pill pill-start">${counts.start} start</span>`);
+      return pills.join('') || '<span class="pill pill-start">—</span>';
+    }
+
+    function renderJobSection(job, records) {
+      const eventMode = eventEl.value;
+      const filtered = records.filter(r => matchesEvent(r, eventMode));
+      const total = records.length;
+      const rows = filtered.length
+        ? filtered.map(rec => `
+            <tr>
+              <td>${escapeHtml(toKst(rec.ts))}</td>
+              <td class="event-${escapeHtml(rec.event)}">${escapeHtml(rec.event)}</td>
+              <td>${rec.duration_ms != null ? (rec.duration_ms / 1000).toFixed(1) : ''}</td>
+              <td>${escapeHtml(rec.error ?? rec.message ?? '')}</td>
+            </tr>`).join('')
+        : `<tr><td colspan="4"><em class="empty">no records match the event filter</em></td></tr>`;
+      return `
+        <section>
+          <h3>
+            <span class="job-name">${escapeHtml(job)}</span>
+            <span class="job-summary">${total} run${total === 1 ? '' : 's'} · ${summaryPills(records)}</span>
+          </h3>
+          <table>
+            <thead><tr><th>Time (KST)</th><th>Event</th><th>Duration (s)</th><th>Detail</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </section>`;
+    }
+
     function renderLogs() {
-      const mode = filterEl.value;
-      const body = document.getElementById('logs-body');
+      const container = document.getElementById('logs-container');
       const countEl = document.getElementById('filter-count');
+
       if (!lastRecords.length) {
-        body.innerHTML = '<tr><td colspan="5"><em>no runs yet</em></td></tr>';
+        container.innerHTML = '<p class="empty">no runs in selected window</p>';
         countEl.textContent = '';
         return;
       }
-      const filtered = lastRecords.filter(r => matchesFilter(r, mode));
-      countEl.textContent = `showing ${filtered.length} of ${lastRecords.length}`;
-      if (!filtered.length) {
-        body.innerHTML = '<tr><td colspan="5"><em>no records match this filter</em></td></tr>';
+
+      const selectedJob = jobEl.value;
+      const visibleRecords = selectedJob === 'all'
+        ? lastRecords
+        : lastRecords.filter(r => r.job === selectedJob);
+
+      const eventFiltered = visibleRecords.filter(r => matchesEvent(r, eventEl.value));
+      countEl.textContent = `showing ${eventFiltered.length} of ${visibleRecords.length}`;
+
+      const grouped = new Map();
+      for (const r of visibleRecords) {
+        if (!grouped.has(r.job)) grouped.set(r.job, []);
+        grouped.get(r.job).push(r);
+      }
+
+      if (!grouped.size) {
+        container.innerHTML = '<p class="empty">no records for this job in the selected window</p>';
         return;
       }
-      body.innerHTML = filtered.map(rec => `
-        <tr>
-          <td>${rec.ts}</td>
-          <td><code>${rec.job}</code></td>
-          <td class="event-${rec.event}">${rec.event}</td>
-          <td>${rec.duration_ms ?? ''}</td>
-          <td>${rec.error ?? rec.message ?? ''}</td>
-        </tr>`).join('');
+
+      const sections = [...grouped.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([job, recs]) => renderJobSection(job, recs));
+      container.innerHTML = sections.join('');
     }
 
-    filterEl.addEventListener('change', () => {
-      localStorage.setItem('apiDashEventFilter', filterEl.value);
+    eventEl.addEventListener('change', () => {
+      localStorage.setItem('apiDashEventFilter', eventEl.value);
       renderLogs();
+    });
+    jobEl.addEventListener('change', () => {
+      desiredJob = jobEl.value;
+      localStorage.setItem('apiDashJobFilter', desiredJob);
+      renderLogs();
+    });
+    ageEl.addEventListener('change', () => {
+      localStorage.setItem('apiDashAgeFilter', ageEl.value);
+      refreshLogs();
     });
 
     async function refreshLogs() {
       try {
-        const r = await fetch('/jobs/logs?limit=100');
+        const params = new URLSearchParams({ limit: '100' });
+        if (ageEl.value) params.set('max_age_seconds', ageEl.value);
+        const r = await fetch('/jobs/logs?' + params.toString());
         lastRecords = await r.json();
+        mergeUnknownJobs(lastRecords);
         renderLogs();
       } catch (e) { /* leave previous render */ }
     }

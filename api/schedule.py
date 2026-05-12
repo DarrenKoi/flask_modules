@@ -262,7 +262,16 @@ def jobs_logs() -> Any:
     cfg: ApiRedisConfig = current_app.config["API_REDIS_CONFIG"]
     lock_client = current_app.config["LOCK_CLIENT"]
     limit = min(int(request.args.get("limit", 100)), cfg.log_list_max)
-    return jsonify(read_task_logs(lock_client, cfg.log_list_key, limit=limit))
+    raw_age = request.args.get("max_age_seconds")
+    max_age = int(raw_age) if raw_age else None
+    return jsonify(
+        read_task_logs(
+            lock_client,
+            cfg.log_list_key,
+            limit=limit,
+            max_age_seconds=max_age,
+        )
+    )
 
 
 @bp.post("/jobs/run_job")

@@ -6,7 +6,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
@@ -183,16 +183,43 @@ class TaskLogger:
         return wrapper
 
 
-def read_task_logs(client: Any, key: str, *, limit: int = 200) -> list[dict[str, Any]]:
+def read_task_logs(
+    client: Any,
+    key: str,
+    *,
+    limit: int = 200,
+    max_age_seconds: int | None = None,
+) -> list[dict[str, Any]]:
     raw = client.lrange(key, 0, limit - 1)
+    cutoff: datetime | None = None
+    if max_age_seconds is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
     out: list[dict[str, Any]] = []
     for item in raw:
         try:
-            out.append(json.loads(item))
+            rec = json.loads(item)
         except (ValueError, TypeError):
             log.warning("dropping malformed task-log entry: %r", item)
             continue
+        if cutoff is not None and _record_is_older_than(rec, cutoff):
+            continue
+        out.append(rec)
     return out
+
+
+def _record_is_older_than(rec: dict[str, Any], cutoff: datetime) -> bool:
+    # Lenient: an unparseable / missing ts keeps the record visible. Same
+    # policy as malformed JSON above — observability never hides data.
+    ts_str = rec.get("ts")
+    if not isinstance(ts_str, str):
+        return False
+    try:
+        ts = datetime.fromisoformat(ts_str)
+    except ValueError:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts < cutoff
 
 
 # Compare-and-delete: only release the lock if we still own it. Without this
