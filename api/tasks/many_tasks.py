@@ -3,15 +3,17 @@
 import logging
 import re
 import time
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 UWSGI_RESTART_PATH = Path("/project/workSpace/restart.txt")
 LOGS_DIR = Path("/project/workSpace/logs")
-# Matches the daemonize macro output: uwsgi-YYYY-MM-DD.log
-LOG_FILENAME_RE = re.compile(r"^uwsgi-(\d{4}-\d{2}-\d{2})\.log$")
+# Matches active log (uwsgi-YYYY-MM-DD.log) and rolled-over files
+# (uwsgi-YYYY-MM-DD.log.<epoch>). Group 1 = log date, group 2 = rotation epoch or None.
+LOG_FILENAME_RE = re.compile(r"^uwsgi-(\d{4}-\d{2}-\d{2})\.log(?:\.(\d+))?$")
+KEEP_LOG_COUNT = 7
 
 
 def task1() -> None:
@@ -37,19 +39,29 @@ def restart_uwsgi() -> None:
 
 
 def purge_old_logs() -> None:
-    """Delete uwsgi-YYYY-MM-DD.log files older than 7 days.
+    """Keep the newest KEEP_LOG_COUNT uwsgi log files, delete the rest.
 
-    Reads the date from the filename, not from mtime — the file keeps being
-    appended to all day, so mtime is one day ahead of the canonical date.
-    Schedule this AFTER restart_uwsgi so today's file already exists when
-    we run; today's filename is never < cutoff so the active log is safe.
+    Ordering is by log date in the filename, then by rotation epoch suffix.
+    The active log (no suffix) sorts as newest within its date, so it's
+    always retained when present.
     """
-    cutoff = date.today() - timedelta(days=7)
-    removed = 0
+    candidates: list[tuple[date, float, Path]] = []
     for f in LOGS_DIR.iterdir():
         m = LOG_FILENAME_RE.match(f.name)
-        if m and date.fromisoformat(m.group(1)) < cutoff:
-            f.unlink()
-            removed += 1
-            log.info("removed old log %s", f)
-    log.info("purge_old_logs removed=%d cutoff=%s", removed, cutoff)
+        if not m:
+            continue
+        log_date = date.fromisoformat(m.group(1))
+        epoch = float(m.group(2)) if m.group(2) else float("inf")
+        candidates.append((log_date, epoch, f))
+
+    candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+    removed = 0
+    for _, _, f in candidates[KEEP_LOG_COUNT:]:
+        f.unlink()
+        removed += 1
+        log.info("removed old log %s", f)
+    log.info(
+        "purge_old_logs removed=%d kept=%d",
+        removed,
+        min(len(candidates), KEEP_LOG_COUNT),
+    )
