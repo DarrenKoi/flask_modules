@@ -7,12 +7,25 @@ is empty the task kicks off backfill work.
 
 import logging
 
-from ops_store import OSSearch
+from ops_store import OSSearch, create_client
 
 log = logging.getLogger(__name__)
 
+OPENSEARCH_HOST = "skewnono-db1-os.osp01.skhynix.com"
+OPENSEARCH_USER = "skewnono001"
+OPENSEARCH_PASSWORD = ""
+
 INDEX = "meas_hist_cdsem"
 TIME_FIELD = "timestamp"
+
+
+def _build_search(index: str) -> OSSearch:
+    client = create_client(
+        host=OPENSEARCH_HOST,
+        user=OPENSEARCH_USER,
+        password=OPENSEARCH_PASSWORD,
+    )
+    return OSSearch(client=client, index=index)
 
 
 def has_full_hourly_coverage(
@@ -29,7 +42,7 @@ def has_full_hourly_coverage(
     hours appear in the aggregation, so coverage holds iff the bucket count
     equals ``hours``.
     """
-    svc = search if search is not None else OSSearch(index=index)
+    svc = search if search is not None else _build_search(index)
     lower = f"now-{hours}h/h"
 
     result = svc.aggregate(
