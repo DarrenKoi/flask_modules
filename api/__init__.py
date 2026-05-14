@@ -29,6 +29,8 @@ __all__ = [
     "scheduler",
 ]
 
+_scheduler_atexit_registered = False
+
 
 def _is_scheduler_worker() -> bool:
     """True iff this process should own the APScheduler thread.
@@ -61,7 +63,10 @@ def create_app(*, config: ApiRedisConfig | None = None) -> Flask:
     if is_scheduler_worker:
         scheduler.start()
         reap_orphan_jobs()
-        atexit.register(_shutdown_scheduler)
+        global _scheduler_atexit_registered
+        if not _scheduler_atexit_registered:
+            atexit.register(_shutdown_scheduler)
+            _scheduler_atexit_registered = True
 
     app.register_blueprint(schedule_bp)
     return app
