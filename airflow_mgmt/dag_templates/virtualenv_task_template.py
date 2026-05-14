@@ -37,15 +37,28 @@ from airflow.sdk import DAG
 log = logging.getLogger(__name__)
 
 
-NEXUS_PYPI_INDEX_URL = "http://nexus.skhynix.com:8081/repository/pypi-group/simple"
-NEXUS_PYPI_HOST = "nexus.skhynix.com"
+# sddc Nexus is run by the datalake team (same crew as the Airflow workers),
+# so it's the most reliable mirror from inside the cluster — keep it first.
+# The other entry stays as a fallback for packages not yet synced to sddc.
+NEXUS_PYPI_INDEX_URLS = [
+    "http://nexus-sddc.datalake.skhynix.com/repository/pypi-group/simple",
+    "http://nexus.skhynix.com:8081/repository/pypi-group/simple",
+]
+NEXUS_PYPI_HOSTS = [
+    "nexus-sddc.datalake.skhynix.com",
+    "nexus.skhynix.com",
+]
 
 # Airflow 3 uses uv when it is available. Set uv's default index before the
 # operator creates its cached virtualenv, so seed packages also come from Nexus.
-os.environ.setdefault("UV_DEFAULT_INDEX", NEXUS_PYPI_INDEX_URL)
-os.environ.setdefault("UV_INDEX_URL", NEXUS_PYPI_INDEX_URL)
-os.environ.setdefault("UV_INSECURE_HOST", NEXUS_PYPI_HOST)
-os.environ.setdefault("PIP_INDEX_URL", NEXUS_PYPI_INDEX_URL)
+# Trusted-host env vars accept space-separated lists; comma would be parsed as
+# a single hostname and silently fail to match.
+os.environ.setdefault("UV_DEFAULT_INDEX", NEXUS_PYPI_INDEX_URLS[0])
+os.environ.setdefault("UV_INDEX", " ".join(NEXUS_PYPI_INDEX_URLS[1:]))
+os.environ.setdefault("UV_INSECURE_HOST", " ".join(NEXUS_PYPI_HOSTS))
+os.environ.setdefault("PIP_INDEX_URL", NEXUS_PYPI_INDEX_URLS[0])
+os.environ.setdefault("PIP_EXTRA_INDEX_URL", " ".join(NEXUS_PYPI_INDEX_URLS[1:]))
+os.environ.setdefault("PIP_TRUSTED_HOST", " ".join(NEXUS_PYPI_HOSTS))
 
 
 # ── sys.path bootstrap ──────────────────────────────────────────────────────
@@ -162,7 +175,7 @@ with DAG(
             "opensearch-py==2.6.0",
             "redis==5.0.8",
         ],
-        index_urls=[NEXUS_PYPI_INDEX_URL],
+        index_urls=NEXUS_PYPI_INDEX_URLS,
         system_site_packages=False,
         # Cache key = hash(requirements + python_version + system_site_packages).
         # Pinned versions in the requirements file mean repeated runs hit the
