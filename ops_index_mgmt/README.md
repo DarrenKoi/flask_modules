@@ -67,6 +67,50 @@ doc_service.bulk_index_dataframe(
 )
 ```
 
+## fab_inform_notes index
+
+`fab_inform_notes.py` creates:
+
+- ISM policy `fab_inform_notes_retention_policy`
+- index template `fab_inform_notes_template`
+- first backing index `fab_inform_notes-000001`
+- write/search alias `fab_inform_notes`
+
+Settings:
+
+- primary shards: `2`
+- replicas: `1`
+- rollover: write index reaches `1000000` docs
+- retention: delete backing indices after `1095d` (3 years)
+
+Field mapping highlights:
+
+- ISO timestamp columns (`down_dt`, `equp_dt`, `up_dt`, `hub_load_tm`) →
+  `date` (default `strict_date_optional_time||epoch_millis` format)
+- Worker note columns (`note_comment`, `zzproblem`, `hltext`) → `text`
+  analyzed with `nori` plus a `.keyword` subfield with `ignore_above:
+  8192` for exact-match / sort / dedup
+- `dynamic` stays at the default (`true`) — other columns auto-map
+
+```bash
+python -m ops_index_mgmt.fab_inform_notes --dry-run
+python -m ops_index_mgmt.fab_inform_notes
+```
+
+Ingest dataframes through the `fab_inform_notes` alias:
+
+```python
+from ops_store import OSDoc
+
+doc_service = OSDoc(client=client)
+doc_service.bulk_index_dataframe(
+    notes_df,
+    index="fab_inform_notes",
+    id_field="doc_id",
+    op_type="create",
+)
+```
+
 ## Elasticsearch → OpenSearch reindex
 
 `es_to_os_reindex.py` copies one ES index into one OpenSearch index using the
