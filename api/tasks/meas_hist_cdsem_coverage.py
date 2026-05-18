@@ -17,6 +17,7 @@ OPENSEARCH_PASSWORD = ""
 
 INDEX = "meas_hist_cdsem"
 TIME_FIELD = "timestamp"
+TIME_ZONE = "Asia/Seoul"
 
 
 def _build_search(index: str) -> OSSearch:
@@ -51,10 +52,19 @@ def has_full_hourly_coverage(
                 "date_histogram": {
                     "field": time_field,
                     "calendar_interval": "hour",
+                    "time_zone": TIME_ZONE,
                 }
             }
         },
-        query={"range": {time_field: {"gte": lower, "lt": "now/h"}}},
+        query={
+            "range": {
+                time_field: {
+                    "gte": lower,
+                    "lt": "now/h",
+                    "time_zone": TIME_ZONE,
+                }
+            }
+        },
         index=index,
     )
 
