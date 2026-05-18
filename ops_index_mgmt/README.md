@@ -111,6 +111,25 @@ doc_service.bulk_index_dataframe(
 )
 ```
 
+## tool_maintenance_plan index
+
+`tool_maintenance_plan.py` is the second-of-a-kind setup script — same
+rollover/retention shape as `fab_inform_notes`, different columns:
+
+- date columns: `tool_start_tm`, `tool_end_tm`, `ll_dt`, `limit_dt`,
+  `org_dt`, `chg_tm`
+- engineer note column: `work_item_nm` (nori + `.keyword` subfield with
+  `ignore_above: 8192`)
+
+Same settings (`2` shards, `1` replica, `1000000`-doc rollover, `1095d`
+retention) but its own ISM policy `tool_maintenance_plan_retention_policy`
+and template `tool_maintenance_plan_template`.
+
+```bash
+python -m ops_index_mgmt.tool_maintenance_plan --dry-run
+python -m ops_index_mgmt.tool_maintenance_plan
+```
+
 ## Elasticsearch → OpenSearch reindex
 
 `es_to_os_reindex.py` copies one ES index into one OpenSearch index using the
