@@ -130,6 +130,27 @@ python -m ops_index_mgmt.tool_maintenance_plan --dry-run
 python -m ops_index_mgmt.tool_maintenance_plan
 ```
 
+## ebeam_tas_lot_hist index
+
+`ebeam_tas_lot_hist.py` sets up a 1-year retention rollover family with
+dual-condition rollover (size OR age):
+
+- primary shards: `2`, replicas: `2`
+- rollover: write index reaches `1000000` docs **or** `90d` age (whichever
+  comes first)
+- retention: delete backing indices after `365d`
+
+No explicit per-field mappings. Two `dynamic_templates` auto-type any
+incoming column ending in `_tm` or `_dt` as `date` so ISO-8601 timestamps
+land as proper dates (OpenSearch's built-in dynamic date detection only
+catches `yyyy/MM/dd` style strings). Everything else falls through to
+default dynamic mapping.
+
+```bash
+python -m ops_index_mgmt.ebeam_tas_lot_hist --dry-run
+python -m ops_index_mgmt.ebeam_tas_lot_hist
+```
+
 ## Elasticsearch → OpenSearch reindex
 
 `es_to_os_reindex.py` copies one ES index into one OpenSearch index using the
