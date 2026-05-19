@@ -35,18 +35,23 @@ def index_template_name(alias: str) -> str:
 
 
 def build_mappings() -> dict[str, Any]:
-    """Return mappings: explicit `modified` date plus *_tm/*_dt safety net.
+    """Return mappings: explicit date fields plus *_tm/*_dt safety net.
 
     OpenSearch's built-in dynamic date detection only matches
     `yyyy/MM/dd[ HH:mm:ss]` and `epoch_millis`, so ISO-8601 timestamp
-    strings would otherwise be mapped as `text`. The explicit `modified`
-    property guarantees the declared time field; the dynamic templates
-    catch any other timestamp-shaped columns the dataframe brings in.
+    strings would otherwise be mapped as `text`. Explicit properties
+    pin the two known time fields; the dynamic templates catch any
+    other timestamp-shaped columns the dataframe brings in.
+
+    - `modified`    : data-time from the IDP file (may be years old).
+    - `os_inserted` : ingest-time stamped at bulk-index, used for
+                      operational cleanup of the live write index.
     """
 
     return {
         "properties": {
             "modified": {"type": "date"},
+            "os_inserted": {"type": "date"},
         },
         "dynamic_templates": [
             {
@@ -347,6 +352,19 @@ if __name__ == "__main__":
 # #    would round-trip as text and break range queries.
 # cdsem_df["modified"] = pd.to_datetime(cdsem_df["modified"], errors="coerce")
 #
+# # 1b. Stamp ingest-time in KST. Must be tz-aware — a naive isoformat
+# #     like "2026-05-20T14:30:00" is parsed by OpenSearch as UTC and
+# #     bakes in a 9-hour drift. ZoneInfo("Asia/Seoul") makes the
+# #     "+09:00" offset explicit so the value round-trips correctly.
+# from datetime import datetime
+# from zoneinfo import ZoneInfo
+# os_inserted_kst = (
+#     datetime.now(tz=ZoneInfo("Asia/Seoul"))
+#     .replace(microsecond=0)
+#     .isoformat()
+# )
+# cdsem_df["os_inserted"] = os_inserted_kst   # same value for the whole batch
+#
 # # 2. Drop rows with empty/NaN doc_id, then drop in-batch duplicates.
 # #    Nullable "string" dtype keeps NaN as NA (plain astype(str) would
 # #    turn NaN into the literal "nan" and slip past the filter).
@@ -441,3 +459,30 @@ if __name__ == "__main__":
 #     index="cdsem_idp_ver",
 #     size=100,
 # )
+
+
+# ---------------------------------------------------------------------------
+# Reference: cleaning up stale docs on the live write index (study)
+# ---------------------------------------------------------------------------
+# ISM retention here is *index-age based* — it deletes whole backing
+# indices 1095 days after they are created and never inspects any
+# document field. For doc-level cleanup on the open (write) index —
+# e.g. removing test/replay rows or pruning by ingest cohort — drive a
+# delete_by_query off `os_inserted` instead.
+#
+# from opensearchpy.helpers import delete_by_query   # if you prefer the helper
+#
+# # Delete everything in the cdsem write index ingested before a KST date.
+# response = client.delete_by_query(
+#     index="cdsem_idp_ver",
+#     body={
+#         "query": {
+#             "range": {
+#                 "os_inserted": {"lt": "2026-01-01T00:00:00+09:00"}
+#             }
+#         }
+#     },
+#     conflicts="proceed",   # don't abort if a concurrent write bumps a doc
+#     refresh=True,          # make the deletion visible to subsequent search
+# )
+# print(response["deleted"], "deleted,", response["version_conflicts"], "conflicts")
