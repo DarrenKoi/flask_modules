@@ -44,8 +44,11 @@ def build_mappings() -> dict[str, Any]:
     other timestamp-shaped columns the dataframe brings in.
 
     - `modified`    : data-time from the IDP file (may be years old).
-    - `os_inserted` : ingest-time stamped at bulk-index, used for
-                      operational cleanup of the live write index.
+    - `os_inserted` : KST timestamp refreshed on every write (bulk
+                      index, update, upsert, bulk update). Despite the
+                      name it means "last touched in OS" — used for
+                      operational cleanup of the live write index by
+                      activity, not by ingest cohort.
     """
 
     return {
@@ -467,8 +470,10 @@ if __name__ == "__main__":
 # ISM retention here is *index-age based* — it deletes whole backing
 # indices 1095 days after they are created and never inspects any
 # document field. For doc-level cleanup on the open (write) index —
-# e.g. removing test/replay rows or pruning by ingest cohort — drive a
-# delete_by_query off `os_inserted` instead.
+# e.g. removing test/replay rows or pruning inactive records — drive a
+# delete_by_query off `os_inserted`. Per the project convention this
+# field is refreshed on every write, so the range filter below means
+# "docs not touched since X", NOT "docs ingested before X".
 #
 # from opensearchpy.helpers import delete_by_query   # if you prefer the helper
 #
@@ -486,3 +491,104 @@ if __name__ == "__main__":
 #     refresh=True,          # make the deletion visible to subsequent search
 # )
 # print(response["deleted"], "deleted,", response["version_conflicts"], "conflicts")
+
+
+# ---------------------------------------------------------------------------
+# Reference: updating fields on a doc that already exists by id (study)
+# ---------------------------------------------------------------------------
+# Three OSDoc methods look similar but mean very different things:
+#
+#   doc_service.update(id, {...})  -> partial patch; raises NotFoundError
+#                                      if the id does not exist
+#   doc_service.upsert(id, {...})  -> partial patch; CREATES the doc with
+#                                      the given fields if it doesn't exist
+#   doc_service.index(doc, id=id)  -> full REPLACE; any field not in the
+#                                      payload is dropped from the stored doc
+#
+# Pick `update` when you want "change these fields on the existing record,
+# fail loudly if I'm wrong about which id is there".
+#
+# from ops_store import OSDoc, create_client
+# from datetime import datetime
+# from zoneinfo import ZoneInfo
+#
+# client = create_client(
+#     host=OPENSEARCH_HOST,
+#     user=OPENSEARCH_USER,
+#     password=OPENSEARCH_PASSWORD,
+# )
+# doc_service = OSDoc(client=client)
+#
+# # ---- 1. Patch a couple of fields on one doc --------------------------
+# # Project convention: every write refreshes `os_inserted` to the
+# # current KST timestamp, so it tracks "last touched in OS". The other
+# # fields you don't name (e.g. `modified`) are preserved.
+# now_kst = (
+#     datetime.now(tz=ZoneInfo("Asia/Seoul"))
+#     .replace(microsecond=0)
+#     .isoformat()
+# )
+# response = doc_service.update(
+#     "LOTABC-001",
+#     {
+#         "idp_ver_status": "verified",
+#         "note_comment": "rechecked 2026-05-20",
+#         "os_inserted": now_kst,
+#     },
+#     index="cdsem_idp_ver",
+#     refresh="wait_for",   # block until visible to subsequent search
+# )
+# print(response["result"])   # -> "updated"  (a fresh os_inserted means
+#                             #    OpenSearch will never report "noop")
+#
+# # ---- 2. Nested-object gotcha: top-level merge, subtree REPLACE -------
+# # If the stored doc has   {"recipe": {"step": 2, "tool": "CD1"}}
+# # and you send            {"recipe": {"step": 3}}
+# # the result is           {"recipe": {"step": 3}}     <- "tool" is GONE.
+# # To keep the other keys, read-modify-write or send the full subtree:
+# current = doc_service.get("LOTABC-001", index="cdsem_idp_ver")["_source"]
+# merged_recipe = {**current.get("recipe", {}), "step": 3}
+# doc_service.update(
+#     "LOTABC-001",
+#     {"recipe": merged_recipe},
+#     index="cdsem_idp_ver",
+# )
+#
+# # ---- 3. Update if exists, create if missing (upsert) -----------------
+# # Same partial-patch semantics as update, but creates the doc with the
+# # given fields if the id is not present. Same convention applies: send
+# # a fresh os_inserted so the field tracks "last touched in OS".
+# doc_service.upsert(
+#     "LOTABC-999",
+#     {
+#         "idp_ver_status": "pending",
+#         "modified": "2026-05-20T09:00:00+09:00",
+#         "os_inserted": now_kst,
+#     },
+#     index="cdsem_idp_ver",
+# )
+#
+# # ---- 4. Update many docs in one round-trip (bulk update actions) -----
+# # OSDoc.bulk takes raw bulk-API actions. Each "update" action's "doc"
+# # is a partial patch with the same semantics as method 1. Stamp one
+# # shared os_inserted for the whole batch so the cohort stays grouped.
+# batch_kst = (
+#     datetime.now(tz=ZoneInfo("Asia/Seoul"))
+#     .replace(microsecond=0)
+#     .isoformat()
+# )
+# patches = [
+#     {"id": "LOTABC-001", "fields": {"idp_ver_status": "verified"}},
+#     {"id": "LOTABC-002", "fields": {"idp_ver_status": "rejected"}},
+# ]
+# actions = (
+#     {
+#         "_op_type": "update",
+#         "_index": "cdsem_idp_ver",
+#         "_id": p["id"],
+#         "doc": {**p["fields"], "os_inserted": batch_kst},
+#     }
+#     for p in patches
+# )
+# success_count, errors = doc_service.bulk(actions, refresh=True)
+# print(f"updated: {success_count}, errors: {len(errors)}")
