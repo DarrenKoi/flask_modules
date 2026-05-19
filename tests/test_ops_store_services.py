@@ -1006,6 +1006,29 @@ class OSSearchTests(unittest.TestCase):
         self.assertEqual(body["sort"], [{"event_tm": {"order": "desc"}}])
         self.assertEqual(body["size"], 50)
 
+    def test_range_search_supports_hours_only(self) -> None:
+        client = Mock()
+        service = OSSearch(client=client, index="events")
+
+        service.range_search(hours=4)
+
+        body = client.search.call_args.kwargs["body"]
+        self.assertEqual(
+            body["query"]["range"], {"timestamp": {"gte": "now-4h", "lte": "now"}}
+        )
+
+    def test_range_search_combines_days_and_hours(self) -> None:
+        client = Mock()
+        service = OSSearch(client=client, index="events")
+
+        service.range_search(days=1, hours=12)
+
+        body = client.search.call_args.kwargs["body"]
+        self.assertEqual(
+            body["query"]["range"],
+            {"timestamp": {"gte": "now-1d-12h", "lte": "now"}},
+        )
+
     def test_range_search_wraps_caller_query_in_bool_filter(self) -> None:
         client = Mock()
         service = OSSearch(client=client, index="events")

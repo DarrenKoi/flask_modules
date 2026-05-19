@@ -66,6 +66,22 @@ def _records_to_dataframe(records: list[dict[str, Any]]) -> Any:
 _DATE_TYPES = frozenset({"date", "date_nanos"})
 
 
+def _build_range_clause(
+    time_field: str,
+    days: int | None,
+    hours: int | None,
+) -> dict[str, Any]:
+    if days is None and hours is None:
+        days = 7
+    parts: list[str] = []
+    if days is not None:
+        parts.append(f"{days}d")
+    if hours is not None:
+        parts.append(f"{hours}h")
+    gte = "now-" + "-".join(parts)
+    return {"range": {time_field: {"gte": gte, "lte": "now"}}}
+
+
 def _lookup_mapped_field(
     properties: dict[str, Any], dotted_path: str
 ) -> dict[str, Any] | None:
@@ -417,12 +433,13 @@ class OSSearch(OSBase):
         self,
         *,
         time_field: str = "timestamp",
-        days: int = 7,
+        days: int | None = None,
+        hours: int | None = None,
         index: str | None = None,
         query: dict[str, Any] | None = None,
         size: int = 10000,
     ) -> dict[str, Any]:
-        range_clause = {"range": {time_field: {"gte": f"now-{days}d", "lte": "now"}}}
+        range_clause = _build_range_clause(time_field, days, hours)
         if query is not None:
             body_query: dict[str, Any] = {
                 "bool": {"must": [query], "filter": [range_clause]}
@@ -440,7 +457,8 @@ class OSSearch(OSBase):
         self,
         *,
         time_field: str = "timestamp",
-        days: int = 7,
+        days: int | None = None,
+        hours: int | None = None,
         index: str | None = None,
         query: dict[str, Any] | None = None,
         size: int = 10000,
@@ -449,6 +467,7 @@ class OSSearch(OSBase):
         result = self.range_search(
             time_field=time_field,
             days=days,
+            hours=hours,
             index=index,
             query=query,
             size=size,
@@ -459,7 +478,8 @@ class OSSearch(OSBase):
         self,
         *,
         time_field: str = "timestamp",
-        days: int = 7,
+        days: int | None = None,
+        hours: int | None = None,
         index: str | None = None,
         query: dict[str, Any] | None = None,
         batch_size: int = 1000,
@@ -467,7 +487,7 @@ class OSSearch(OSBase):
         include_meta: bool = False,
         max_rows: int | None = None,
     ) -> Any:
-        range_clause = {"range": {time_field: {"gte": f"now-{days}d", "lte": "now"}}}
+        range_clause = _build_range_clause(time_field, days, hours)
         if query is not None:
             body_query: dict[str, Any] = {
                 "bool": {"must": [query], "filter": [range_clause]}
