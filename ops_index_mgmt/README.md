@@ -151,6 +151,53 @@ python -m ops_index_mgmt.ebeam_tas_lot_hist --dry-run
 python -m ops_index_mgmt.ebeam_tas_lot_hist
 ```
 
+## hitachi_idp_ver indices (cdsem + hvsem)
+
+`hitachi_idp_ver.py` creates two rollover families that share one ISM
+policy — same shape as `hitachi_sem_msr_info.py` but with a doc-count
+rollover and 3-year retention:
+
+- shared ISM policy `hitachi_idp_ver_retention_policy`
+- index template `cdsem_idp_ver_template`
+- index template `hvsem_idp_ver_template`
+- first backing index `cdsem_idp_ver-000001`
+- first backing index `hvsem_idp_ver-000001`
+- write/search alias `cdsem_idp_ver`
+- write/search alias `hvsem_idp_ver`
+
+Settings:
+
+- primary shards: `2`
+- replicas: `1`
+- rollover: write index reaches `1000000` docs
+- retention: delete backing indices after `1095d` (3 years)
+
+Field mapping:
+
+- `modified` → `date` (explicit, since ISO-8601 strings would otherwise
+  be auto-mapped as `text`)
+- any `*_tm` / `*_dt` columns → `date` via `dynamic_templates`
+- everything else falls through to default dynamic mapping
+
+```bash
+python -m ops_index_mgmt.hitachi_idp_ver --dry-run
+python -m ops_index_mgmt.hitachi_idp_ver
+```
+
+Ingest dataframes through each alias separately:
+
+```python
+from ops_store import OSDoc
+
+doc_service = OSDoc(client=client)
+doc_service.bulk_index_dataframe(
+    cdsem_df, index="cdsem_idp_ver", id_field="doc_id", op_type="create",
+)
+doc_service.bulk_index_dataframe(
+    hvsem_df, index="hvsem_idp_ver", id_field="doc_id", op_type="create",
+)
+```
+
 ## Elasticsearch → OpenSearch reindex
 
 `es_to_os_reindex.py` copies one ES index into one OpenSearch index using the
