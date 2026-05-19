@@ -171,6 +171,57 @@ class OSDocTests(unittest.TestCase):
         self.assertEqual(result, {})
         self.client.mget.assert_not_called()
 
+    def test_get_many_returns_sources_keyed_by_id(self) -> None:
+        self.client.mget.return_value = {
+            "docs": [
+                {"_id": "doc-1", "found": True, "_source": {"title": "one"}},
+                {"_id": "doc-2", "found": False},
+                {"_id": "doc-3", "found": True, "_source": {"title": "three"}},
+            ]
+        }
+
+        result = self.service.get_many(["doc-1", "doc-2", "doc-3"])
+
+        self.assertEqual(
+            result,
+            {
+                "doc-1": {"title": "one"},
+                "doc-2": None,
+                "doc-3": {"title": "three"},
+            },
+        )
+        self.client.mget.assert_called_once_with(
+            index="articles",
+            body={
+                "docs": [
+                    {"_id": "doc-1"},
+                    {"_id": "doc-2"},
+                    {"_id": "doc-3"},
+                ]
+            },
+        )
+
+    def test_get_many_can_override_index(self) -> None:
+        self.client.mget.return_value = {
+            "docs": [
+                {"_id": "doc-9", "found": True, "_source": {"v": 9}},
+            ]
+        }
+
+        result = self.service.get_many(["doc-9"], index="archive")
+
+        self.assertEqual(result, {"doc-9": {"v": 9}})
+        self.client.mget.assert_called_once_with(
+            index="archive",
+            body={"docs": [{"_id": "doc-9"}]},
+        )
+
+    def test_get_many_skips_empty_id_list(self) -> None:
+        result = self.service.get_many([])
+
+        self.assertEqual(result, {})
+        self.client.mget.assert_not_called()
+
     def test_bulk_index_builds_actions(self) -> None:
         documents = [{"id": "1", "title": "one"}, {"id": "2", "title": "two"}]
 

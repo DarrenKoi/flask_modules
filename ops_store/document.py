@@ -187,6 +187,36 @@ class OSDoc(OSBase):
 
         return result
 
+    def get_many(
+        self,
+        doc_ids: Sequence[str],
+        *,
+        index: str | None = None,
+    ) -> dict[str, dict[str, Any] | None]:
+        """Return documents by id using a single multi-get request.
+
+        The returned dict is keyed by the requested id; the value is the
+        document's ``_source`` if found, otherwise ``None``.
+        """
+
+        name = self._resolve_index(index)
+        ids = list(doc_ids)
+        if not ids:
+            return {}
+
+        result: dict[str, dict[str, Any] | None] = {doc_id: None for doc_id in ids}
+        response = self.client.mget(
+            index=name,
+            body={"docs": [{"_id": doc_id} for doc_id in ids]},
+        )
+
+        for document in response.get("docs", []):
+            doc_id = document.get("_id")
+            if doc_id in result and document.get("found"):
+                result[doc_id] = document.get("_source")
+
+        return result
+
     def update(
         self,
         doc_id: str,
