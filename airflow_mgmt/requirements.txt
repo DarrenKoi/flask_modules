@@ -9,6 +9,7 @@ apache-airflow==3.1.8
 apache-airflow-providers-standard
 apache-airflow-providers-cncf-kubernetes  # required for KubernetesPodOperator
 minio>=7.2                                # used by the vendored minio_handler
+redis>=5                                  # used by item_check_hourly
 
 # Testing
 pytest>=8.0
