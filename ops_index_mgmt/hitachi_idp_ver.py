@@ -49,12 +49,22 @@ def build_mappings() -> dict[str, Any]:
                       name it means "last touched in OS" — used for
                       operational cleanup of the live write index by
                       activity, not by ingest cohort.
+    - `raw_data`    : the original row as a nested object (e.g. from
+                      `df.to_dict("records")`). `enabled: false` stores
+                      it verbatim in `_source` but tells OpenSearch not
+                      to parse or index its keys, so its (potentially
+                      hundreds of) subfields never count against the
+                      `index.mapping.total_fields.limit` (default 1000).
+                      Trade-off: `raw_data.*` is returned on fetch but is
+                      NOT searchable/aggregatable — promote any key you
+                      need to query to a real top-level field instead.
     """
 
     return {
         "properties": {
             "modified": {"type": "date"},
             "os_inserted": {"type": "date"},
+            "raw_data": {"type": "object", "enabled": False},
         },
         "dynamic_templates": [
             {
