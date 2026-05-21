@@ -1,0 +1,131 @@
+"""Firewall-free FTP proxy as a Flask Blueprint — server half of the proxy pair.
+
+Runs on a host that CAN reach the equipment FTP servers. A firewalled client
+POSTs download specs here; this side does the real FTP (reusing
+FtpFleetDownloader) and returns the file bytes over HTTP. Pair it with
+``utils/ftp_flask_downloader.py`` on the firewalled client — same public API,
+HTTP transport instead of direct FTP.
+
+    local PC ──HTTP──> Flask app (this blueprint) ──FTP──> equipment servers
+    (firewalled,        (firewall-free)                     (only reachable
+     no FTP egress)                                          from the proxy)
+
+Mount it on an EXISTING Flask app as one blueprint among many:
+
+    from ftp_flask_proxy import ftp_proxy_sknn_v3
+    app.register_blueprint(ftp_proxy_sknn_v3)
+
+Routes carry the ``_sknn_v3`` suffix so they don't collide with paths already
+used by the host app:
+    POST /download_sknn_v3   request JSON:
+        {"user","password","port","max_concurrency","connect_timeout",
+         "host_timeout","passive",
+         "specs":[{"host","files":[...],"listings":[{"remote_dir","pattern"}]}]}
+    200 response JSON:
+        {"files":[{"host","remote_path","data_b64"}],
+         "failures":[{"host","error","remote_path"}]}
+    GET  /healthz_sknn_v3 -> {"status":"ok"}
+
+Auth: if env FTP_PROXY_TOKEN is set, requests must carry
+``Authorization: Bearer <token>`` or get 401. Always serve behind HTTPS in
+production — the FTP password and file bytes cross this connection.
+
+Standalone run (without an existing app):
+    pip install flask
+    set FTP_PROXY_TOKEN=secret    # PowerShell: $env:FTP_PROXY_TOKEN="secret"
+    python ftp_flask_proxy.py                       # serves 0.0.0.0:8080
+"""
+
+import base64
+import os
+import sys
+from pathlib import Path
+
+from flask import Blueprint, Flask, jsonify, request
+
+# Import the real downloader sitting next to this file, whether this module is
+# run as a script or imported as a package member.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ftp_fleet_downloader import FtpFleetDownloader, HostSpec, ListDir  # noqa: E402
+
+# Suffixed to avoid collisions with routes already mounted on the host app.
+# Keep in sync with the path ftp_flask_downloader.py POSTs to.
+URL_DOWNLOAD = "/download_sknn_v3"
+URL_HEALTH = "/healthz_sknn_v3"
+
+ftp_proxy_sknn_v3 = Blueprint("ftp_proxy_sknn_v3", __name__)
+
+
+def _spec_from_wire(entry: dict) -> HostSpec:
+    listings = [
+        ListDir(remote_dir=item["remote_dir"], pattern=item.get("pattern"))
+        for item in entry.get("listings", [])
+    ]
+    return HostSpec(
+        host=entry["host"],
+        files=list(entry.get("files", [])),
+        listings=listings,
+    )
+
+
+@ftp_proxy_sknn_v3.get(URL_HEALTH)
+def healthz():
+    return jsonify({"status": "ok"})
+
+
+@ftp_proxy_sknn_v3.post(URL_DOWNLOAD)
+def download():
+    # Token read per request so it can be configured independently of when the
+    # host app (and this blueprint) were imported.
+    token = os.getenv("FTP_PROXY_TOKEN")
+    if token is not None:
+        if request.headers.get("Authorization", "") != f"Bearer {token}":
+            return jsonify({"error": "unauthorized"}), 401
+
+    body = request.get_json(force=True)
+    specs = [_spec_from_wire(entry) for entry in body.get("specs", [])]
+
+    # Same tuning the client passes, so proxy-side behavior matches what a
+    # direct FtpFleetDownloader would have done on the client. Defaults mirror
+    # the downloader: 8s connection wait, 60s whole-host backstop.
+    downloader = FtpFleetDownloader(
+        user=body["user"],
+        password=body["password"],
+        port=body.get("port", 21),
+        max_concurrency=body.get("max_concurrency", 48),
+        connect_timeout=body.get("connect_timeout", 8.0),
+        host_timeout=body.get("host_timeout", 60.0),
+        passive=body.get("passive", True),
+    )
+    report = downloader.download(specs)
+
+    return jsonify(
+        {
+            "files": [
+                {
+                    "host": f.host,
+                    "remote_path": f.remote_path,
+                    "data_b64": base64.b64encode(f.data).decode("ascii"),
+                }
+                for f in report.files
+            ],
+            "failures": [
+                {"host": x.host, "error": x.error, "remote_path": x.remote_path}
+                for x in report.failures
+            ],
+        }
+    )
+
+
+def create_app() -> Flask:
+    """Standalone app wrapping the blueprint — for running the proxy on its own
+    and for tests. To attach to an existing app, register the blueprint
+    directly instead."""
+    app = Flask(__name__)
+    app.register_blueprint(ftp_proxy_sknn_v3)
+    return app
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("FTP_PROXY_PORT", "8080"))
+    create_app().run(host="0.0.0.0", port=port)
