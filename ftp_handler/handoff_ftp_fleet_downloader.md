@@ -24,10 +24,10 @@ per-host isolation, in-memory (no disk). See decision table in the reference doc
 
 | Path | Role |
 |------|------|
-| `utils/ftp_fleet_downloader.py` | Core downloader. Sync API over async/thread fan-out. `FtpFleetDownloader`, `download_fleet`, `HostSpec`, `ListDir`, `DownloadReport` (+ `.grouped()`, `.failure_ratio`), `save_to_dir()` disk helper. |
-| `utils/eqp_ftp_collect.py` | Airflow-free glue: `build_host_specs`, `collect_fleet` (archive→parse→index per file). Storage/index injected as callables (no minio/opensearch import). |
-| `utils/ftp_flask_proxy.py` | Flask **Blueprint** `ftp_proxy_sknn_v3`; reuses the downloader, returns base64 bytes. Routes `/download_sknn_v3`, `/healthz_sknn_v3`. |
-| `utils/ftp_flask_downloader.py` | Drop-in client for the proxy — same public names, HTTP transport. Re-exports the same dataclasses + `save_to_dir`. |
+| `ftp_handler/ftp_fleet_downloader.py` | Core downloader. Sync API over async/thread fan-out. `FtpFleetDownloader`, `download_fleet`, `HostSpec`, `ListDir`, `DownloadReport` (+ `.grouped()`, `.failure_ratio`), `save_to_dir()` disk helper. |
+| `ftp_handler/eqp_ftp_collect.py` | Airflow-free glue: `build_host_specs`, `collect_fleet` (archive→parse→index per file). Storage/index injected as callables (no minio/opensearch import). |
+| `ftp_handler/ftp_flask_proxy.py` | Flask **Blueprint** `ftp_proxy_sknn_v3`; reuses the downloader, returns base64 bytes. Routes `/download_sknn_v3`, `/healthz_sknn_v3`. |
+| `ftp_handler/ftp_flask_downloader.py` | Drop-in client for the proxy — same public names, HTTP transport. Re-exports the same dataclasses + `save_to_dir`. |
 | `dags/eqp_ftp/eqp_ftp_collector_dag.py` | Thin `*/30` DAG: Variable `eqp_ftp_fleet`, Connection `eqp_ftp`, threshold failure, no-overlap. |
 | `tests/test_ftp_fleet_downloader.py` | Downloader + glue + `save_to_dir` (mocked `ftplib.FTP`). |
 | `tests/test_ftp_flask_proxy.py` | Client↔proxy end-to-end via Flask test client (only FTP faked). |

@@ -2,8 +2,8 @@
 
 Concurrent, in-memory FTP downloader for pulling the same files from many
 equipment FTP servers (~200+) on a schedule. Lives in
-`utils/ftp_fleet_downloader.py`; the storage/processing glue is in
-`utils/eqp_ftp_collect.py`; the production DAG is
+`ftp_handler/ftp_fleet_downloader.py`; the storage/processing glue is in
+`ftp_handler/eqp_ftp_collect.py`; the production DAG is
 `dags/eqp_ftp/eqp_ftp_collector_dag.py`.
 
 ## Why this shape
@@ -31,7 +31,7 @@ Returns one `DownloadReport` holding every file's bytes. Peak RAM = **sum of
 all files**. Fine for small files / modest fleets.
 
 ```python
-from utils.ftp_fleet_downloader import FtpFleetDownloader, HostSpec, ListDir
+from ftp_handler.ftp_fleet_downloader import FtpFleetDownloader, HostSpec, ListDir
 
 dl = FtpFleetDownloader(user="ftpuser", password="ftppass", max_concurrency=48)
 
@@ -84,7 +84,7 @@ report = dl.download(specs, on_file=on_file)   # report carries no bytes
 ### One-call helper
 
 ```python
-from utils.ftp_fleet_downloader import download_fleet
+from ftp_handler.ftp_fleet_downloader import download_fleet
 
 report = download_fleet(specs, user="ftpuser", password="ftppass",
                         max_concurrency=48)
@@ -138,7 +138,7 @@ results are normalized whether the server returns bare names or full paths.
 - `.failure_ratio` — `ng / (ok + ng)`, for threshold alerting (`0.0` if empty).
 - `.grouped() -> {host: {remote_path: bytes}}`.
 
-### `utils.eqp_ftp_collect`
+### `ftp_handler.eqp_ftp_collect`
 - `build_host_specs(fleet: list[dict]) -> list[HostSpec]` — turns the runtime
   config (Airflow Variable JSON) into specs.
 - `collect_fleet(specs, *, user, password, archive, parse, index, **tuning)` —
@@ -239,8 +239,8 @@ downloader — swap one import, change nothing else:
 
 | File | Runs on | Role |
 |------|---------|------|
-| `utils/ftp_flask_proxy.py` | firewall-free host | Flask **Blueprint** (`ftp_proxy_sknn_v3`); does the real FTP via `FtpFleetDownloader`, returns base64'd bytes over HTTP |
-| `utils/ftp_flask_downloader.py` | firewalled client | same API (`FtpFleetDownloader`, `download_fleet`, `HostSpec`, …); POSTs batches to the proxy instead of doing FTP |
+| `ftp_handler/ftp_flask_proxy.py` | firewall-free host | Flask **Blueprint** (`ftp_proxy_sknn_v3`); does the real FTP via `FtpFleetDownloader`, returns base64'd bytes over HTTP |
+| `ftp_handler/ftp_flask_downloader.py` | firewalled client | same API (`FtpFleetDownloader`, `download_fleet`, `HostSpec`, …); POSTs batches to the proxy instead of doing FTP |
 
 Routes carry a `_sknn_v3` suffix (`/download_sknn_v3`, `/healthz_sknn_v3`) so
 they don't collide with paths already mounted on the host app.
@@ -286,10 +286,14 @@ Notes:
   proxy behind **HTTPS** and set `FTP_PROXY_TOKEN` (the proxy enforces
   `Authorization: Bearer <token>`). Constructor `proxy_url`/`token` override the
   env defaults.
-- **Batching:** the client splits hosts into `request_batch` (default 20) and
-  POSTs `client_workers` (default 8) batches concurrently, bounding response
+- **Batching:** the client splits hosts into `request_batch` (default 5) and
+  POSTs `client_workers` (default 4) batches concurrently, bounding response
   size and mirroring the direct fan-out. A whole-batch transport failure marks
-  every host in it failed — per-host isolation one level up.
+  every host in it failed — per-host isolation one level up. The defaults are
+  small on purpose: the proxy collects a whole batch in memory (Mode A) and
+  base64+jsonify roughly triples it, on a host app sharing an 8GiB /
+  `reload-on-rss=1500` envelope with pandas tasks. `host_timeout` defaults to
+  45s to stay under the host app's `harakiri=60`. See `adr/0001-proxy-batch-sizing.md`.
 - **Wire format:** JSON + base64. Simple and fine for small files; for very
   large payloads a binary/streaming transport would beat base64's ~33% bloat.
 

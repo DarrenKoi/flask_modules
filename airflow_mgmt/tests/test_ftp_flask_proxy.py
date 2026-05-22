@@ -18,8 +18,8 @@ from urllib.parse import urlsplit
 
 import pytest
 
-UTILS = Path(__file__).resolve().parent.parent / "utils"
-sys.path.insert(0, str(UTILS))
+PKG = Path(__file__).resolve().parent.parent / "ftp_handler"
+sys.path.insert(0, str(PKG))
 
 import ftp_fleet_downloader as core  # noqa: E402
 import ftp_flask_downloader as client_mod  # noqa: E402

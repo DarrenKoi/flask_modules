@@ -44,7 +44,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 # ────────────────────────────────────────────────────────────────────────────
 
-from utils.eqp_ftp_collect import build_host_specs, collect_fleet  # noqa: E402
+from ftp_handler.eqp_ftp_collect import build_host_specs, collect_fleet  # noqa: E402
 
 # Operational knobs with env overrides — tuned for ~200 small-file hosts.
 FLEET_VARIABLE = os.getenv("EQP_FTP_FLEET_VARIABLE", "eqp_ftp_fleet")

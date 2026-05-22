@@ -1,6 +1,6 @@
 """Unit tests for the FTP fleet downloader.
 
-No live FTP server: utils.ftp_fleet_downloader.FTP is patched with FakeFTP,
+No live FTP server: ftp_handler.ftp_fleet_downloader.FTP is patched with FakeFTP,
 whose behavior per host is driven by a class-level script the test sets up.
 Asserts the behaviors the design hinges on: per-host error isolation, both
 discovery modes, on_file streaming, and threshold math.
@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from utils.ftp_fleet_downloader import (
+from ftp_handler.ftp_fleet_downloader import (
     DownloadReport,
     FtpFleetDownloader,
     HostSpec,
@@ -20,7 +20,7 @@ from utils.ftp_fleet_downloader import (
     download_fleet,
     save_to_dir,
 )
-from utils.ftp_fleet_downloader import _safe_relative
+from ftp_handler.ftp_fleet_downloader import _safe_relative
 
 
 class FakeFTP:
@@ -93,7 +93,7 @@ def _reset_scripts():
 
 
 def _run(specs, **kwargs) -> DownloadReport:
-    with patch("utils.ftp_fleet_downloader.FTP", FakeFTP):
+    with patch("ftp_handler.ftp_fleet_downloader.FTP", FakeFTP):
         dl = FtpFleetDownloader(user="u", password="p", **kwargs)
         return dl.download(specs)
 
@@ -200,7 +200,7 @@ def test_on_file_streaming_drops_bytes():
     def on_file(host, remote_path, data):
         seen.append((host, remote_path, data))
 
-    with patch("utils.ftp_fleet_downloader.FTP", FakeFTP):
+    with patch("ftp_handler.ftp_fleet_downloader.FTP", FakeFTP):
         dl = FtpFleetDownloader(user="u", password="p")
         report = dl.download([HostSpec("h1", files=["/a", "/b"])], on_file=on_file)
 
@@ -222,7 +222,7 @@ def test_on_file_exception_marks_that_file_failed():
         if remote_path == "/bad":
             raise RuntimeError("index write failed")
 
-    with patch("utils.ftp_fleet_downloader.FTP", FakeFTP):
+    with patch("ftp_handler.ftp_fleet_downloader.FTP", FakeFTP):
         dl = FtpFleetDownloader(user="u", password="p")
         report = dl.download([HostSpec("h1", files=["/good", "/bad"])], on_file=on_file)
 
@@ -256,7 +256,7 @@ def test_empty_report_failure_ratio_is_zero():
 
 def test_download_fleet_helper():
     FakeFTP.scripts = {"h1": {"files": {"/log": b"data"}}}
-    with patch("utils.ftp_fleet_downloader.FTP", FakeFTP):
+    with patch("ftp_handler.ftp_fleet_downloader.FTP", FakeFTP):
         report = download_fleet(
             [HostSpec("h1", files=["/log"])], user="u", password="p", max_concurrency=4
         )
@@ -264,7 +264,7 @@ def test_download_fleet_helper():
 
 
 # ── glue helper: build_host_specs + collect_fleet ───────────────────────────
-from utils.eqp_ftp_collect import build_host_specs, collect_fleet  # noqa: E402
+from ftp_handler.eqp_ftp_collect import build_host_specs, collect_fleet  # noqa: E402
 
 
 def test_build_host_specs_maps_files_and_listings():
@@ -303,7 +303,7 @@ def test_collect_fleet_archives_parses_and_indexes_in_order():
         calls.append("index")
         indexed.extend(docs)
 
-    with patch("utils.ftp_fleet_downloader.FTP", FakeFTP):
+    with patch("ftp_handler.ftp_fleet_downloader.FTP", FakeFTP):
         report = collect_fleet(
             [HostSpec("h1", files=["/a"])],
             user="u",
@@ -353,7 +353,7 @@ def test_save_to_dir_writes_files(tmp_path):
         "10.0.0.1": {"files": {"/HITACHI/SYSFILE/LOG.log": b"L"}},
         "10.0.0.2": {"files": {"/MEAS/x.dat": b"X"}},
     }
-    with patch("utils.ftp_fleet_downloader.FTP", FakeFTP):
+    with patch("ftp_handler.ftp_fleet_downloader.FTP", FakeFTP):
         dl = FtpFleetDownloader(user="u", password="p")
         report = dl.download(
             [
@@ -373,7 +373,7 @@ def test_save_to_dir_writes_files(tmp_path):
 def test_save_to_dir_then_chains(tmp_path):
     FakeFTP.scripts = {"h1": {"files": {"/a": b"A"}}}
     chained = []
-    with patch("utils.ftp_fleet_downloader.FTP", FakeFTP):
+    with patch("ftp_handler.ftp_fleet_downloader.FTP", FakeFTP):
         dl = FtpFleetDownloader(user="u", password="p")
         dl.download(
             [HostSpec("h1", files=["/a"])],
@@ -398,7 +398,7 @@ def test_collect_fleet_index_failure_marks_file_failed():
         if docs[0]["p"] == "/b":
             raise RuntimeError("opensearch down")
 
-    with patch("utils.ftp_fleet_downloader.FTP", FakeFTP):
+    with patch("ftp_handler.ftp_fleet_downloader.FTP", FakeFTP):
         report = collect_fleet(
             [HostSpec("h1", files=["/a", "/b"])],
             user="u",

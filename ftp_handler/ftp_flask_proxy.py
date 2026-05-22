@@ -3,7 +3,7 @@
 Runs on a host that CAN reach the equipment FTP servers. A firewalled client
 POSTs download specs here; this side does the real FTP (reusing
 FtpFleetDownloader) and returns the file bytes over HTTP. Pair it with
-``utils/ftp_flask_downloader.py`` on the firewalled client — same public API,
+``ftp_handler/ftp_flask_downloader.py`` on the firewalled client — same public API,
 HTTP transport instead of direct FTP.
 
     local PC ──HTTP──> Flask app (this blueprint) ──FTP──> equipment servers
@@ -86,15 +86,16 @@ def download():
     specs = [_spec_from_wire(entry) for entry in body.get("specs", [])]
 
     # Same tuning the client passes, so proxy-side behavior matches what a
-    # direct FtpFleetDownloader would have done on the client. Defaults mirror
-    # the downloader: 8s connection wait, 60s whole-host backstop.
+    # direct FtpFleetDownloader would have done on the client. host_timeout
+    # default 45s stays under the host app's harakiri=60 so the downloader's own
+    # backstop fires before uWSGI kills the request. See ADR 0001.
     downloader = FtpFleetDownloader(
         user=body["user"],
         password=body["password"],
         port=body.get("port", 21),
         max_concurrency=body.get("max_concurrency", 48),
         connect_timeout=body.get("connect_timeout", 8.0),
-        host_timeout=body.get("host_timeout", 60.0),
+        host_timeout=body.get("host_timeout", 45.0),
         passive=body.get("passive", True),
     )
     report = downloader.download(specs)

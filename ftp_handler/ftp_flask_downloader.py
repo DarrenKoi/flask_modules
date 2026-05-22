@@ -1,7 +1,7 @@
 """HTTP-proxy FTP downloader — the client half, drop-in for ftp_fleet_downloader.
 
 For a PC that CANNOT reach the equipment FTP servers directly (firewalled) but
-CAN reach the Flask proxy (``utils/ftp_flask_proxy.py``) on a firewall-free
+CAN reach the Flask proxy (``ftp_handler/ftp_flask_proxy.py``) on a firewall-free
 host. Exposes the SAME public names as ftp_fleet_downloader, so a call site
 swaps with one import line and nothing else changes:
 
@@ -77,8 +77,13 @@ class FtpFleetDownloader:
     sites keep working):
         proxy_url      proxy base URL (default env FTP_PROXY_URL or localhost)
         token          bearer token (default env FTP_PROXY_TOKEN)
-        request_batch  hosts per HTTP request (bounds response size)
-        client_workers concurrent in-flight requests to the proxy
+        request_batch  hosts per HTTP request (bounds proxy-side transient RAM:
+                       Mode-A collect + base64 + jsonify ~= 3x a batch's raw
+                       bytes). Default 5; sized for ~10MB files on the shared
+                       8GiB/reload-on-rss=1500 proxy host. See ADR 0001.
+        client_workers concurrent in-flight requests to the proxy. Default 4 to
+                       match the proxy's processes=4 — one batch per worker, no
+                       stacking in a single worker's address space.
         http_timeout   per-request read timeout; defaults generously to the
                        proxy's worst-case batch time
     """
@@ -91,12 +96,12 @@ class FtpFleetDownloader:
         port: int = 21,
         max_concurrency: int = 48,
         connect_timeout: float = 8.0,
-        host_timeout: float = 60.0,
+        host_timeout: float = 45.0,
         passive: bool = True,
         proxy_url: str | None = None,
         token: str | None = None,
-        request_batch: int = 20,
-        client_workers: int = 8,
+        request_batch: int = 5,
+        client_workers: int = 4,
         http_timeout: float | None = None,
     ) -> None:
         self.user = user
