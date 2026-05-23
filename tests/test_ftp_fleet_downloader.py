@@ -1,0 +1,432 @@
+"""Unit tests for the FTP fleet downloader and its archive→parse→index glue.
+
+No live FTP server: ``ftp_handler.ftp_fleet_downloader.FTP`` is patched with
+FakeFTP, whose per-host behavior is driven by a class-level script the test
+sets up. Asserts the behaviors the design hinges on: per-host error isolation,
+both discovery modes, on_file streaming, threshold math, and the disk helper.
+"""
+
+import socket
+import tempfile
+import unittest
+from ftplib import error_perm
+from pathlib import Path
+from unittest.mock import patch
+
+from ftp_handler.eqp_ftp_collect import build_host_specs, collect_fleet
+from ftp_handler.ftp_fleet_downloader import (
+    DownloadReport,
+    FtpFleetDownloader,
+    HostSpec,
+    ListDir,
+    _safe_relative,
+    download_fleet,
+    save_to_dir,
+)
+
+FTP_PATCH_TARGET = "ftp_handler.ftp_fleet_downloader.FTP"
+
+
+class FakeFTP:
+    """Stand-in for ftplib.FTP. Per-host behavior comes from FakeFTP.scripts::
+
+        FakeFTP.scripts = {
+            "host": {
+                "connect_error": Exception | None,
+                "login_error": Exception | None,
+                "files": {remote_path: bytes | Exception},
+                "listing": {remote_dir: list[str] | Exception},
+            }
+        }
+    """
+
+    scripts: dict = {}
+
+    def __init__(self, timeout=None):
+        self.timeout = timeout
+        self.host = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def _script(self) -> dict:
+        return FakeFTP.scripts.get(self.host, {})
+
+    def connect(self, host, port, timeout=None):
+        self.host = host
+        err = FakeFTP.scripts.get(host, {}).get("connect_error")
+        if err is not None:
+            raise err
+
+    def login(self, user, passwd):
+        err = self._script().get("login_error")
+        if err is not None:
+            raise err
+
+    def set_pasv(self, value):
+        self.passive = value
+
+    def nlst(self, remote_dir):
+        listing = self._script().get("listing", {})
+        if remote_dir not in listing:
+            raise error_perm(f"550 No such directory: {remote_dir}")
+        value = listing[remote_dir]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def retrbinary(self, cmd, callback):
+        remote_path = cmd.split(" ", 1)[1]
+        files = self._script().get("files", {})
+        if remote_path not in files:
+            raise error_perm(f"550 No such file: {remote_path}")
+        value = files[remote_path]
+        if isinstance(value, Exception):
+            raise value
+        callback(value)
+
+
+class _FakeFTPTestCase(unittest.TestCase):
+    """Resets the shared FakeFTP script around every test."""
+
+    def setUp(self) -> None:
+        FakeFTP.scripts = {}
+
+    def tearDown(self) -> None:
+        FakeFTP.scripts = {}
+
+    def _run(self, specs, **kwargs) -> DownloadReport:
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p", **kwargs)
+            return dl.download(specs)
+
+
+class FtpFleetDownloaderTests(_FakeFTPTestCase):
+    def test_fixed_path_download_returns_bytes(self):
+        FakeFTP.scripts = {"h1": {"files": {"/log.txt": b"hello"}}}
+        report = self._run([HostSpec("h1", files=["/log.txt"])])
+
+        self.assertEqual(report.ok, 1)
+        self.assertEqual(report.ng, 0)
+        self.assertEqual(report.files[0].host, "h1")
+        self.assertEqual(report.files[0].remote_path, "/log.txt")
+        self.assertEqual(report.files[0].data, b"hello")
+
+    def test_per_host_error_isolation(self):
+        # h1's connect blows up; h2 must still download. One dead host never
+        # aborts the rest of the fleet.
+        FakeFTP.scripts = {
+            "h1": {"connect_error": socket.timeout("timed out")},
+            "h2": {"files": {"/log.txt": b"ok"}},
+        }
+        report = self._run(
+            [HostSpec("h1", files=["/log.txt"]), HostSpec("h2", files=["/log.txt"])]
+        )
+
+        self.assertEqual(report.ok, 1)
+        self.assertEqual(report.ng, 1)
+        self.assertEqual(report.grouped(), {"h2": {"/log.txt": b"ok"}})
+        failed = report.failures[0]
+        self.assertEqual(failed.host, "h1")
+        self.assertIsNone(failed.remote_path)  # failed before any file (connect)
+
+    def test_listing_pattern_filters(self):
+        FakeFTP.scripts = {
+            "h1": {
+                "listing": {"/MEAS": ["a.dat", "b.txt", "c.dat"]},
+                "files": {"/MEAS/a.dat": b"A", "/MEAS/c.dat": b"C"},
+            }
+        }
+        report = self._run([HostSpec("h1", listings=[ListDir("/MEAS", "*.dat")])])
+
+        got = report.grouped()["h1"]
+        self.assertEqual(set(got), {"/MEAS/a.dat", "/MEAS/c.dat"})
+        self.assertEqual(got["/MEAS/a.dat"], b"A")
+
+    def test_listing_returns_full_paths_normalized(self):
+        # Some FTP servers return full paths from NLST; RETR must still work.
+        FakeFTP.scripts = {
+            "h1": {
+                "listing": {"/MEAS": ["/MEAS/x.dat"]},
+                "files": {"/MEAS/x.dat": b"X"},
+            }
+        }
+        report = self._run([HostSpec("h1", listings=[ListDir("/MEAS", "*.dat")])])
+        self.assertEqual(report.grouped(), {"h1": {"/MEAS/x.dat": b"X"}})
+
+    def test_fixed_and_listing_combine_on_one_connection(self):
+        FakeFTP.scripts = {
+            "h1": {
+                "listing": {"/MEAS": ["m1.dat"]},
+                "files": {"/log.txt": b"L", "/MEAS/m1.dat": b"M"},
+            }
+        }
+        report = self._run(
+            [HostSpec("h1", files=["/log.txt"], listings=[ListDir("/MEAS", "*.dat")])]
+        )
+        self.assertEqual(
+            report.grouped(), {"h1": {"/log.txt": b"L", "/MEAS/m1.dat": b"M"}}
+        )
+
+    def test_listing_failure_isolated_from_fixed_files(self):
+        # The directory listing fails, but the fixed-path file on the same host
+        # still downloads. The listing failure is recorded separately.
+        FakeFTP.scripts = {
+            "h1": {
+                "listing": {},  # /MEAS not present -> nlst raises error_perm
+                "files": {"/log.txt": b"L"},
+            }
+        }
+        report = self._run(
+            [HostSpec("h1", files=["/log.txt"], listings=[ListDir("/MEAS", "*.dat")])]
+        )
+        self.assertEqual(report.grouped(), {"h1": {"/log.txt": b"L"}})
+        self.assertEqual(report.ng, 1)
+        self.assertEqual(report.failures[0].remote_path, "/MEAS")
+
+    def test_missing_file_recorded_per_file(self):
+        FakeFTP.scripts = {"h1": {"files": {"/exists": b"y"}}}
+        report = self._run([HostSpec("h1", files=["/exists", "/missing"])])
+
+        self.assertEqual(report.ok, 1)
+        self.assertEqual(report.ng, 1)
+        self.assertEqual(report.failures[0].remote_path, "/missing")
+
+    def test_on_file_streaming_drops_bytes(self):
+        FakeFTP.scripts = {"h1": {"files": {"/a": b"A", "/b": b"B"}}}
+        seen: list = []
+
+        def on_file(host, remote_path, data):
+            seen.append((host, remote_path, data))
+
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p")
+            report = dl.download(
+                [HostSpec("h1", files=["/a", "/b"])], on_file=on_file
+            )
+
+        # Callback saw the real bytes...
+        self.assertEqual(
+            {(h, p, d) for h, p, d in seen},
+            {("h1", "/a", b"A"), ("h1", "/b", b"B")},
+        )
+        # ...but the report retained none (RAM stays bounded).
+        self.assertEqual(report.ok, 2)
+        self.assertTrue(all(f.data == b"" for f in report.files))
+        self.assertEqual(report.grouped(), {"h1": {"/a": b"", "/b": b""}})
+
+    def test_on_file_exception_marks_that_file_failed(self):
+        FakeFTP.scripts = {"h1": {"files": {"/good": b"G", "/bad": b"B"}}}
+
+        def on_file(host, remote_path, data):
+            if remote_path == "/bad":
+                raise RuntimeError("index write failed")
+
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p")
+            report = dl.download(
+                [HostSpec("h1", files=["/good", "/bad"])], on_file=on_file
+            )
+
+        self.assertEqual(report.ok, 1)
+        self.assertEqual(report.ng, 1)
+        self.assertEqual(report.failures[0].remote_path, "/bad")
+        self.assertIn("index write failed", report.failures[0].error)
+
+    def test_failure_ratio_math(self):
+        FakeFTP.scripts = {
+            "h1": {"files": {"/a": b"A"}},
+            "h2": {"connect_error": socket.timeout("x")},
+            "h3": {"connect_error": socket.timeout("x")},
+        }
+        report = self._run(
+            [
+                HostSpec("h1", files=["/a"]),
+                HostSpec("h2", files=["/a"]),
+                HostSpec("h3", files=["/a"]),
+            ]
+        )
+        self.assertEqual(report.ok, 1)
+        self.assertEqual(report.ng, 2)
+        self.assertAlmostEqual(report.failure_ratio, 2 / 3)
+
+    def test_empty_report_failure_ratio_is_zero(self):
+        self.assertEqual(DownloadReport(files=[], failures=[]).failure_ratio, 0.0)
+
+    def test_download_fleet_helper(self):
+        FakeFTP.scripts = {"h1": {"files": {"/log": b"data"}}}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            report = download_fleet(
+                [HostSpec("h1", files=["/log"])],
+                user="u",
+                password="p",
+                max_concurrency=4,
+            )
+        self.assertEqual(report.grouped(), {"h1": {"/log": b"data"}})
+
+
+class CollectFleetTests(_FakeFTPTestCase):
+    def test_build_host_specs_maps_files_and_listings(self):
+        fleet = [
+            {
+                "host": "10.0.0.1",
+                "files": ["/log.txt"],
+                "listings": [{"remote_dir": "/MEAS", "pattern": "*.dat"}],
+            },
+            {"host": "10.0.0.2"},  # no files / listings
+        ]
+        specs = build_host_specs(fleet)
+
+        self.assertEqual(specs[0].host, "10.0.0.1")
+        self.assertEqual(specs[0].files, ["/log.txt"])
+        self.assertEqual(specs[0].listings, [ListDir("/MEAS", "*.dat")])
+        self.assertEqual(specs[1].host, "10.0.0.2")
+        self.assertEqual(specs[1].files, [])
+        self.assertEqual(specs[1].listings, [])
+
+    def test_collect_fleet_archives_parses_and_indexes_in_order(self):
+        FakeFTP.scripts = {"h1": {"files": {"/a": b"raw-a"}}}
+        calls: list = []
+        indexed: list = []
+
+        def archive(host, remote_path, data):
+            calls.append("archive")
+            return f"bucket/{host}{remote_path}"
+
+        def parse(host, remote_path, data):
+            calls.append("parse")
+            return [{"host": host, "raw_len": len(data)}]
+
+        def index(docs):
+            calls.append("index")
+            indexed.extend(docs)
+
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            report = collect_fleet(
+                [HostSpec("h1", files=["/a"])],
+                user="u",
+                password="p",
+                archive=archive,
+                parse=parse,
+                index=index,
+            )
+
+        self.assertEqual(report.ok, 1)
+        # archive strictly before parse before index, per the agreed strictness.
+        self.assertEqual(calls, ["archive", "parse", "index"])
+        # minio_key stamped onto every doc.
+        self.assertEqual(
+            indexed, [{"host": "h1", "raw_len": 5, "minio_key": "bucket/h1/a"}]
+        )
+
+    def test_collect_fleet_index_failure_marks_file_failed(self):
+        # If OpenSearch indexing throws, that file is a failure (archive
+        # succeeded but the unit isn't done) — siblings are unaffected.
+        FakeFTP.scripts = {"h1": {"files": {"/a": b"A", "/b": b"B"}}}
+
+        def archive(host, remote_path, data):
+            return "k"
+
+        def parse(host, remote_path, data):
+            return [{"p": remote_path}]
+
+        def index(docs):
+            if docs[0]["p"] == "/b":
+                raise RuntimeError("opensearch down")
+
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            report = collect_fleet(
+                [HostSpec("h1", files=["/a", "/b"])],
+                user="u",
+                password="p",
+                archive=archive,
+                parse=parse,
+                index=index,
+            )
+
+        self.assertEqual(report.ok, 1)
+        self.assertEqual(report.ng, 1)
+        self.assertEqual(report.failures[0].remote_path, "/b")
+        self.assertIn("opensearch down", report.failures[0].error)
+
+
+class SafeRelativeTests(unittest.TestCase):
+    def test_posix_path(self):
+        self.assertEqual(
+            _safe_relative("/HITACHI/SYSFILE/LOG.log"),
+            Path("HITACHI/SYSFILE/LOG.log"),
+        )
+
+    def test_windows_ftp_backslashes(self):
+        # A Windows-hosted FTP server may return backslash-separated paths.
+        self.assertEqual(_safe_relative("\\MEAS\\sub\\x.dat"), Path("MEAS/sub/x.dat"))
+
+    def test_strips_traversal_and_drive(self):
+        # No escaping the dest dir; a Windows drive letter's colon is sanitized.
+        self.assertEqual(_safe_relative("/../../etc/passwd"), Path("etc/passwd"))
+        self.assertEqual(_safe_relative("C:/data/x"), Path("C_/data/x"))
+
+    def test_sanitizes_illegal_chars(self):
+        # A Linux filename with chars illegal on Windows must not crash a write.
+        self.assertEqual(_safe_relative("/m/a:b?c.dat"), Path("m/a_b_c.dat"))
+
+    def test_empty_falls_back(self):
+        self.assertEqual(_safe_relative("/"), Path("_unnamed"))
+
+
+class SaveToDirTests(_FakeFTPTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+        super().tearDown()
+
+    def test_save_to_dir_writes_files(self):
+        FakeFTP.scripts = {
+            "10.0.0.1": {"files": {"/HITACHI/SYSFILE/LOG.log": b"L"}},
+            "10.0.0.2": {"files": {"/MEAS/x.dat": b"X"}},
+        }
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p")
+            report = dl.download(
+                [
+                    HostSpec("10.0.0.1", files=["/HITACHI/SYSFILE/LOG.log"]),
+                    HostSpec("10.0.0.2", files=["/MEAS/x.dat"]),
+                ],
+                on_file=save_to_dir(self.tmp_path),
+            )
+
+        self.assertEqual(report.ok, 2)
+        self.assertEqual(
+            (self.tmp_path / "10.0.0.1" / "HITACHI" / "SYSFILE" / "LOG.log").read_bytes(),
+            b"L",
+        )
+        self.assertEqual(
+            (self.tmp_path / "10.0.0.2" / "MEAS" / "x.dat").read_bytes(), b"X"
+        )
+        # Streaming write — report retains no bytes.
+        self.assertTrue(all(f.data == b"" for f in report.files))
+
+    def test_save_to_dir_then_chains(self):
+        FakeFTP.scripts = {"h1": {"files": {"/a": b"A"}}}
+        chained: list = []
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p")
+            dl.download(
+                [HostSpec("h1", files=["/a"])],
+                on_file=save_to_dir(
+                    self.tmp_path, then=lambda h, p, d: chained.append((h, p, d))
+                ),
+            )
+        self.assertEqual((self.tmp_path / "h1" / "a").read_bytes(), b"A")
+        self.assertEqual(chained, [("h1", "/a", b"A")])
+
+
+if __name__ == "__main__":
+    unittest.main()
