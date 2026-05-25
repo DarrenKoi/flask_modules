@@ -3,17 +3,22 @@
 For a PC that CANNOT reach the equipment FTP servers directly (firewalled) but
 CAN reach the Flask proxy (``ftp_handler/ftp_flask_proxy.py``) on a firewall-free
 host. Exposes the SAME public names as ftp_fleet_downloader, so a call site
-swaps with one import line and nothing else changes:
+swaps with one import line and nothing else changes. This downloader satisfies
+the ``FleetTransport`` seam declared in ftp_fleet_downloader (both ``download``
+and ``list_dirs``); a conformance test asserts both adapters keep matching it::
 
     # direct FTP (no firewall in the way):
     from ftp_fleet_downloader import FtpFleetDownloader, HostSpec, ListDir
     # via the proxy (firewalled client):
     from ftp_flask_downloader import FtpFleetDownloader, HostSpec, ListDir
 
-The dataclasses (HostSpec, ListDir, DownloadReport, FileResult, HostFailure)
-are re-exported from ftp_fleet_downloader — they are the *same types*, so
-report.grouped(), report.failure_ratio, and your on_file handler behave
-identically under either transport.
+The dataclasses (HostSpec, ListDir, DownloadReport, FileResult, HostFailure,
+HostListing, ListingReport) are re-exported from ftp_fleet_downloader, so
+report.grouped(), report.failure_ratio, to_specs(), and your on_file handler
+behave identically under either transport. Within one consistent import context
+they are the *same class objects*; the transport itself is duck-typed (specs are
+serialized structurally), so a call site that imports everything from one side —
+all package (``ftp_handler.*``) or all copy-out (bare) — never has to care which.
 
 Transport: specs are split into batches and POSTed to the proxy concurrently;
 the proxy does the real FTP and returns base64'd bytes. ``on_file`` still runs
@@ -41,21 +46,28 @@ from ftp_fleet_downloader import (  # noqa: E402
     DownloadReport,
     FileResult,
     HostFailure,
+    HostListing,
     HostSpec,
     ListDir,
+    ListingReport,
     OnFile,
     save_to_dir,
+    specs_from_hosts,
 )
 
 __all__ = [
     "FtpFleetDownloader",
     "download_fleet",
+    "list_fleet",
     "HostSpec",
     "ListDir",
     "DownloadReport",
     "FileResult",
     "HostFailure",
+    "HostListing",
+    "ListingReport",
     "save_to_dir",
+    "specs_from_hosts",
 ]
 
 
@@ -137,28 +149,53 @@ class FtpFleetDownloader:
         if not specs:
             return DownloadReport(files=[], failures=[])
 
+        files: list[FileResult] = []
+        failures: list[HostFailure] = []
+        for batch_files, batch_failures in self._post_batches(
+            specs, lambda b: self._post_batch(b, on_file)
+        ):
+            files.extend(batch_files)
+            failures.extend(batch_failures)
+        return DownloadReport(files=files, failures=failures)
+
+    def list_dirs(self, specs: list[HostSpec]) -> ListingReport:
+        """List each host's ``listings`` dirs through the proxy — no fetching.
+
+        Same surface as the direct downloader's ``list_dirs``: the proxy runs the
+        real listing pass and returns discovered paths (no file bytes), which are
+        merged into one ListingReport. The same batching as ``download`` keeps
+        each HTTP request under the proxy's harakiri budget; listings carry no
+        bytes, so memory is never the constraint here.
+        """
+        if not specs:
+            return ListingReport(listings=[], failures=[])
+
+        listings: list[HostListing] = []
+        failures: list[HostFailure] = []
+        for batch_listings, batch_failures in self._post_batches(
+            specs, self._post_list_batch
+        ):
+            listings.extend(batch_listings)
+            failures.extend(batch_failures)
+        return ListingReport(listings=listings, failures=failures)
+
+    def _post_batches(self, specs, post):
+        """Split specs into batches and run ``post`` over them concurrently.
+
+        Shared transport loop for download and list_dirs: batch by
+        ``request_batch``, fan out at ``client_workers``, yield each batch's
+        ``(ok_items, failures)`` tuple. The caller merges them into its report.
+        """
         batches = [
             specs[i : i + self.request_batch]
             for i in range(0, len(specs), self.request_batch)
         ]
-        files: list[FileResult] = []
-        failures: list[HostFailure] = []
-
         workers = max(1, min(len(batches), self.client_workers))
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            for batch_files, batch_failures in pool.map(
-                lambda b: self._post_batch(b, on_file), batches
-            ):
-                files.extend(batch_files)
-                failures.extend(batch_failures)
-        return DownloadReport(files=files, failures=failures)
+            yield from pool.map(post, batches)
 
-    def _post_batch(
-        self,
-        batch: list[HostSpec],
-        on_file: OnFile | None,
-    ) -> tuple[list[FileResult], list[HostFailure]]:
-        payload = {
+    def _payload(self, batch: list[HostSpec]) -> dict:
+        return {
             "user": self.user,
             "password": self.password,
             "port": self.port,
@@ -168,22 +205,32 @@ class FtpFleetDownloader:
             "passive": self.passive,
             "specs": [_spec_to_wire(s) for s in batch],
         }
-        headers = {}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
 
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.token}"} if self.token else {}
+
+    def _post(self, path: str, batch: list[HostSpec]) -> dict:
+        """POST a batch to ``path`` and return the parsed JSON, or raise.
+
+        Paths carry the ``_sknn_v3`` suffix to avoid collisions with routes
+        already mounted on the host Flask app — must match ftp_flask_proxy.py.
+        """
+        resp = requests.post(
+            f"{self.proxy_url}{path}",
+            json=self._payload(batch),
+            headers=self._headers(),
+            timeout=self.http_timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def _post_batch(
+        self,
+        batch: list[HostSpec],
+        on_file: OnFile | None,
+    ) -> tuple[list[FileResult], list[HostFailure]]:
         try:
-            # Path carries the _sknn_v3 suffix to avoid collisions with routes
-            # already mounted on the host Flask app. Must match the blueprint
-            # in ftp_flask_proxy.py.
-            resp = requests.post(
-                f"{self.proxy_url}/download_sknn_v3",
-                json=payload,
-                headers=headers,
-                timeout=self.http_timeout,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            data = self._post("/download_sknn_v3", batch)
         except Exception as exc:  # noqa: BLE001 - whole-batch transport failure
             return [], [
                 HostFailure(
@@ -224,6 +271,35 @@ class FtpFleetDownloader:
                 files.append(FileResult(host=host, remote_path=remote_path, data=raw))
         return files, failures
 
+    def _post_list_batch(
+        self,
+        batch: list[HostSpec],
+    ) -> tuple[list[HostListing], list[HostFailure]]:
+        try:
+            data = self._post("/list_dirs_sknn_v3", batch)
+        except Exception as exc:  # noqa: BLE001 - whole-batch transport failure
+            return [], [
+                HostFailure(
+                    host=s.host,
+                    error=f"proxy request failed: {type(exc).__name__}: {exc}",
+                )
+                for s in batch
+            ]
+
+        listings = [
+            HostListing(host=item["host"], paths=item["paths"])
+            for item in data.get("listings", [])
+        ]
+        failures = [
+            HostFailure(
+                host=item["host"],
+                error=item["error"],
+                remote_path=item.get("remote_path"),
+            )
+            for item in data.get("failures", [])
+        ]
+        return listings, failures
+
 
 def download_fleet(
     specs: list[HostSpec],
@@ -236,3 +312,15 @@ def download_fleet(
     """One-call wrapper, mirroring ftp_fleet_downloader.download_fleet."""
     downloader = FtpFleetDownloader(user=user, password=password, **kwargs)  # type: ignore[arg-type]
     return downloader.download(specs, on_file=on_file)
+
+
+def list_fleet(
+    specs: list[HostSpec],
+    *,
+    user: str,
+    password: str,
+    **kwargs: object,
+) -> ListingReport:
+    """One-call wrapper, mirroring ftp_fleet_downloader.list_fleet."""
+    downloader = FtpFleetDownloader(user=user, password=password, **kwargs)  # type: ignore[arg-type]
+    return downloader.list_dirs(specs)

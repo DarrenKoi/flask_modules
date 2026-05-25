@@ -37,14 +37,40 @@ import asyncio
 import fnmatch
 import re
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from ftplib import FTP, all_errors
 from io import BytesIO
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator, Protocol, runtime_checkable
 
 # Invoked once per successfully downloaded file: (host, remote_path, data).
 OnFile = Callable[[str, str, bytes], None]
+
+
+def _normalize_listing(
+    names: list[str],
+    remote_dir: str,
+    pattern: str | None = None,
+) -> list[str]:
+    """Filter and normalize raw NLST output into usable remote paths.
+
+    NLST returns either bare basenames or full paths depending on the server;
+    this normalizes both to a path that RETR/DELE will accept, and keeps only
+    entries whose basename matches ``pattern`` (an fnmatch glob). ``pattern=None``
+    keeps everything. Lives here (not in ``ftp_client``) so the fleet downloader
+    stays free of any ``ftp_handler`` package dependency — it must import by bare
+    name when copied out beside the Flask proxy pair. The single-server
+    ``FtpClient`` imports it from here so listing behaves identically at both
+    scales.
+    """
+    out: list[str] = []
+    for name in names:
+        base = name.rsplit("/", 1)[-1]
+        if pattern is None or fnmatch.fnmatch(base, pattern):
+            full = name if name.startswith("/") else f"{remote_dir.rstrip('/')}/{base}"
+            out.append(full)
+    return out
 
 
 @dataclass(slots=True)
@@ -133,6 +159,77 @@ class DownloadReport:
         return out
 
 
+@dataclass(slots=True)
+class HostListing:
+    """The remote paths discovered on one host. ``paths`` may be empty if the
+    host connected but its directories were empty or all listings failed (the
+    failures are recorded separately on the report)."""
+
+    host: str
+    paths: list[str]
+
+
+@dataclass(slots=True)
+class ListingReport:
+    """Result of listing the fleet's directories without fetching anything.
+
+    This is the "look before you download" step for a large fleet: list the
+    measurement dirs across all ~300 hosts, decide what's worth pulling, then
+    feed the chosen paths back into ``download`` via ``to_specs()``.
+    """
+
+    listings: list[HostListing]
+    failures: list[HostFailure]
+
+    @property
+    def ok(self) -> int:
+        return len(self.listings)
+
+    @property
+    def ng(self) -> int:
+        return len(self.failures)
+
+    @property
+    def total_paths(self) -> int:
+        return sum(len(l.paths) for l in self.listings)
+
+    def grouped(self) -> dict[str, list[str]]:
+        """Discovered paths as ``{host: [remote_path, ...]}``."""
+        return {l.host: l.paths for l in self.listings}
+
+    def to_specs(self) -> list["HostSpec"]:
+        """Turn discovered paths into download-ready ``HostSpec`` objects.
+
+        Each host's paths become fixed ``files`` (no re-listing on download).
+        Hosts that discovered nothing are dropped. This closes the loop:
+        ``downloader.download(report.to_specs())``.
+        """
+        return [
+            HostSpec(host=l.host, files=list(l.paths)) for l in self.listings if l.paths
+        ]
+
+
+@runtime_checkable
+class FleetTransport(Protocol):
+    """The interchange seam between the two FTP deployment paths.
+
+    Two adapters satisfy it: the direct ``FtpFleetDownloader`` (this module,
+    real FTP) and the HTTP-proxy ``FtpFleetDownloader`` (``ftp_flask_downloader``,
+    same surface over HTTP). A call site swaps one import line between them and
+    nothing else changes — that swap is the whole point of the seam.
+
+    Both phases of a fleet run are on the seam: ``list_dirs`` (the
+    look-before-you-download listing pass) and ``download``. The conformance test
+    guards that both adapters keep matching both methods, so neither path drifts.
+    """
+
+    def download(
+        self, specs: list[HostSpec], *, on_file: OnFile | None = None
+    ) -> DownloadReport: ...
+
+    def list_dirs(self, specs: list[HostSpec]) -> ListingReport: ...
+
+
 class FtpFleetDownloader:
     """Reusable, synchronous, concurrent FTP downloader for a host fleet.
 
@@ -195,12 +292,49 @@ class FtpFleetDownloader:
         """
         return asyncio.run(self._download_all(specs, on_file))
 
+    def list_dirs(self, specs: list[HostSpec]) -> ListingReport:
+        """List each host's ``listings`` directories concurrently — no fetching.
+
+        The "look before you download" pass for a large fleet: enumerate the
+        measurement dirs across all hosts, inspect ``report.grouped()`` /
+        ``report.total_paths`` to decide what's worth pulling, then download the
+        survivors with ``downloader.download(report.to_specs())``. Only
+        ``spec.listings`` is consulted; ``spec.files`` is ignored (you already
+        know those paths — list to *discover* unknown ones).
+
+        Same concurrency, timeout, and per-host failure isolation as ``download``.
+        Synchronous; do NOT call from already-async code.
+        """
+        return asyncio.run(self._list_all(specs))
+
     # ── async orchestration (private) ───────────────────────────────────────
-    async def _download_all(
+    @contextmanager
+    def _session(self, host: str) -> Iterator[FTP]:
+        """One connected, logged-in FTP session for ``host``, closed on exit.
+
+        Shared open/login/passive setup for both the download and listing
+        workers, so a host is always reached the same way.
+        """
+        with FTP(timeout=self.connect_timeout) as ftp:
+            ftp.connect(host=host, port=self.port, timeout=self.connect_timeout)
+            ftp.login(user=self.user, passwd=self.password)
+            ftp.set_pasv(self.passive)
+            yield ftp
+
+    async def _run_fleet(
         self,
         specs: list[HostSpec],
-        on_file: OnFile | None,
-    ) -> DownloadReport:
+        worker: "Callable[[HostSpec], tuple[list, list[HostFailure]]]",
+    ) -> tuple[list, list[HostFailure]]:
+        """Fan ``worker`` out across ``specs`` concurrently and aggregate.
+
+        The shared engine behind ``download`` and ``list_dirs``: a pool + a
+        semaphore cap simultaneous connections at ``max_concurrency``, every host
+        is backstopped by ``host_timeout``, and a raise from one host never
+        aborts its siblings (partial success is the normal case). ``worker`` runs
+        blocking in a thread and returns ``(ok_items, failures)``; what's in
+        ``ok_items`` is the caller's business (``FileResult`` or ``HostListing``).
+        """
         loop = asyncio.get_running_loop()
         # A dedicated pool sized to max_concurrency — the default to_thread
         # executor caps at min(32, cpu+4), which would silently throttle a
@@ -212,11 +346,11 @@ class FtpFleetDownloader:
         loop.set_default_executor(pool)
         sem = asyncio.Semaphore(self.max_concurrency)
 
-        async def run_host(spec: HostSpec) -> tuple[list[FileResult], list[HostFailure]]:
+        async def run_host(spec: HostSpec) -> tuple[list, list[HostFailure]]:
             async with sem:
                 try:
                     return await asyncio.wait_for(
-                        asyncio.to_thread(self._host_worker, spec, on_file),
+                        asyncio.to_thread(worker, spec),
                         timeout=self.host_timeout,
                     )
                 except asyncio.TimeoutError:
@@ -238,7 +372,7 @@ class FtpFleetDownloader:
         finally:
             pool.shutdown(wait=False)
 
-        files: list[FileResult] = []
+        ok: list = []
         failures: list[HostFailure] = []
         for spec, outcome in zip(specs, outcomes):
             if isinstance(outcome, Exception):
@@ -248,10 +382,24 @@ class FtpFleetDownloader:
                     )
                 )
             else:
-                host_files, host_failures = outcome
-                files.extend(host_files)
+                host_ok, host_failures = outcome
+                ok.extend(host_ok)
                 failures.extend(host_failures)
+        return ok, failures
+
+    async def _download_all(
+        self,
+        specs: list[HostSpec],
+        on_file: OnFile | None,
+    ) -> DownloadReport:
+        files, failures = await self._run_fleet(
+            specs, lambda spec: self._host_worker(spec, on_file)
+        )
         return DownloadReport(files=files, failures=failures)
+
+    async def _list_all(self, specs: list[HostSpec]) -> ListingReport:
+        listings, failures = await self._run_fleet(specs, self._list_worker)
+        return ListingReport(listings=listings, failures=failures)
 
     # ── blocking per-host work (runs in a thread) ───────────────────────────
     def _host_worker(
@@ -262,10 +410,7 @@ class FtpFleetDownloader:
         files: list[FileResult] = []
         failures: list[HostFailure] = []
         try:
-            with FTP(timeout=self.connect_timeout) as ftp:
-                ftp.connect(host=spec.host, port=self.port, timeout=self.connect_timeout)
-                ftp.login(user=self.user, passwd=self.password)
-                ftp.set_pasv(self.passive)
+            with self._session(spec.host) as ftp:
                 for remote_path in self._resolve_paths(ftp, spec, failures):
                     self._fetch_one(ftp, spec.host, remote_path, on_file, files, failures)
         except all_errors as exc:
@@ -274,6 +419,41 @@ class FtpFleetDownloader:
                 HostFailure(host=spec.host, error=f"{type(exc).__name__}: {exc}")
             )
         return files, failures
+
+    def _list_worker(
+        self,
+        spec: HostSpec,
+    ) -> tuple[list[HostListing], list[HostFailure]]:
+        # Discovery-only counterpart to _host_worker: connect once, enumerate
+        # each listing dir, never RETR. A host that connects always yields a
+        # HostListing (possibly empty); a listing that fails to enumerate is
+        # recorded but doesn't sink the host's other listings.
+        paths: list[str] = []
+        failures: list[HostFailure] = []
+        try:
+            with self._session(spec.host) as ftp:
+                for listing in spec.listings:
+                    try:
+                        names = ftp.nlst(listing.remote_dir)
+                    except all_errors as exc:
+                        failures.append(
+                            HostFailure(
+                                host=spec.host,
+                                error=f"list {listing.remote_dir} failed: {type(exc).__name__}: {exc}",
+                                remote_path=listing.remote_dir,
+                            )
+                        )
+                        continue
+                    paths.extend(
+                        _normalize_listing(names, listing.remote_dir, listing.pattern)
+                    )
+        except all_errors as exc:
+            # connect / login failed — host discovered nothing.
+            failures.append(
+                HostFailure(host=spec.host, error=f"{type(exc).__name__}: {exc}")
+            )
+            return [], failures
+        return [HostListing(host=spec.host, paths=paths)], failures
 
     def _resolve_paths(
         self,
@@ -296,15 +476,7 @@ class FtpFleetDownloader:
                     )
                 )
                 continue
-            for name in names:
-                # NLST returns either bare names or full paths depending on the
-                # server; normalize so RETR always gets a usable path.
-                base = name.rsplit("/", 1)[-1]
-                if listing.pattern is None or fnmatch.fnmatch(base, listing.pattern):
-                    full = name if name.startswith("/") else (
-                        f"{listing.remote_dir.rstrip('/')}/{base}"
-                    )
-                    paths.append(full)
+            paths.extend(_normalize_listing(names, listing.remote_dir, listing.pattern))
         return paths
 
     def _fetch_one(
@@ -339,6 +511,30 @@ class FtpFleetDownloader:
             )
 
 
+def specs_from_hosts(
+    hosts: list[str],
+    *,
+    files: list[str] | None = None,
+    listings: list[ListDir] | None = None,
+) -> list[HostSpec]:
+    """Wrap a plain list of host IPs into ``HostSpec`` objects.
+
+    The common case: every host shares the same fixed ``files`` and/or directory
+    ``listings``. Each spec gets its own copy of the lists, so mutating one
+    host's spec never bleeds into another's::
+
+        specs = specs_from_hosts(ips, listings=[ListDir("/MEAS", "*.dat")])
+        report = FtpFleetDownloader(user=u, password=p).list_dirs(specs)
+
+    For per-host configuration that differs, build from JSON with
+    ``eqp_ftp_collect.build_host_specs`` instead.
+    """
+    return [
+        HostSpec(host=host, files=list(files or []), listings=list(listings or []))
+        for host in hosts
+    ]
+
+
 def download_fleet(
     specs: list[HostSpec],
     *,
@@ -355,6 +551,23 @@ def download_fleet(
     """
     downloader = FtpFleetDownloader(user=user, password=password, **kwargs)  # type: ignore[arg-type]
     return downloader.download(specs, on_file=on_file)
+
+
+def list_fleet(
+    specs: list[HostSpec],
+    *,
+    user: str,
+    password: str,
+    **kwargs: object,
+) -> ListingReport:
+    """One-call convenience wrapper for the fleet-wide listing pass.
+
+    ``list_fleet(specs, user=..., password=...)`` discovers paths across the
+    fleet; extra keyword args (port, max_concurrency, connect_timeout,
+    host_timeout, passive) are forwarded to the constructor.
+    """
+    downloader = FtpFleetDownloader(user=user, password=password, **kwargs)  # type: ignore[arg-type]
+    return downloader.list_dirs(specs)
 
 
 # Characters illegal in a Windows path component (plus control chars). A Linux

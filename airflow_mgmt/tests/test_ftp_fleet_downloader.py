@@ -17,8 +17,11 @@ from ftp_handler.ftp_fleet_downloader import (
     FtpFleetDownloader,
     HostSpec,
     ListDir,
+    ListingReport,
     download_fleet,
+    list_fleet,
     save_to_dir,
+    specs_from_hosts,
 )
 from ftp_handler.ftp_fleet_downloader import _safe_relative
 
@@ -261,6 +264,123 @@ def test_download_fleet_helper():
             [HostSpec("h1", files=["/log"])], user="u", password="p", max_concurrency=4
         )
     assert report.grouped() == {"h1": {"/log": b"data"}}
+
+
+# ── spec builders ───────────────────────────────────────────────────────────
+def test_specs_from_hosts_shares_config():
+    specs = specs_from_hosts(
+        ["10.0.0.1", "10.0.0.2"], listings=[ListDir("/MEAS", "*.dat")]
+    )
+    assert [s.host for s in specs] == ["10.0.0.1", "10.0.0.2"]
+    assert specs[0].listings == [ListDir("/MEAS", "*.dat")]
+    assert specs[0].files == []
+
+
+def test_specs_from_hosts_copies_lists_per_host():
+    # Each spec must own its lists — mutating one never bleeds into another.
+    specs = specs_from_hosts(["a", "b"], files=["/log"])
+    specs[0].files.append("/extra")
+    assert specs[1].files == ["/log"]
+
+
+def test_specs_from_hosts_empty_defaults():
+    specs = specs_from_hosts(["a"])
+    assert specs[0].files == [] and specs[0].listings == []
+
+
+# ── fleet listing pass (list_dirs / list_fleet / to_specs) ──────────────────
+def _list(specs, **kwargs) -> ListingReport:
+    with patch("ftp_handler.ftp_fleet_downloader.FTP", FakeFTP):
+        dl = FtpFleetDownloader(user="u", password="p", **kwargs)
+        return dl.list_dirs(specs)
+
+
+def test_list_dirs_discovers_paths_without_fetching():
+    # Files are present in the script but list_dirs must never RETR them.
+    FakeFTP.scripts = {
+        "h1": {
+            "listing": {"/MEAS": ["a.dat", "b.txt", "c.dat"]},
+            "files": {"/MEAS/a.dat": b"A"},
+        }
+    }
+    report = _list([HostSpec("h1", listings=[ListDir("/MEAS", "*.dat")])])
+
+    assert report.ok == 1
+    assert report.ng == 0
+    assert report.grouped() == {"h1": ["/MEAS/a.dat", "/MEAS/c.dat"]}
+    assert report.total_paths == 2
+
+
+def test_list_dirs_ignores_fixed_files():
+    # spec.files is for known paths; listing is for discovery — files stay out.
+    FakeFTP.scripts = {"h1": {"listing": {"/MEAS": ["x.dat"]}}}
+    report = _list(
+        [HostSpec("h1", files=["/known.log"], listings=[ListDir("/MEAS")])]
+    )
+    assert report.grouped() == {"h1": ["/MEAS/x.dat"]}
+
+
+def test_list_dirs_per_host_error_isolation():
+    FakeFTP.scripts = {
+        "h1": {"connect_error": socket.timeout("timed out")},
+        "h2": {"listing": {"/MEAS": ["ok.dat"]}},
+    }
+    report = _list(
+        [
+            HostSpec("h1", listings=[ListDir("/MEAS")]),
+            HostSpec("h2", listings=[ListDir("/MEAS")]),
+        ]
+    )
+    assert report.grouped() == {"h2": ["/MEAS/ok.dat"]}
+    assert report.ng == 1
+    assert report.failures[0].host == "h1"
+    assert report.failures[0].remote_path is None  # connect failed
+
+
+def test_list_dirs_listing_failure_isolated_per_dir():
+    # One dir enumerates, a sibling dir fails; host still returns the good one.
+    FakeFTP.scripts = {"h1": {"listing": {"/A": ["a.dat"]}}}  # /B absent -> error
+    report = _list([HostSpec("h1", listings=[ListDir("/A"), ListDir("/B")])])
+
+    assert report.grouped() == {"h1": ["/A/a.dat"]}
+    assert report.ng == 1
+    assert report.failures[0].remote_path == "/B"
+
+
+def test_to_specs_round_trips_into_download():
+    # The loop-closer: list discovers paths, to_specs() makes them fixed files,
+    # download fetches exactly those.
+    FakeFTP.scripts = {
+        "h1": {
+            "listing": {"/MEAS": ["m1.dat", "m2.dat"]},
+            "files": {"/MEAS/m1.dat": b"1", "/MEAS/m2.dat": b"2"},
+        }
+    }
+    listing = _list([HostSpec("h1", listings=[ListDir("/MEAS")])])
+    specs = listing.to_specs()
+    assert specs == [HostSpec("h1", files=["/MEAS/m1.dat", "/MEAS/m2.dat"])]
+
+    report = _run(specs)
+    assert report.grouped() == {"h1": {"/MEAS/m1.dat": b"1", "/MEAS/m2.dat": b"2"}}
+
+
+def test_to_specs_drops_empty_hosts():
+    FakeFTP.scripts = {"h1": {"listing": {"/MEAS": []}}}
+    listing = _list([HostSpec("h1", listings=[ListDir("/MEAS")])])
+    assert listing.ok == 1  # host connected and reported an (empty) listing
+    assert listing.to_specs() == []  # but nothing to download
+
+
+def test_list_fleet_helper():
+    FakeFTP.scripts = {"h1": {"listing": {"/MEAS": ["a.dat"]}}}
+    with patch("ftp_handler.ftp_fleet_downloader.FTP", FakeFTP):
+        report = list_fleet(
+            [HostSpec("h1", listings=[ListDir("/MEAS")])],
+            user="u",
+            password="p",
+            max_concurrency=4,
+        )
+    assert report.grouped() == {"h1": ["/MEAS/a.dat"]}
 
 
 # ── glue helper: build_host_specs + collect_fleet ───────────────────────────

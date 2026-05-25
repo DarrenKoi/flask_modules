@@ -49,8 +49,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ftp_fleet_downloader import FtpFleetDownloader, HostSpec, ListDir  # noqa: E402
 
 # Suffixed to avoid collisions with routes already mounted on the host app.
-# Keep in sync with the path ftp_flask_downloader.py POSTs to.
+# Keep in sync with the paths ftp_flask_downloader.py POSTs to.
 URL_DOWNLOAD = "/download_sknn_v3"
+URL_LIST = "/list_dirs_sknn_v3"
 URL_HEALTH = "/healthz_sknn_v3"
 
 ftp_proxy_sknn_v3 = Blueprint("ftp_proxy_sknn_v3", __name__)
@@ -68,28 +69,25 @@ def _spec_from_wire(entry: dict) -> HostSpec:
     )
 
 
-@ftp_proxy_sknn_v3.get(URL_HEALTH)
-def healthz():
-    return jsonify({"status": "ok"})
-
-
-@ftp_proxy_sknn_v3.post(URL_DOWNLOAD)
-def download():
-    # Token read per request so it can be configured independently of when the
-    # host app (and this blueprint) were imported.
+def _unauthorized():
+    """Return a 401 response if the request fails the bearer-token check, else
+    ``None``. Token is read per request so it can be configured independently of
+    when the host app (and this blueprint) were imported."""
     token = os.getenv("FTP_PROXY_TOKEN")
-    if token is not None:
-        if request.headers.get("Authorization", "") != f"Bearer {token}":
-            return jsonify({"error": "unauthorized"}), 401
+    if token is not None and request.headers.get("Authorization", "") != f"Bearer {token}":
+        return jsonify({"error": "unauthorized"}), 401
+    return None
 
-    body = request.get_json(force=True)
-    specs = [_spec_from_wire(entry) for entry in body.get("specs", [])]
 
-    # Same tuning the client passes, so proxy-side behavior matches what a
-    # direct FtpFleetDownloader would have done on the client. host_timeout
-    # default 45s stays under the host app's harakiri=60 so the downloader's own
-    # backstop fires before uWSGI kills the request. See ADR 0001.
-    downloader = FtpFleetDownloader(
+def _downloader_from(body: dict) -> FtpFleetDownloader:
+    """Build the FtpFleetDownloader from the request body's tuning.
+
+    Same tuning the client passes, so proxy-side behavior matches what a direct
+    FtpFleetDownloader would have done on the client. host_timeout default 45s
+    stays under the host app's harakiri=60 so the downloader's own backstop fires
+    before uWSGI kills the request. See ADR 0001.
+    """
+    return FtpFleetDownloader(
         user=body["user"],
         password=body["password"],
         port=body.get("port", 21),
@@ -98,7 +96,22 @@ def download():
         host_timeout=body.get("host_timeout", 45.0),
         passive=body.get("passive", True),
     )
-    report = downloader.download(specs)
+
+
+@ftp_proxy_sknn_v3.get(URL_HEALTH)
+def healthz():
+    return jsonify({"status": "ok"})
+
+
+@ftp_proxy_sknn_v3.post(URL_DOWNLOAD)
+def download():
+    denied = _unauthorized()
+    if denied is not None:
+        return denied
+
+    body = request.get_json(force=True)
+    specs = [_spec_from_wire(entry) for entry in body.get("specs", [])]
+    report = _downloader_from(body).download(specs)
 
     return jsonify(
         {
@@ -109,6 +122,33 @@ def download():
                     "data_b64": base64.b64encode(f.data).decode("ascii"),
                 }
                 for f in report.files
+            ],
+            "failures": [
+                {"host": x.host, "error": x.error, "remote_path": x.remote_path}
+                for x in report.failures
+            ],
+        }
+    )
+
+
+@ftp_proxy_sknn_v3.post(URL_LIST)
+def list_dirs():
+    # The listing pass over HTTP: enumerate each host's `listings` dirs and
+    # return discovered paths only (no file bytes), so this carries none of the
+    # base64/RAM weight the download route does — ADR 0001's batch math doesn't
+    # apply. Only spec.listings is consulted; spec.files is ignored.
+    denied = _unauthorized()
+    if denied is not None:
+        return denied
+
+    body = request.get_json(force=True)
+    specs = [_spec_from_wire(entry) for entry in body.get("specs", [])]
+    report = _downloader_from(body).list_dirs(specs)
+
+    return jsonify(
+        {
+            "listings": [
+                {"host": l.host, "paths": l.paths} for l in report.listings
             ],
             "failures": [
                 {"host": x.host, "error": x.error, "remote_path": x.remote_path}

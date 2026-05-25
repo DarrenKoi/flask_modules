@@ -9,6 +9,7 @@ Modules are imported by their top-level names (matching how the client imports
 its sibling on a real client PC), so the dataclasses are a single shared set.
 """
 
+import inspect
 import socket
 import sys
 from ftplib import error_perm
@@ -18,7 +19,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-PKG = Path(__file__).resolve().parent.parent / "ftp_handler"
+PKG = Path(__file__).resolve().parent.parent.parent / "ftp_handler"
 sys.path.insert(0, str(PKG))
 
 import ftp_fleet_downloader as core  # noqa: E402
@@ -118,6 +119,18 @@ def _download(specs, *, on_file=None, fail_hosts=None, token=None, **kw):
         return dl.download(specs, on_file=on_file)
 
 
+def _list_dirs(specs, *, fail_hosts=None, token=None, **kw):
+    app = proxy_mod.create_app()
+    fclient = app.test_client()
+    with patch.object(core, "FTP", FakeFTP), patch.object(
+        client_mod.requests, "post", _bridge(fclient, fail_hosts)
+    ):
+        dl = client_mod.FtpFleetDownloader(
+            user="u", password="p", token=token, client_workers=1, **kw
+        )
+        return dl.list_dirs(specs)
+
+
 def test_round_trip_returns_same_bytes():
     FakeFTP.scripts = {"h1": {"files": {"/log": b"hello"}}}
     report = _download([HostSpec("h1", files=["/log"])])
@@ -186,6 +199,88 @@ def test_report_types_are_shared_with_direct_downloader():
     assert client_mod.FileResult is core.FileResult
 
 
+def _seam_params(func):
+    # (name, kind) per parameter, excluding self; annotations and defaults are
+    # ignored so a matching call shape passes regardless of how each adapter
+    # spells its type hints.
+    return [
+        (p.name, p.kind)
+        for p in inspect.signature(func).parameters.values()
+        if p.name != "self"
+    ]
+
+
+@pytest.mark.parametrize(
+    "adapter", [core.FtpFleetDownloader, client_mod.FtpFleetDownloader]
+)
+def test_adapter_satisfies_fleet_transport(adapter):
+    # The interchange seam: both the direct and proxy downloaders must remain
+    # swappable behind one import line. A method dropped from one side, or a
+    # parameter that drifts on either seam method, fails HERE not at a call site.
+    assert issubclass(adapter, core.FleetTransport)
+    for name in ("download", "list_dirs"):
+        assert _seam_params(getattr(adapter, name)) == _seam_params(
+            getattr(core.FleetTransport, name)
+        )
+
+
 def test_empty_specs_short_circuits():
     report = _download([])
     assert report.ok == 0 and report.ng == 0
+
+
+def test_list_dirs_through_proxy_returns_discovered_paths():
+    FakeFTP.scripts = {"h1": {"listing": {"/MEAS": ["a.dat", "b.txt"]}}}
+    report = _list_dirs([HostSpec("h1", listings=[ListDir("/MEAS", "*.dat")])])
+    assert report.grouped() == {"h1": ["/MEAS/a.dat"]}
+    assert report.total_paths == 1 and report.ng == 0
+
+
+def test_list_dirs_then_download_closes_the_loop():
+    # The full look-before-you-download workflow, end to end over the proxy:
+    # discover paths, feed them straight back into download via to_specs().
+    FakeFTP.scripts = {
+        "h1": {"listing": {"/MEAS": ["a.dat"]}, "files": {"/MEAS/a.dat": b"A"}}
+    }
+    listing = _list_dirs([HostSpec("h1", listings=[ListDir("/MEAS", "*.dat")])])
+    report = _download(listing.to_specs())
+    assert report.grouped() == {"h1": {"/MEAS/a.dat": b"A"}}
+
+
+def test_list_dirs_batch_transport_failure_isolated():
+    FakeFTP.scripts = {
+        "h1": {"listing": {"/MEAS": ["a.dat"]}},
+        "h2": {"listing": {"/MEAS": ["b.dat"]}},
+    }
+    report = _list_dirs(
+        [
+            HostSpec("h1", listings=[ListDir("/MEAS")]),
+            HostSpec("h2", listings=[ListDir("/MEAS")]),
+        ],
+        fail_hosts=["h2"],
+        request_batch=1,
+    )
+    assert report.grouped() == {"h1": ["/MEAS/a.dat"]}
+    assert report.ng == 1 and report.failures[0].host == "h2"
+
+
+def test_list_dirs_empty_specs_short_circuits():
+    report = _list_dirs([])
+    assert report.ok == 0 and report.ng == 0
+
+
+def test_list_fleet_wrapper_matches_direct():
+    # The proxy client's list_fleet mirrors ftp_fleet_downloader.list_fleet.
+    FakeFTP.scripts = {"h1": {"listing": {"/MEAS": ["a.dat"]}}}
+    app = proxy_mod.create_app()
+    fclient = app.test_client()
+    with patch.object(core, "FTP", FakeFTP), patch.object(
+        client_mod.requests, "post", _bridge(fclient)
+    ):
+        report = client_mod.list_fleet(
+            [HostSpec("h1", listings=[ListDir("/MEAS")])],
+            user="u",
+            password="p",
+            client_workers=1,
+        )
+    assert report.grouped() == {"h1": ["/MEAS/a.dat"]}
