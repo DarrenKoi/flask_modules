@@ -20,7 +20,7 @@ FTP connection caps, plus unpinned `aioftp` version drift in the runtime venv.
 Fix direction chosen: `asyncio.to_thread + ftplib`, bounded concurrency,
 per-host isolation, in-memory (no disk). See decision table in the reference doc.
 
-## What was built (all files under `airflow_mgmt/`)
+## What was built
 
 | Path | Role |
 |------|------|

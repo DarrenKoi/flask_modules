@@ -4,4 +4,5 @@ minio
 opensearch-py
 pymongo
 redis
+requests
 uwsgi

@@ -8,11 +8,13 @@ never touch a coroutine, so this drops into a non-async script or an Airflow
 
 Why threads, not aioftp:
   Each host is one short-lived FTP session that is almost entirely socket I/O,
-  and Python releases the GIL during socket I/O. So ``asyncio.to_thread`` over
-  blocking ``ftplib`` fans out N hosts concurrently with zero extra packages —
-  no aioftp to pip-install into an Airflow venv, no version drift between your
-  laptop and the worker. The event loop only orchestrates; the blocking
-  ftplib calls run in a bounded thread pool.
+  and Python releases the GIL during socket I/O. So a ``ThreadPoolExecutor``
+  over blocking ``ftplib`` fans out N hosts concurrently with zero extra
+  packages — no aioftp to pip-install into an Airflow venv, no version drift
+  between your laptop and the worker. There is no event loop: ``download`` and
+  ``list_dirs`` are plain synchronous calls, safe to invoke from a script, an
+  Airflow task, or a Flask request handler / scheduler thread — even one that
+  already runs its own asyncio loop.
 
 Two failure modes this is built to survive:
   - One unreachable / black-holed host. ``connect_timeout`` bounds every
@@ -33,10 +35,10 @@ Memory:
   concurrently — use thread-safe clients or construct them inside the callback.
 """
 
-import asyncio
-import fnmatch
 import re
-from concurrent.futures import ThreadPoolExecutor
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from ftplib import FTP, all_errors
@@ -44,33 +46,16 @@ from io import BytesIO
 from pathlib import Path
 from typing import Callable, Iterator, Protocol, runtime_checkable
 
+# The shared NLST normalizer lives in core so both downloaders behave
+# identically. Relative import in-package; bare fallback when copied out flat
+# beside the proxy pair (the file then sits next to listing.py).
+try:
+    from ..core.listing import _normalize_listing
+except ImportError:  # copied out flat, imported by bare name
+    from listing import _normalize_listing
+
 # Invoked once per successfully downloaded file: (host, remote_path, data).
 OnFile = Callable[[str, str, bytes], None]
-
-
-def _normalize_listing(
-    names: list[str],
-    remote_dir: str,
-    pattern: str | None = None,
-) -> list[str]:
-    """Filter and normalize raw NLST output into usable remote paths.
-
-    NLST returns either bare basenames or full paths depending on the server;
-    this normalizes both to a path that RETR/DELE will accept, and keeps only
-    entries whose basename matches ``pattern`` (an fnmatch glob). ``pattern=None``
-    keeps everything. Lives here (not in ``ftp_client``) so the fleet downloader
-    stays free of any ``ftp_handler`` package dependency — it must import by bare
-    name when copied out beside the Flask proxy pair. The single-server
-    ``FtpClient`` imports it from here so listing behaves identically at both
-    scales.
-    """
-    out: list[str] = []
-    for name in names:
-        base = name.rsplit("/", 1)[-1]
-        if pattern is None or fnmatch.fnmatch(base, pattern):
-            full = name if name.startswith("/") else f"{remote_dir.rstrip('/')}/{base}"
-            out.append(full)
-    return out
 
 
 @dataclass(slots=True)
@@ -285,12 +270,17 @@ class FtpFleetDownloader:
     ) -> DownloadReport:
         """Download every spec concurrently and return a report.
 
-        Synchronous: spins up its own event loop internally. Do NOT call from
-        already-async code — ``asyncio.run`` refuses to nest in a running loop.
-        Pass ``on_file`` to stream-process each file and keep RAM bounded; omit
-        it to collect all bytes into the report.
+        Synchronous and event-loop-free — the fan-out runs on a plain thread
+        pool, so this is safe to call from anywhere: a script, an Airflow task,
+        a Flask request handler, or a scheduler thread, including one that
+        already runs its own asyncio loop. Pass ``on_file`` to stream-process
+        each file and keep RAM bounded; omit it to collect all bytes into the
+        report.
         """
-        return asyncio.run(self._download_all(specs, on_file))
+        files, failures = self._run_fleet(
+            specs, lambda spec: self._host_worker(spec, on_file)
+        )
+        return DownloadReport(files=files, failures=failures)
 
     def list_dirs(self, specs: list[HostSpec]) -> ListingReport:
         """List each host's ``listings`` directories concurrently — no fetching.
@@ -302,12 +292,13 @@ class FtpFleetDownloader:
         ``spec.listings`` is consulted; ``spec.files`` is ignored (you already
         know those paths — list to *discover* unknown ones).
 
-        Same concurrency, timeout, and per-host failure isolation as ``download``.
-        Synchronous; do NOT call from already-async code.
+        Same concurrency, timeout, per-host failure isolation, and
+        event-loop-free safety as ``download``.
         """
-        return asyncio.run(self._list_all(specs))
+        listings, failures = self._run_fleet(specs, self._list_worker)
+        return ListingReport(listings=listings, failures=failures)
 
-    # ── async orchestration (private) ───────────────────────────────────────
+    # ── concurrent orchestration (private) ──────────────────────────────────
     @contextmanager
     def _session(self, host: str) -> Iterator[FTP]:
         """One connected, logged-in FTP session for ``host``, closed on exit.
@@ -321,85 +312,90 @@ class FtpFleetDownloader:
             ftp.set_pasv(self.passive)
             yield ftp
 
-    async def _run_fleet(
+    def _run_fleet(
         self,
         specs: list[HostSpec],
         worker: "Callable[[HostSpec], tuple[list, list[HostFailure]]]",
     ) -> tuple[list, list[HostFailure]]:
-        """Fan ``worker`` out across ``specs`` concurrently and aggregate.
+        """Fan ``worker`` out across ``specs`` on a thread pool and aggregate.
 
-        The shared engine behind ``download`` and ``list_dirs``: a pool + a
-        semaphore cap simultaneous connections at ``max_concurrency``, every host
-        is backstopped by ``host_timeout``, and a raise from one host never
-        aborts its siblings (partial success is the normal case). ``worker`` runs
-        blocking in a thread and returns ``(ok_items, failures)``; what's in
-        ``ok_items`` is the caller's business (``FileResult`` or ``HostListing``).
+        The shared engine behind ``download`` and ``list_dirs``. A
+        ``ThreadPoolExecutor`` sized to ``max_concurrency`` caps simultaneous
+        connections; every host is backstopped by ``host_timeout``; a raise from
+        one host never aborts its siblings (partial success is the normal case).
+        ``worker`` runs blocking in a pool thread and returns
+        ``(ok_items, failures)``; what's in ``ok_items`` is the caller's business
+        (``FileResult`` or ``HostListing``).
+
+        ``host_timeout`` is measured from when each host's worker *starts*
+        running, not from submit — so a host queued behind a full pool isn't
+        charged for its wait, and a host that has started can't gain extra budget
+        by finishing while we happen to be blocked on an earlier future.
+
+        No asyncio event loop is involved, so this is safe even when called from
+        inside an already-running loop (e.g. an async web worker).
         """
-        loop = asyncio.get_running_loop()
-        # A dedicated pool sized to max_concurrency — the default to_thread
-        # executor caps at min(32, cpu+4), which would silently throttle a
-        # higher max_concurrency. Semaphore + pool size match so at most
-        # max_concurrency connections are open at once.
+        # Pool sized to max_concurrency so at most that many connections are
+        # open at once. shutdown(wait=False): a host that connects then stalls
+        # mid-transfer can't be force-cancelled — we abandon its result after
+        # host_timeout rather than block teardown, and connect_timeout bounds
+        # each socket op so the abandoned thread drains on its own shortly after.
         pool = ThreadPoolExecutor(
             max_workers=self.max_concurrency, thread_name_prefix="ftp-fleet"
         )
-        loop.set_default_executor(pool)
-        sem = asyncio.Semaphore(self.max_concurrency)
+        started: dict[int, float] = {}
+        started_lock = threading.Lock()
 
-        async def run_host(spec: HostSpec) -> tuple[list, list[HostFailure]]:
-            async with sem:
+        def _timed(idx: int, spec: HostSpec):
+            # Stamp the start time before any blocking work so host_timeout is
+            # measured from here, not from when the future was submitted.
+            with started_lock:
+                started[idx] = time.monotonic()
+            return worker(spec)
+
+        ok: list = []
+        failures: list[HostFailure] = []
+        try:
+            futures = [
+                (pool.submit(_timed, idx, spec), idx, spec)
+                for idx, spec in enumerate(specs)
+            ]
+            # Iterate in submission order so failures stay in spec order.
+            for future, idx, spec in futures:
+                # Wait for this host's worker to actually begin (it may be queued
+                # behind a full pool), then bound it by what remains of its budget.
+                while True:
+                    with started_lock:
+                        start = started.get(idx)
+                    if start is not None or future.done():
+                        break
+                    time.sleep(0.01)
+                remaining = (
+                    None
+                    if start is None
+                    else max(0.0, self.host_timeout - (time.monotonic() - start))
+                )
                 try:
-                    return await asyncio.wait_for(
-                        asyncio.to_thread(worker, spec),
-                        timeout=self.host_timeout,
-                    )
-                except asyncio.TimeoutError:
-                    # wait_for gives up waiting; the underlying thread can't be
-                    # cancelled but ftplib's own timeout will end it shortly.
-                    return [], [
+                    host_ok, host_failures = future.result(timeout=remaining)
+                except FutureTimeoutError:
+                    failures.append(
                         HostFailure(
                             host=spec.host,
                             error=f"TimeoutError: exceeded host_timeout={self.host_timeout}s",
                         )
-                    ]
-
-        try:
-            # return_exceptions=True so one unexpected error never aborts the
-            # rest of the fleet — partial success is the normal case.
-            outcomes = await asyncio.gather(
-                *(run_host(s) for s in specs), return_exceptions=True
-            )
+                    )
+                except Exception as exc:  # noqa: BLE001 - one host never sinks the fleet
+                    failures.append(
+                        HostFailure(
+                            host=spec.host, error=f"{type(exc).__name__}: {exc}"
+                        )
+                    )
+                else:
+                    ok.extend(host_ok)
+                    failures.extend(host_failures)
         finally:
             pool.shutdown(wait=False)
-
-        ok: list = []
-        failures: list[HostFailure] = []
-        for spec, outcome in zip(specs, outcomes):
-            if isinstance(outcome, Exception):
-                failures.append(
-                    HostFailure(
-                        host=spec.host, error=f"{type(outcome).__name__}: {outcome}"
-                    )
-                )
-            else:
-                host_ok, host_failures = outcome
-                ok.extend(host_ok)
-                failures.extend(host_failures)
         return ok, failures
-
-    async def _download_all(
-        self,
-        specs: list[HostSpec],
-        on_file: OnFile | None,
-    ) -> DownloadReport:
-        files, failures = await self._run_fleet(
-            specs, lambda spec: self._host_worker(spec, on_file)
-        )
-        return DownloadReport(files=files, failures=failures)
-
-    async def _list_all(self, specs: list[HostSpec]) -> ListingReport:
-        listings, failures = await self._run_fleet(specs, self._list_worker)
-        return ListingReport(listings=listings, failures=failures)
 
     # ── blocking per-host work (runs in a thread) ───────────────────────────
     def _host_worker(

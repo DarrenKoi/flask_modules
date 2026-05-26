@@ -38,15 +38,19 @@ Standalone run (without an existing app):
 
 import base64
 import os
-import sys
 from pathlib import Path
 
 from flask import Blueprint, Flask, jsonify, request
 
-# Import the real downloader sitting next to this file, whether this module is
-# run as a script or imported as a package member.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ftp_fleet_downloader import FtpFleetDownloader, HostSpec, ListDir  # noqa: E402
+# Import the real downloader, whether this module is run as a package member or
+# copied out flat beside fleet_downloader.py and run as a script.
+try:
+    from ..direct_downloader.fleet_downloader import FtpFleetDownloader, HostSpec, ListDir
+except ImportError:  # copied beside fleet_downloader.py and imported bare
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fleet_downloader import FtpFleetDownloader, HostSpec, ListDir
 
 # Suffixed to avoid collisions with routes already mounted on the host app.
 # Keep in sync with the paths ftp_flask_downloader.py POSTs to.

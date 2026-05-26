@@ -34,26 +34,41 @@ Run: pip install requests
 
 import base64
 import os
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
 
 # Reuse the SAME dataclasses so reports are interchangeable with direct mode.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ftp_fleet_downloader import (  # noqa: E402
-    DownloadReport,
-    FileResult,
-    HostFailure,
-    HostListing,
-    HostSpec,
-    ListDir,
-    ListingReport,
-    OnFile,
-    save_to_dir,
-    specs_from_hosts,
-)
+try:
+    from ..direct_downloader.fleet_downloader import (
+        DownloadReport,
+        FileResult,
+        HostFailure,
+        HostListing,
+        HostSpec,
+        ListDir,
+        ListingReport,
+        OnFile,
+        save_to_dir,
+        specs_from_hosts,
+    )
+except ImportError:  # copied beside fleet_downloader.py and imported bare
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fleet_downloader import (
+        DownloadReport,
+        FileResult,
+        HostFailure,
+        HostListing,
+        HostSpec,
+        ListDir,
+        ListingReport,
+        OnFile,
+        save_to_dir,
+        specs_from_hosts,
+    )
 
 __all__ = [
     "FtpFleetDownloader",

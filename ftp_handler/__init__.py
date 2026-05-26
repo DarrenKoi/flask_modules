@@ -1,23 +1,29 @@
-"""Equipment FTP fleet collection.
+"""Equipment FTP fleet collection, organized by purpose.
 
-Self-contained package: the concurrent in-memory FTP downloader, the
-archive→parse→index glue, and the firewalled-client Flask proxy pair, plus the
-reference docs, CONTEXT glossary, and ADRs alongside them.
+Four subpackages, each a re-export hub so call sites import the leaf name:
 
-Import submodules directly (no re-export hub) so a worker that lacks ``flask`` /
-``requests`` can still import the core downloader and glue::
+  - ``core``              — shared primitives: ``FtpClient`` (one server, the
+                            ad-hoc list/download/upload/remove ops) and the NLST
+                            normalizer both downloaders share. Stdlib only.
+  - ``direct_downloader`` — talk to the FTP servers directly: ``FtpFleetDownloader``
+                            (concurrent fan-out + ``list_dirs`` discovery) and the
+                            archive→parse→index glue (``collect_fleet``).
+  - ``proxy``             — the firewalled-client HTTP transport. The client
+                            (``proxy_downloader``) re-exports a ``FtpFleetDownloader``
+                            with the SAME surface as ``direct_downloader`` — swap
+                            one import line to route through the proxy. The server
+                            (``proxy.flask_proxy``) is imported explicitly so the
+                            client never drags in ``flask``.
+  - ``web_app``           — ``BackgroundJobs`` to run a fleet download off a web
+                            request thread (non-blocking) and poll for the result.
 
-    from ftp_handler.ftp_client import FtpClient            # single server
-    from ftp_handler.ftp_fleet_downloader import FtpFleetDownloader, HostSpec
-    from ftp_handler.ftp_fleet_downloader import list_fleet  # fleet listing pass
-    from ftp_handler.eqp_ftp_collect import build_host_specs, collect_fleet
+The same-name seam, in one line::
 
-Two scales, two entry points: ``FtpClient`` for one server and the four ad-hoc
-operations (list / download / upload / remove); ``FtpFleetDownloader`` for
-fanning out across the fleet, including ``list_dirs`` to discover paths before a
-large download.
+    from ftp_handler.direct_downloader import FtpFleetDownloader   # direct FTP
+    from ftp_handler.proxy             import FtpFleetDownloader   # via the proxy
 
-The proxy pair (``ftp_flask_proxy`` / ``ftp_flask_downloader``) is also designed
-to be copied out and run standalone on a client PC — it imports its sibling by
-bare name, not through this package.
+Import the subpackage you need directly — a worker without ``flask`` / ``requests``
+can still use ``core`` and ``direct_downloader``. The proxy pair is also designed
+to be copied out flat (``flask_proxy.py`` / ``proxy_downloader.py`` beside
+``fleet_downloader.py`` and ``listing.py``) and imported by bare name.
 """

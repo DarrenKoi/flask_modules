@@ -293,7 +293,7 @@ Notes:
   small on purpose: the proxy collects a whole batch in memory (Mode A) and
   base64+jsonify roughly triples it, on a host app sharing an 8GiB /
   `reload-on-rss=1500` envelope with pandas tasks. `host_timeout` defaults to
-  45s to stay under the host app's `harakiri=60`. See `adr/0001-proxy-batch-sizing.md`.
+  45s to stay under the host app's `harakiri=60`. See `0001-proxy-batch-sizing.md`.
 - **Wire format:** JSON + base64. Simple and fine for small files; for very
   large payloads a binary/streaming transport would beat base64's ~33% bloat.
 

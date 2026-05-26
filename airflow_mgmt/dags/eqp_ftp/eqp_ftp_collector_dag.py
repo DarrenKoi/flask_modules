@@ -1,10 +1,10 @@
 """Every 30 min: pull files from the equipment FTP fleet → MinIO + OpenSearch.
 
 Thin orchestration only. All real logic lives in airflow-free helpers:
-  - utils.ftp_fleet_downloader  — concurrent in-memory FTP downloader
-  - utils.eqp_ftp_collect       — archive → parse → index glue
+  - ftp_handler.direct_downloader.fleet_downloader  — concurrent FTP downloader
+  - ftp_handler.direct_downloader.collect           — archive → parse → index glue
 
-Design decisions baked in (see docs/ftp_fleet_downloader.md):
+Design decisions baked in (see ftp_handler/docs/adr/ftp_fleet_downloader.md):
   - to_thread + ftplib (no aioftp, no PythonVirtualenvOperator).
   - In-memory streaming via on_file: peak RAM ~ concurrency x file size.
   - Tight per-host timeouts; one dead tool never blocks the fleet.
@@ -16,11 +16,6 @@ Design decisions baked in (see docs/ftp_fleet_downloader.md):
 Runtime inputs (NOT in source):
   - Airflow Variable  ``eqp_ftp_fleet``  — JSON list of host/file/listing specs.
   - Airflow Connection ``eqp_ftp``       — shared FTP login/password/port.
-
-NOTE: the OpenSearch step imports ops_store, which is NOT vendored under
-airflow_mgmt/ (only minio_handler is). Vendor ops_store the same way, or make
-the repo root importable on the worker, before this DAG's index step can run.
-The DAG itself parses fine without it (the import is deferred into the task).
 """
 
 import os
@@ -31,20 +26,25 @@ from pathlib import Path
 from airflow.sdk import DAG, task
 
 # ── sys.path bootstrap ──────────────────────────────────────────────────────
-ROOT_DIR = Path(
-    os.getenv("AIRFLOW_MGMT_ROOT")
-    or next(
-        (str(p) for p in Path(__file__).resolve().parents if (p / "project_root.txt").is_file()),
-        "",
-    )
-).resolve()
-if not ROOT_DIR.is_dir():
-    raise RuntimeError("Cannot find airflow_mgmt root. Set AIRFLOW_MGMT_ROOT.")
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+def _find_root(marker: str = "project_root.txt") -> Path:
+    try:
+        start = Path(__file__).resolve().parent
+    except NameError:
+        start = Path.cwd().resolve()
+    for p in (start, *start.parents):
+        if (p / marker).is_file():
+            return p
+    raise RuntimeError(f"{marker!r} not found above {start}")
+
+
+ROOT_DIR = Path(os.getenv("AIRFLOW_MGMT_ROOT") or _find_root()).resolve()
+REPO_ROOT = ROOT_DIR.parent if (ROOT_DIR.parent / "ftp_handler").is_dir() else ROOT_DIR
+for path in (REPO_ROOT, ROOT_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 # ────────────────────────────────────────────────────────────────────────────
 
-from ftp_handler.eqp_ftp_collect import build_host_specs, collect_fleet  # noqa: E402
+from ftp_handler.direct_downloader import build_host_specs, collect_fleet  # noqa: E402
 
 # Operational knobs with env overrides — tuned for ~200 small-file hosts.
 FLEET_VARIABLE = os.getenv("EQP_FTP_FLEET_VARIABLE", "eqp_ftp_fleet")
@@ -111,7 +111,7 @@ with DAG(
             return key
 
         def index(docs: list[dict]) -> None:
-            doc.bulk_index(OPENSEARCH_INDEX, docs)
+            doc.bulk_index(docs, index=OPENSEARCH_INDEX)
 
         report = collect_fleet(
             specs,

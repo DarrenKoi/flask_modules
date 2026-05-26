@@ -19,7 +19,7 @@ file's failure — it never aborts the other files or hosts.
 
 from typing import Callable
 
-from ftp_handler.ftp_fleet_downloader import (
+from .fleet_downloader import (
     DownloadReport,
     FtpFleetDownloader,
     HostSpec,

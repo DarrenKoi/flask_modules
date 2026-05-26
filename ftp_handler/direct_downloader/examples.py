@@ -1,0 +1,150 @@
+"""Worked examples for ftp_handler.direct_downloader — concurrent fleet FTP.
+
+Direct FTP (no proxy): use when the running process can reach the equipment
+servers. To route the SAME calls through the HTTP proxy from a firewalled
+client, swap the import to ``from ftp_handler.proxy import ...`` — see
+ftp_handler/proxy/examples.py. Not tests; a copy-paste reference.
+"""
+
+from ftp_handler.direct_downloader import (
+    FtpFleetDownloader,
+    HostSpec,
+    ListDir,
+    build_host_specs,
+    collect_fleet,
+    download_fleet,
+    list_fleet,
+    save_to_dir,
+    specs_from_hosts,
+)
+
+USER = "ftpuser"
+PASSWORD = "ftppass"
+# In production this list comes from an Airflow Variable — see
+# example_fleet_specs_from_config.
+FLEET_HOSTS = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+
+
+def example_download_known_paths() -> None:
+    """Pull fixed, known paths from every host concurrently.
+
+    ``files`` are RETR'd directly with no listing — for append-only logs whose
+    paths you already know. One connection per host, opened once and reused.
+    """
+    specs = [
+        HostSpec(host, files=["/HITACHI/SYSFILE/LOG_RECIPE_EXE.log"])
+        for host in FLEET_HOSTS
+    ]
+    report = FtpFleetDownloader(user=USER, password=PASSWORD).download(specs)
+
+    print(f"ok={report.ok} ng={report.ng} failure_ratio={report.failure_ratio:.2f}")
+    for f in report.files:
+        print(f.host, f.remote_path, len(f.data))
+    for x in report.failures:
+        print("FAILED", x.host, x.remote_path, x.error)
+
+
+def example_listing_then_download() -> None:
+    """The "look before you download" pass for a large fleet.
+
+    Step 1 lists each host's measurement dir concurrently (no fetching) so you
+    can see the volume; step 2 feeds the discovered paths straight back into
+    download via to_specs(). The decision in between is where you'd apply a
+    threshold, a date filter, a cap, etc. specs_from_hosts wraps a plain IP list
+    when every host shares the same directories.
+    """
+    discover = specs_from_hosts(FLEET_HOSTS, listings=[ListDir("/MEAS", "*.dat")])
+    dl = FtpFleetDownloader(user=USER, password=PASSWORD)
+
+    listing = dl.list_dirs(discover)
+    print(f"discovered {listing.total_paths} files across {listing.ok} hosts")
+
+    # ... decide what's worth pulling here ...
+    report = dl.download(listing.to_specs())
+    print(f"downloaded ok={report.ok} ng={report.ng}")
+
+
+def example_streaming_to_disk() -> None:
+    """Stream a large fleet to disk with bounded RAM.
+
+    Passing on_file hands each file off the moment it lands and then drops it, so
+    peak memory stays at concurrency x file size, not the sum of the fleet.
+    save_to_dir writes to dest/<host>/<remote path>.
+    """
+    specs = [HostSpec(host, listings=[ListDir("/MEAS", "*.dat")]) for host in FLEET_HOSTS]
+    dl = FtpFleetDownloader(user=USER, password=PASSWORD)
+    report = dl.download(specs, on_file=save_to_dir("/data/eqp_downloads"))
+    print(f"wrote {report.ok} files, {report.ng} failures")
+
+
+def example_one_call_helpers() -> None:
+    """For callers that just want a function, not an object."""
+    specs = [HostSpec(host, listings=[ListDir("/MEAS", "*.dat")]) for host in FLEET_HOSTS]
+    listing = list_fleet(specs, user=USER, password=PASSWORD, max_concurrency=16)
+    report = download_fleet(listing.to_specs(), user=USER, password=PASSWORD)
+    print(report.ok, report.ng)
+
+
+def example_tuning_for_large_fleet() -> None:
+    """Constructor knobs for a ~300-host run.
+
+    max_concurrency caps simultaneous connections (and, in memory mode, peak RAM
+    ~= concurrency x file size). connect_timeout abandons a dead/black-holed host
+    fast; host_timeout backstops a host that connects then stalls mid-transfer.
+    passive=False is the escape hatch when a worker on a different subnet needs
+    active mode.
+    """
+    specs = [HostSpec(host, listings=[ListDir("/MEAS", "*.dat")]) for host in FLEET_HOSTS]
+    dl = FtpFleetDownloader(
+        user=USER,
+        password=PASSWORD,
+        max_concurrency=24,
+        connect_timeout=8.0,
+        host_timeout=60.0,
+        passive=True,
+    )
+    print(f"discovered {dl.list_dirs(specs).total_paths} files")
+
+
+def example_fleet_specs_from_config() -> None:
+    """Build specs from deserialized JSON (e.g. an Airflow Variable)."""
+    fleet = [
+        {
+            "host": "10.0.0.1",
+            "files": ["/HITACHI/SYSFILE/LOG_RECIPE_EXE.log"],
+            "listings": [{"remote_dir": "/MEAS", "pattern": "*.dat"}],
+        },
+        {"host": "10.0.0.2", "listings": [{"remote_dir": "/MEAS", "pattern": "*.dat"}]},
+    ]
+    print([s.host for s in build_host_specs(fleet)])
+
+
+def example_collect_archive_parse_index() -> None:
+    """Download the fleet and, per file, archive → parse → index in memory.
+
+    The three steps are callables you supply, so this stays free of minio /
+    opensearch imports. archive runs first (never index a record whose raw source
+    wasn't stored); a raise from any step fails just that file. Replace the fakes
+    with MinioObject.put, your parser, and OSDoc.bulk_index.
+    """
+    def archive(host: str, remote_path: str, data: bytes) -> str:
+        return f"raw/{host}{remote_path}"  # e.g. MinioObject(...).put(key, data)
+
+    def parse(host: str, remote_path: str, data: bytes) -> list[dict]:
+        return [{"host": host, "path": remote_path, "raw_len": len(data)}]
+
+    def index(docs: list[dict]) -> None:
+        print("would index", docs)  # e.g. OSDoc(...).bulk_index("meas_index", docs)
+
+    specs = [HostSpec(host, listings=[ListDir("/MEAS", "*.dat")]) for host in FLEET_HOSTS]
+    report = collect_fleet(
+        specs, user=USER, password=PASSWORD, archive=archive, parse=parse, index=index
+    )
+    print(f"processed ok={report.ok} ng={report.ng}")
+
+
+if __name__ == "__main__":
+    # Uncomment the example you want to run against your servers.
+    # example_listing_then_download()
+    # example_collect_archive_parse_index()
+    pass

@@ -1,17 +1,19 @@
 """End-to-end tests for the FTP proxy pair.
 
-Wires the real client (ftp_flask_downloader) to the real proxy
-(ftp_flask_proxy) through Flask's test client, faking only the FTP layer. This
-exercises both directions of the wire protocol and proves the client is a
-drop-in for the direct downloader.
+Wires the real client (proxy_downloader) to the real proxy (flask_proxy) through
+Flask's test client, faking only the FTP layer. This exercises both directions
+of the wire protocol and proves the client is a drop-in for the direct
+downloader.
 
-The proxy pair imports its sibling by BARE name (it is meant to be copied out
-and run standalone on a client PC), so this test puts ``ftp_handler/`` on
-sys.path and imports the modules the same way — that keeps the dataclasses a
-single shared set, which the ``... is core....`` identity test depends on.
+The proxy pair supports two import contexts: copied-out bare modules on a
+client PC, and package imports as ``ftp_handler.*`` in the repo/Airflow. Most
+tests put the subpackage dirs on sys.path and exercise the bare copy-out path
+(``fleet_downloader`` + ``listing`` travel beside the pair); a separate identity
+test covers the package path.
 """
 
 import inspect
+import importlib
 import os
 import socket
 import sys
@@ -21,14 +23,19 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
+# Simulate the flat copy-out bundle: the proxy pair imports its siblings
+# (fleet_downloader, which in turn imports listing) by bare name, so put each
+# subpackage dir on sys.path and import bare.
 FTP_HANDLER = Path(__file__).resolve().parent.parent / "ftp_handler"
-if str(FTP_HANDLER) not in sys.path:
-    sys.path.insert(0, str(FTP_HANDLER))
+for _sub in ("core", "direct_downloader", "proxy"):
+    _p = str(FTP_HANDLER / _sub)
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-import ftp_fleet_downloader as core  # noqa: E402
-import ftp_flask_downloader as client_mod  # noqa: E402
-import ftp_flask_proxy as proxy_mod  # noqa: E402
-from ftp_fleet_downloader import HostSpec, ListDir  # noqa: E402
+import fleet_downloader as core  # noqa: E402
+import proxy_downloader as client_mod  # noqa: E402
+import flask_proxy as proxy_mod  # noqa: E402
+from fleet_downloader import HostSpec, ListDir  # noqa: E402
 
 
 class FakeFTP:
@@ -211,6 +218,27 @@ class FtpProxyPairTests(unittest.TestCase):
         self.assertIs(client_mod.DownloadReport, core.DownloadReport)
         self.assertIs(client_mod.HostSpec, core.HostSpec)
         self.assertIs(client_mod.FileResult, core.FileResult)
+
+    def test_package_imports_share_report_types_with_direct_downloader(self):
+        # Airflow and repo consumers import `ftp_handler.*`, not the copied-out
+        # bare modules. The same-name guarantee must hold there too.
+        direct = importlib.import_module("ftp_handler.direct_downloader.fleet_downloader")
+        client = importlib.import_module("ftp_handler.proxy.proxy_downloader")
+        proxy = importlib.import_module("ftp_handler.proxy.flask_proxy")
+
+        for name in (
+            "DownloadReport",
+            "FileResult",
+            "HostFailure",
+            "HostListing",
+            "HostSpec",
+            "ListDir",
+            "ListingReport",
+        ):
+            self.assertIs(getattr(client, name), getattr(direct, name))
+        self.assertIs(proxy.HostSpec, direct.HostSpec)
+        self.assertIs(proxy.ListDir, direct.ListDir)
+        self.assertIs(proxy.FtpFleetDownloader, direct.FtpFleetDownloader)
 
     def test_empty_specs_short_circuits(self):
         report = self._download([])

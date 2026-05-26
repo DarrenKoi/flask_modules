@@ -28,9 +28,9 @@ from ftplib import FTP
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
-# NLST normalization lives in the fleet downloader (the foundational, copy-out
-# module); import it so single-server and fan-out listing behave identically.
-from ftp_handler.ftp_fleet_downloader import _normalize_listing
+# Shared NLST normalization lives in core.listing so single-server and fan-out
+# listing behave identically.
+from ftp_handler.core.listing import _normalize_listing
 
 # Server-local time of equipment FTP servers. Project convention: ingested
 # timestamps are KST, and these servers sit in that zone, so a naive LIST mtime

@@ -13,8 +13,8 @@ from ftplib import error_perm
 from pathlib import Path
 from unittest.mock import patch
 
-from ftp_handler.eqp_ftp_collect import build_host_specs, collect_fleet
-from ftp_handler.ftp_fleet_downloader import (
+from ftp_handler.direct_downloader.collect import build_host_specs, collect_fleet
+from ftp_handler.direct_downloader.fleet_downloader import (
     DownloadReport,
     FtpFleetDownloader,
     HostSpec,
@@ -27,7 +27,7 @@ from ftp_handler.ftp_fleet_downloader import (
     specs_from_hosts,
 )
 
-FTP_PATCH_TARGET = "ftp_handler.ftp_fleet_downloader.FTP"
+FTP_PATCH_TARGET = "ftp_handler.direct_downloader.fleet_downloader.FTP"
 
 
 class FakeFTP:
@@ -263,6 +263,34 @@ class FtpFleetDownloaderTests(_FakeFTPTestCase):
 
     def test_empty_report_failure_ratio_is_zero(self):
         self.assertEqual(DownloadReport(files=[], failures=[]).failure_ratio, 0.0)
+
+    def test_host_timeout_is_per_host_from_start(self):
+        # A host whose worker runs longer than host_timeout must fail — even when
+        # it runs concurrently with another and finishes while we're blocked on a
+        # sibling. host_timeout is measured from each worker's start, so neither
+        # can "borrow" budget from time spent waiting on the other.
+        import time
+
+        orig = FtpFleetDownloader._host_worker
+
+        def slow(self, spec, on_file):
+            time.sleep(0.15)
+            return orig(self, spec, on_file)
+
+        FakeFTP.scripts = {"h1": {"files": {"/f": b"a"}}, "h2": {"files": {"/f": b"b"}}}
+        with patch(FTP_PATCH_TARGET, FakeFTP), patch.object(
+            FtpFleetDownloader, "_host_worker", slow
+        ):
+            dl = FtpFleetDownloader(
+                user="u", password="p", max_concurrency=2, host_timeout=0.1
+            )
+            report = dl.download(
+                [HostSpec("h1", files=["/f"]), HostSpec("h2", files=["/f"])]
+            )
+
+        self.assertEqual(report.ok, 0)
+        self.assertEqual(report.ng, 2)
+        self.assertTrue(all("host_timeout" in f.error for f in report.failures))
 
     def test_download_fleet_helper(self):
         FakeFTP.scripts = {"h1": {"files": {"/log": b"data"}}}

@@ -1,6 +1,6 @@
 """Unit tests for the single-server FtpClient.
 
-No live FTP server: ftp_handler.ftp_client.FTP is patched with FakeFTP, a
+No live FTP server: ftp_handler.core.client.FTP is patched with FakeFTP, a
 minimal stand-in driven by class-level state. Asserts the four operations issue
 the right ftplib calls and that the connection lifecycle (connect/login/pasv on
 enter, close on exit) runs.
@@ -12,15 +12,15 @@ from ftplib import error_perm
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from ftp_handler.ftp_client import (
+from ftp_handler.core.client import (
     DirEntries,
     FileInfo,
     FtpClient,
-    _normalize_listing,
     _parse_list_line,
 )
+from ftp_handler.core.listing import _normalize_listing
 
-FTP_PATCH_TARGET = "ftp_handler.ftp_client.FTP"
+FTP_PATCH_TARGET = "ftp_handler.core.client.FTP"
 KST = ZoneInfo("Asia/Seoul")
 # Fixed "now" so year inference for the year-less Unix format is deterministic.
 NOW = datetime(2026, 5, 22, 12, 0, tzinfo=KST)
