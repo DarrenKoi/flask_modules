@@ -140,11 +140,21 @@ class UploadResult:
 @dataclass(slots=True)
 class HostFailure:
     """A failed download. ``remote_path`` is ``None`` when the failure happened
-    before any specific file (connect / login / directory listing)."""
+    before any specific file (connect / login / directory listing).
+
+    ``from_callback`` marks a failure that happened AFTER the bytes were already
+    transferred — the user's ``on_file`` callback raised (e.g. a downstream
+    archive/index write failed). Re-downloading the file wouldn't fix it and
+    would re-run the callback's side effects, so the retry planner keeps such a
+    failure instead of re-attempting it. It defaults ``False``, so a transfer or
+    listing failure (the retryable kind) needs nothing set, and a ``HostFailure``
+    reconstructed from the proxy wire is treated as retryable.
+    """
 
     host: str
     error: str
     remote_path: str | None = None
+    from_callback: bool = False
 
 
 @dataclass(slots=True)
@@ -436,15 +446,16 @@ class FtpFleetDownloader:
             specs, lambda spec: self._host_worker(spec, on_file)
         )
         by_host = {spec.host: spec for spec in specs}
-        while failures and retries > 0:
-            retries -= 1
-            retry_specs = _specs_from_failures(failures, by_host)
+        while retries > 0:
+            retry_specs, kept = _plan_retry(failures, by_host)
             if not retry_specs:
                 break
-            more, failures = self._run_fleet(
+            retries -= 1
+            more, retried_failures = self._run_fleet(
                 retry_specs, lambda spec: self._host_worker(spec, on_file)
             )
             files.extend(more)
+            failures = kept + retried_failures
         return DownloadReport(files=files, failures=failures)
 
     def list_dirs(self, specs: list[HostSpec]) -> ListingReport:
@@ -769,20 +780,17 @@ class FtpFleetDownloader:
         files: list[FileResult],
         failures: list[HostFailure],
     ) -> None:
-        # Broad except: covers ftplib errors AND anything an on_file callback
-        # raises (e.g. a MinIO/OpenSearch write), so a per-file failure is
-        # isolated to that file and reported, never propagated.
+        # The transfer and the callback are isolated SEPARATELY on purpose. A
+        # failed RETR is retryable — re-downloading may succeed. But a callback
+        # that raises AFTER the bytes already arrived (e.g. a MinIO/OpenSearch
+        # write) must NOT be retried: re-downloading wouldn't help and would
+        # re-run the callback's side effects (duplicate archive/index). Such a
+        # failure is tagged from_callback so the retry planner keeps it instead.
         try:
             buf = BytesIO()
             ftp.retrbinary(f"RETR {remote_path}", buf.write)
             data = buf.getvalue()
-            if on_file is not None:
-                on_file(host, remote_path, data)
-                # Drop the bytes once consumed — streaming mode keeps RAM flat.
-                files.append(FileResult(host=host, remote_path=remote_path, data=b""))
-            else:
-                files.append(FileResult(host=host, remote_path=remote_path, data=data))
-        except Exception as exc:  # noqa: BLE001 - intentional per-file isolation
+        except Exception as exc:  # noqa: BLE001 - transfer failure, retryable
             failures.append(
                 HostFailure(
                     host=host,
@@ -790,35 +798,96 @@ class FtpFleetDownloader:
                     remote_path=remote_path,
                 )
             )
+            return
+        if on_file is None:
+            files.append(FileResult(host=host, remote_path=remote_path, data=data))
+            return
+        try:
+            on_file(host, remote_path, data)
+        except Exception as exc:  # noqa: BLE001 - downstream processing, NOT retryable
+            failures.append(
+                HostFailure(
+                    host=host,
+                    error=f"{type(exc).__name__}: {exc}",
+                    remote_path=remote_path,
+                    from_callback=True,
+                )
+            )
+            return
+        # Drop the bytes once the callback consumed them — streaming keeps RAM flat.
+        files.append(FileResult(host=host, remote_path=remote_path, data=b""))
 
 
-def _specs_from_failures(
+def _plan_retry(
     failures: list[HostFailure],
     by_host: dict[str, HostSpec],
-) -> list[HostSpec]:
-    """Rebuild download specs that target only what failed, for a retry pass.
+) -> tuple[list[HostSpec], list[HostFailure]]:
+    """Partition failures into a retry plan: ``(retry_specs, kept_failures)``.
 
-    A per-file failure (``remote_path`` set) is retried as that one fixed path.
-    A whole-host failure (``remote_path`` is ``None`` — connect/login/quit died
-    before any file got a chance) re-runs the host's original spec, since we
-    don't know which of its files would have come back. Hosts and files that
-    already succeeded are never included, so a retry never re-downloads them.
+    ``retry_specs`` target only what's worth re-attempting, rebuilt so a retry
+    never re-touches work that already succeeded:
+
+      - A per-file failure re-fetches just that one path.
+      - A failure whose ``remote_path`` is one of the host's original *listing*
+        directories re-lists that directory (preserving its pattern) rather than
+        RETR-ing the directory as if it were a file — a transient listing blip
+        must re-discover its files, not fail again as a bogus 550.
+      - A whole-host failure (``remote_path`` is ``None`` — connect/login died
+        before any file) re-runs the host's original spec.
+
+    ``kept_failures`` are the failures we deliberately do NOT retry and must
+    carry forward into the final report (otherwise reassigning ``failures`` to
+    the retry pass's result would silently drop them):
+
+      - ``from_callback`` failures: the bytes transferred fine and only the
+        downstream callback raised, so re-downloading wouldn't help and would
+        duplicate the callback's side effects.
+      - failures for a host with no original spec to rebuild from (shouldn't
+        happen, but never lose a failure).
     """
     retry: dict[str, HostSpec] = {}
+    kept: list[HostFailure] = []
     for failure in failures:
-        if failure.remote_path is not None:
-            retry.setdefault(failure.host, HostSpec(host=failure.host)).files.append(
-                failure.remote_path
-            )
-        else:
-            original = by_host.get(failure.host)
-            if original is not None:
+        if failure.from_callback:
+            kept.append(failure)
+            continue
+        original = by_host.get(failure.host)
+        if failure.remote_path is None:
+            if original is None:
+                kept.append(failure)
+            else:
                 retry[failure.host] = HostSpec(
                     host=failure.host,
                     files=list(original.files),
                     listings=list(original.listings),
                 )
-    return list(retry.values())
+            continue
+        listing = _matching_listing(original, failure.remote_path)
+        if listing is not None:
+            retry.setdefault(failure.host, HostSpec(host=failure.host)).listings.append(
+                ListDir(remote_dir=listing.remote_dir, pattern=listing.pattern)
+            )
+        else:
+            retry.setdefault(failure.host, HostSpec(host=failure.host)).files.append(
+                failure.remote_path
+            )
+    return list(retry.values()), kept
+
+
+def _matching_listing(spec: HostSpec | None, remote_path: str) -> ListDir | None:
+    """The original ``ListDir`` whose directory equals ``remote_path``, or None.
+
+    Lets the retry planner tell a failed listing-directory enumeration apart
+    from a failed file fetch using only the caller's original spec — so it works
+    identically in direct and proxy mode without threading extra state over the
+    wire.
+    """
+    if spec is None:
+        return None
+    for listing in spec.listings:
+        if listing.remote_dir == remote_path:
+            return listing
+    return None
 
 
 def specs_from_hosts(

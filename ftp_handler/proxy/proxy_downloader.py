@@ -57,7 +57,7 @@ try:
         UploadReport,
         UploadResult,
         UploadSpec,
-        _specs_from_failures,
+        _plan_retry,
         save_to_dir,
         specs_from_hosts,
         upload_specs_from_hosts,
@@ -81,7 +81,7 @@ except ImportError:  # copied beside fleet_downloader.py and imported bare
         UploadReport,
         UploadResult,
         UploadSpec,
-        _specs_from_failures,
+        _plan_retry,
         save_to_dir,
         specs_from_hosts,
         upload_specs_from_hosts,
@@ -232,17 +232,18 @@ class FtpFleetDownloader:
             failures.extend(batch_failures)
 
         by_host = {spec.host: spec for spec in specs}
-        while failures and retries > 0:
-            retries -= 1
-            retry_specs = _specs_from_failures(failures, by_host)
+        while retries > 0:
+            retry_specs, kept = _plan_retry(failures, by_host)
             if not retry_specs:
                 break
-            failures = []
+            retries -= 1
+            retried_failures: list[HostFailure] = []
             for batch_files, batch_failures in self._post_batches(
                 retry_specs, lambda b: self._post_batch(b, on_file)
             ):
                 files.extend(batch_files)
-                failures.extend(batch_failures)
+                retried_failures.extend(batch_failures)
+            failures = kept + retried_failures
         return DownloadReport(files=files, failures=failures)
 
     def list_dirs(self, specs: list[HostSpec]) -> ListingReport:
@@ -389,17 +390,20 @@ class FtpFleetDownloader:
             remote_path = item["remote_path"]
             raw = base64.b64decode(item["data_b64"])
             if on_file is not None:
-                # Same contract as direct mode: callback consumes the bytes,
-                # the report keeps none; a callback raise fails that file only.
+                # Same contract as direct mode: callback consumes the bytes, the
+                # report keeps none; a callback raise fails that file only and is
+                # tagged from_callback so the retry planner keeps it rather than
+                # re-downloading (which would re-run the callback's side effects).
                 try:
                     on_file(host, remote_path, raw)
                     files.append(FileResult(host=host, remote_path=remote_path, data=b""))
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001 - downstream, NOT retryable
                     failures.append(
                         HostFailure(
                             host=host,
                             error=f"{type(exc).__name__}: {exc}",
                             remote_path=remote_path,
+                            from_callback=True,
                         )
                     )
             else:

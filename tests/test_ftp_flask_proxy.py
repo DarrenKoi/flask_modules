@@ -188,13 +188,17 @@ class FtpProxyPairTests(unittest.TestCase):
         ):
             return self._make_dl(token, **kw).upload(specs)
 
-    def _download_retries(self, specs, *, retries, fail_hosts=None, token=None, **kw):
+    def _download_retries(
+        self, specs, *, retries, on_file=None, fail_hosts=None, token=None, **kw
+    ):
         app = proxy_mod.create_app()
         fclient = app.test_client()
         with patch.object(core, "FTP", FakeFTP), patch.object(
             client_mod.requests, "post", _bridge(fclient, fail_hosts)
         ):
-            return self._make_dl(token, **kw).download(specs, retries=retries)
+            return self._make_dl(token, **kw).download(
+                specs, on_file=on_file, retries=retries
+            )
 
     def _size_dirs(self, specs, *, fail_hosts=None, token=None, **kw):
         app = proxy_mod.create_app()
@@ -367,6 +371,24 @@ class FtpProxyPairTests(unittest.TestCase):
         )
         self.assertEqual(report.ng, 0)
         self.assertEqual(report.grouped(), {"h1": {"/a": b"OK"}})
+
+    def test_callback_failure_not_retried_through_proxy(self):
+        # on_file runs on the CLIENT; a callback raise is tagged from_callback so
+        # the client's retry loop keeps it instead of re-POSTing (which would
+        # re-download and re-run the callback's side effects).
+        FakeFTP.scripts = {"h1": {"files": {"/bad": b"B"}}}
+        calls: list = []
+
+        def on_file(host, remote_path, data):
+            calls.append(remote_path)
+            raise RuntimeError("index write failed")
+
+        report = self._download_retries(
+            [HostSpec("h1", files=["/bad"])], retries=3, on_file=on_file
+        )
+        self.assertEqual(report.ng, 1)
+        self.assertTrue(report.failures[0].from_callback)
+        self.assertEqual(calls.count("/bad"), 1)
 
     def test_size_dirs_through_proxy_returns_byte_counts(self):
         FakeFTP.scripts = {
