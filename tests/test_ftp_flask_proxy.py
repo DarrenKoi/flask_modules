@@ -73,6 +73,10 @@ class FakeFTP:
 
     def retrbinary(self, cmd, callback):
         remote_path = cmd.split(" ", 1)[1]
+        fail_times = self._script().get("fail_times")
+        if fail_times and fail_times.get(remote_path, 0) > 0:
+            fail_times[remote_path] -= 1
+            raise error_perm(f"450 transient {remote_path}")
         files = self._script().get("files", {})
         if remote_path not in files:
             raise error_perm(f"550 {remote_path}")
@@ -183,6 +187,14 @@ class FtpProxyPairTests(unittest.TestCase):
             client_mod.requests, "post", _bridge(fclient, fail_hosts)
         ):
             return self._make_dl(token, **kw).upload(specs)
+
+    def _download_retries(self, specs, *, retries, fail_hosts=None, token=None, **kw):
+        app = proxy_mod.create_app()
+        fclient = app.test_client()
+        with patch.object(core, "FTP", FakeFTP), patch.object(
+            client_mod.requests, "post", _bridge(fclient, fail_hosts)
+        ):
+            return self._make_dl(token, **kw).download(specs, retries=retries)
 
     def _size_dirs(self, specs, *, fail_hosts=None, token=None, **kw):
         app = proxy_mod.create_app()
@@ -345,6 +357,16 @@ class FtpProxyPairTests(unittest.TestCase):
         report = self._list_dirs([])
         self.assertEqual(report.ok, 0)
         self.assertEqual(report.ng, 0)
+
+    def test_retries_recover_transient_failure_through_proxy(self):
+        # The retry loop lives on the client and re-POSTs only the failed path;
+        # the proxy-side FakeFTP fails /a once, then serves it.
+        FakeFTP.scripts = {"h1": {"files": {"/a": b"OK"}, "fail_times": {"/a": 1}}}
+        report = self._download_retries(
+            [HostSpec("h1", files=["/a"])], retries=2
+        )
+        self.assertEqual(report.ng, 0)
+        self.assertEqual(report.grouped(), {"h1": {"/a": b"OK"}})
 
     def test_size_dirs_through_proxy_returns_byte_counts(self):
         FakeFTP.scripts = {

@@ -57,6 +57,7 @@ try:
         UploadReport,
         UploadResult,
         UploadSpec,
+        _specs_from_failures,
         save_to_dir,
         specs_from_hosts,
         upload_specs_from_hosts,
@@ -80,6 +81,7 @@ except ImportError:  # copied beside fleet_downloader.py and imported bare
         UploadReport,
         UploadResult,
         UploadSpec,
+        _specs_from_failures,
         save_to_dir,
         specs_from_hosts,
         upload_specs_from_hosts,
@@ -203,6 +205,7 @@ class FtpFleetDownloader:
         specs: list[HostSpec],
         *,
         on_file: OnFile | None = None,
+        retries: int = 0,
     ) -> DownloadReport:
         """Synchronous, same signature as the direct downloader.
 
@@ -210,6 +213,12 @@ class FtpFleetDownloader:
         merges the results into one DownloadReport. A whole-batch transport
         failure marks every host in that batch failed — per-host isolation one
         level up.
+
+        ``retries`` re-attempts whatever failed, up to that many extra passes
+        (default 0 = no retry), exactly like the direct downloader: only the
+        failed work is re-POSTed, so files that already landed never download
+        twice, and ``on_file`` (which runs HERE on the client) fires at most once
+        per file.
         """
         if not specs:
             return DownloadReport(files=[], failures=[])
@@ -221,6 +230,19 @@ class FtpFleetDownloader:
         ):
             files.extend(batch_files)
             failures.extend(batch_failures)
+
+        by_host = {spec.host: spec for spec in specs}
+        while failures and retries > 0:
+            retries -= 1
+            retry_specs = _specs_from_failures(failures, by_host)
+            if not retry_specs:
+                break
+            failures = []
+            for batch_files, batch_failures in self._post_batches(
+                retry_specs, lambda b: self._post_batch(b, on_file)
+            ):
+                files.extend(batch_files)
+                failures.extend(batch_failures)
         return DownloadReport(files=files, failures=failures)
 
     def list_dirs(self, specs: list[HostSpec]) -> ListingReport:
@@ -482,11 +504,12 @@ def download_fleet(
     user: str,
     password: str,
     on_file: OnFile | None = None,
+    retries: int = 0,
     **kwargs: object,
 ) -> DownloadReport:
     """One-call wrapper, mirroring ftp_fleet_downloader.download_fleet."""
     downloader = FtpFleetDownloader(user=user, password=password, **kwargs)  # type: ignore[arg-type]
-    return downloader.download(specs, on_file=on_file)
+    return downloader.download(specs, on_file=on_file, retries=retries)
 
 
 def list_fleet(

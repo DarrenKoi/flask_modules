@@ -17,6 +17,7 @@ from ftp_handler.direct_downloader.collect import build_host_specs, collect_flee
 from ftp_handler.direct_downloader.fleet_downloader import (
     DownloadReport,
     FtpFleetDownloader,
+    HostFailure,
     HostSpec,
     ListDir,
     ListingReport,
@@ -25,6 +26,7 @@ from ftp_handler.direct_downloader.fleet_downloader import (
     UploadReport,
     UploadSpec,
     _safe_relative,
+    _specs_from_failures,
     download_fleet,
     list_fleet,
     save_to_dir,
@@ -90,6 +92,12 @@ class FakeFTP:
 
     def retrbinary(self, cmd, callback):
         remote_path = cmd.split(" ", 1)[1]
+        # `fail_times` makes a path fail that many times before succeeding, so a
+        # retry test can prove a transient failure recovers on a later pass.
+        fail_times = self._script().get("fail_times")
+        if fail_times and fail_times.get(remote_path, 0) > 0:
+            fail_times[remote_path] -= 1
+            raise error_perm(f"450 transient: {remote_path}")
         files = self._script().get("files", {})
         if remote_path not in files:
             raise error_perm(f"550 No such file: {remote_path}")
@@ -620,6 +628,88 @@ class ListDirsTests(_FakeFTPTestCase):
                 max_concurrency=4,
             )
         self.assertEqual(report.grouped(), {"h1": ["/MEAS/a.dat"]})
+
+
+class RetryTests(_FakeFTPTestCase):
+    def _download(self, specs, *, retries, **kwargs):
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p", **kwargs)
+            return dl.download(specs, retries=retries)
+
+    def test_transient_per_file_failure_recovers_on_retry(self):
+        FakeFTP.scripts = {"h1": {"files": {"/a": b"OK"}, "fail_times": {"/a": 1}}}
+        report = self._download([HostSpec("h1", files=["/a"])], retries=2)
+        self.assertEqual(report.ng, 0)
+        self.assertEqual(report.grouped(), {"h1": {"/a": b"OK"}})
+
+    def test_retries_exhausted_keeps_failure(self):
+        # Fails more times than we retry — stays a failure, loop still terminates.
+        FakeFTP.scripts = {"h1": {"files": {"/a": b"OK"}, "fail_times": {"/a": 5}}}
+        report = self._download([HostSpec("h1", files=["/a"])], retries=2)
+        self.assertEqual(report.ok, 0)
+        self.assertEqual(report.ng, 1)
+        self.assertEqual(report.failures[0].remote_path, "/a")
+
+    def test_default_no_retry(self):
+        FakeFTP.scripts = {"h1": {"files": {"/a": b"OK"}, "fail_times": {"/a": 1}}}
+        report = self._download([HostSpec("h1", files=["/a"])], retries=0)
+        self.assertEqual(report.ng, 1)
+
+    def test_retry_refetches_only_failed_not_succeeded(self):
+        # /good succeeds first pass; /bad fails once then recovers. The retry pass
+        # must touch only /bad, so /good appears exactly once (no duplicate).
+        FakeFTP.scripts = {
+            "h1": {
+                "files": {"/good": b"G", "/bad": b"B"},
+                "fail_times": {"/bad": 1},
+            }
+        }
+        report = self._download([HostSpec("h1", files=["/good", "/bad"])], retries=1)
+        self.assertEqual(report.ng, 0)
+        paths = [f.remote_path for f in report.files]
+        self.assertEqual(sorted(paths), ["/bad", "/good"])
+        self.assertEqual(len(paths), 2)  # /good not re-downloaded
+
+    def test_transient_whole_host_failure_reruns_original_spec(self):
+        # A whole-host failure (login dies before any file, so remote_path=None)
+        # must retry the host's ORIGINAL spec — here a listing, which the retry
+        # then re-discovers and pulls. login fails once, then heals.
+        FakeFTP.scripts = {
+            "h1": {
+                "listing": {"/MEAS": ["a.dat"]},
+                "files": {"/MEAS/a.dat": b"DATA"},
+            }
+        }
+        state = {"attempts": 0}
+
+        def flaky_login(self, user, passwd):
+            state["attempts"] += 1
+            if state["attempts"] == 1:
+                raise error_perm("530 transient login")
+
+        with patch.object(FakeFTP, "login", flaky_login), patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p")
+            report = dl.download(
+                [HostSpec("h1", listings=[ListDir("/MEAS", "*.dat")])], retries=1
+            )
+        self.assertEqual(report.ng, 0)
+        self.assertEqual(report.grouped(), {"h1": {"/MEAS/a.dat": b"DATA"}})
+
+    def test_specs_from_failures_splits_file_and_whole_host(self):
+        original = {
+            "h1": HostSpec("h1", files=["/x"], listings=[ListDir("/MEAS", "*.dat")]),
+            "h2": HostSpec("h2", files=["/y"]),
+        }
+        failures = [
+            HostFailure(host="h1", error="connect died"),          # whole-host
+            HostFailure(host="h2", error="bad", remote_path="/y"),  # per-file
+        ]
+        specs = {s.host: s for s in _specs_from_failures(failures, original)}
+        # h1 re-runs its original spec (files + listings); h2 re-fetches just /y.
+        self.assertEqual(specs["h1"].files, ["/x"])
+        self.assertEqual(len(specs["h1"].listings), 1)
+        self.assertEqual(specs["h2"].files, ["/y"])
+        self.assertEqual(specs["h2"].listings, [])
 
 
 class SizingTests(_FakeFTPTestCase):

@@ -347,7 +347,11 @@ class FleetTransport(Protocol):
     """
 
     def download(
-        self, specs: list[HostSpec], *, on_file: OnFile | None = None
+        self,
+        specs: list[HostSpec],
+        *,
+        on_file: OnFile | None = None,
+        retries: int = 0,
     ) -> DownloadReport: ...
 
     def list_dirs(self, specs: list[HostSpec]) -> ListingReport: ...
@@ -409,6 +413,7 @@ class FtpFleetDownloader:
         specs: list[HostSpec],
         *,
         on_file: OnFile | None = None,
+        retries: int = 0,
     ) -> DownloadReport:
         """Download every spec concurrently and return a report.
 
@@ -418,10 +423,28 @@ class FtpFleetDownloader:
         already runs its own asyncio loop. Pass ``on_file`` to stream-process
         each file and keep RAM bounded; omit it to collect all bytes into the
         report.
+
+        ``retries`` re-attempts whatever failed, up to that many extra passes
+        (default 0 = one pass, no retry). Only the failed work is retried — a
+        per-file failure re-fetches just that path, a whole-host failure
+        (connect/login died before any file) re-runs the host's original spec —
+        so files that already landed never download twice. The loop stops early
+        the moment there are no failures left. ``on_file`` only ever fires on a
+        success, so a retried file's callback runs at most once.
         """
         files, failures = self._run_fleet(
             specs, lambda spec: self._host_worker(spec, on_file)
         )
+        by_host = {spec.host: spec for spec in specs}
+        while failures and retries > 0:
+            retries -= 1
+            retry_specs = _specs_from_failures(failures, by_host)
+            if not retry_specs:
+                break
+            more, failures = self._run_fleet(
+                retry_specs, lambda spec: self._host_worker(spec, on_file)
+            )
+            files.extend(more)
         return DownloadReport(files=files, failures=failures)
 
     def list_dirs(self, specs: list[HostSpec]) -> ListingReport:
@@ -769,6 +792,35 @@ class FtpFleetDownloader:
             )
 
 
+def _specs_from_failures(
+    failures: list[HostFailure],
+    by_host: dict[str, HostSpec],
+) -> list[HostSpec]:
+    """Rebuild download specs that target only what failed, for a retry pass.
+
+    A per-file failure (``remote_path`` set) is retried as that one fixed path.
+    A whole-host failure (``remote_path`` is ``None`` — connect/login/quit died
+    before any file got a chance) re-runs the host's original spec, since we
+    don't know which of its files would have come back. Hosts and files that
+    already succeeded are never included, so a retry never re-downloads them.
+    """
+    retry: dict[str, HostSpec] = {}
+    for failure in failures:
+        if failure.remote_path is not None:
+            retry.setdefault(failure.host, HostSpec(host=failure.host)).files.append(
+                failure.remote_path
+            )
+        else:
+            original = by_host.get(failure.host)
+            if original is not None:
+                retry[failure.host] = HostSpec(
+                    host=failure.host,
+                    files=list(original.files),
+                    listings=list(original.listings),
+                )
+    return list(retry.values())
+
+
 def specs_from_hosts(
     hosts: list[str],
     *,
@@ -833,16 +885,18 @@ def download_fleet(
     user: str,
     password: str,
     on_file: OnFile | None = None,
+    retries: int = 0,
     **kwargs: object,
 ) -> DownloadReport:
     """One-call convenience wrapper around ``FtpFleetDownloader``.
 
     For callers that just want a function: ``download_fleet(specs, user=...,
-    password=...)``. Extra keyword args (port, max_concurrency, connect_timeout,
-    host_timeout, passive) are forwarded to the constructor.
+    password=...)``. ``retries`` re-attempts failed work (see
+    ``FtpFleetDownloader.download``). Extra keyword args (port, max_concurrency,
+    connect_timeout, host_timeout, passive) are forwarded to the constructor.
     """
     downloader = FtpFleetDownloader(user=user, password=password, **kwargs)  # type: ignore[arg-type]
-    return downloader.download(specs, on_file=on_file)
+    return downloader.download(specs, on_file=on_file, retries=retries)
 
 
 def list_fleet(
