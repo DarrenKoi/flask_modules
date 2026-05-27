@@ -650,10 +650,19 @@ class RetryTests(_FakeFTPTestCase):
         self.assertEqual(report.ng, 1)
         self.assertEqual(report.failures[0].remote_path, "/a")
 
-    def test_default_no_retry(self):
+    def test_retries_zero_disables_retry(self):
         FakeFTP.scripts = {"h1": {"files": {"/a": b"OK"}, "fail_times": {"/a": 1}}}
         report = self._download([HostSpec("h1", files=["/a"])], retries=0)
         self.assertEqual(report.ng, 1)
+
+    def test_default_retries_is_one(self):
+        # download() defaults to retries=1, so a single transient failure recovers
+        # without the caller asking. _run goes through dl.download(specs) with no
+        # retries kwarg, exercising the default.
+        FakeFTP.scripts = {"h1": {"files": {"/a": b"OK"}, "fail_times": {"/a": 1}}}
+        report = self._run([HostSpec("h1", files=["/a"])])
+        self.assertEqual(report.ng, 0)
+        self.assertEqual(report.grouped(), {"h1": {"/a": b"OK"}})
 
     def test_retry_refetches_only_failed_not_succeeded(self):
         # /good succeeds first pass; /bad fails once then recovers. The retry pass

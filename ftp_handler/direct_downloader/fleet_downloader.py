@@ -351,7 +351,7 @@ class FleetTransport(Protocol):
         specs: list[HostSpec],
         *,
         on_file: OnFile | None = None,
-        retries: int = 0,
+        retries: int = 1,
     ) -> DownloadReport: ...
 
     def list_dirs(self, specs: list[HostSpec]) -> ListingReport: ...
@@ -413,7 +413,7 @@ class FtpFleetDownloader:
         specs: list[HostSpec],
         *,
         on_file: OnFile | None = None,
-        retries: int = 0,
+        retries: int = 1,
     ) -> DownloadReport:
         """Download every spec concurrently and return a report.
 
@@ -425,12 +425,12 @@ class FtpFleetDownloader:
         report.
 
         ``retries`` re-attempts whatever failed, up to that many extra passes
-        (default 0 = one pass, no retry). Only the failed work is retried — a
-        per-file failure re-fetches just that path, a whole-host failure
-        (connect/login died before any file) re-runs the host's original spec —
-        so files that already landed never download twice. The loop stops early
-        the moment there are no failures left. ``on_file`` only ever fires on a
-        success, so a retried file's callback runs at most once.
+        (default 1 = one retry; pass 0 to disable). Only the failed work is
+        retried — a per-file failure re-fetches just that path, a whole-host
+        failure (connect/login died before any file) re-runs the host's original
+        spec — so files that already landed never download twice. The loop stops
+        early the moment there are no failures left. ``on_file`` only ever fires
+        on a success, so a retried file's callback runs at most once.
         """
         files, failures = self._run_fleet(
             specs, lambda spec: self._host_worker(spec, on_file)
@@ -885,7 +885,7 @@ def download_fleet(
     user: str,
     password: str,
     on_file: OnFile | None = None,
-    retries: int = 0,
+    retries: int = 1,
     **kwargs: object,
 ) -> DownloadReport:
     """One-call convenience wrapper around ``FtpFleetDownloader``.

@@ -119,6 +119,9 @@ def example_download_with_retries() -> None:
     whole spec. Files that already landed are never re-downloaded, and the loop
     stops as soon as nothing is left failing. Good for a large run where a few
     hosts blip on connection resets or transient busy errors.
+
+    The default is retries=1 (one retry); pass retries=0 to disable, or a higher
+    number for a flakier fleet.
     """
     specs = [HostSpec(host, listings=[ListDir("/MEAS", "*.dat")]) for host in FLEET_HOSTS]
     report = FtpFleetDownloader(user=USER, password=PASSWORD).download(specs, retries=2)

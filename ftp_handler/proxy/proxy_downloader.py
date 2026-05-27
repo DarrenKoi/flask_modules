@@ -205,7 +205,7 @@ class FtpFleetDownloader:
         specs: list[HostSpec],
         *,
         on_file: OnFile | None = None,
-        retries: int = 0,
+        retries: int = 1,
     ) -> DownloadReport:
         """Synchronous, same signature as the direct downloader.
 
@@ -215,10 +215,10 @@ class FtpFleetDownloader:
         level up.
 
         ``retries`` re-attempts whatever failed, up to that many extra passes
-        (default 0 = no retry), exactly like the direct downloader: only the
-        failed work is re-POSTed, so files that already landed never download
-        twice, and ``on_file`` (which runs HERE on the client) fires at most once
-        per file.
+        (default 1 = one retry; pass 0 to disable), exactly like the direct
+        downloader: only the failed work is re-POSTed, so files that already
+        landed never download twice, and ``on_file`` (which runs HERE on the
+        client) fires at most once per file.
         """
         if not specs:
             return DownloadReport(files=[], failures=[])
@@ -504,7 +504,7 @@ def download_fleet(
     user: str,
     password: str,
     on_file: OnFile | None = None,
-    retries: int = 0,
+    retries: int = 1,
     **kwargs: object,
 ) -> DownloadReport:
     """One-call wrapper, mirroring ftp_fleet_downloader.download_fleet."""
