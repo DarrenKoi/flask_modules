@@ -262,6 +262,74 @@ class ListingReport:
         ]
 
 
+@dataclass(slots=True)
+class FileSize:
+    """The size in bytes of one remote file, as reported by the server's ``SIZE``
+    command — no bytes were transferred to learn it."""
+
+    host: str
+    remote_path: str
+    size: int
+
+
+@dataclass(slots=True)
+class SizingReport:
+    """Result of probing the fleet's file sizes without downloading anything.
+
+    The RAM-budget counterpart to ``ListingReport``: where ``list_dirs`` answers
+    "what files are out there", this answers "how many bytes would they cost in
+    memory". ``total_bytes`` is the sum the collect-mode ``download`` would hold
+    at once; divide a per-host or per-batch slice of it to decide how to chunk a
+    large run. A file whose ``SIZE`` failed or was unsupported lands in
+    ``failures`` (never silently counted as zero), so ``total_bytes`` only sums
+    files that were actually measured.
+    """
+
+    files: list[FileSize]
+    failures: list[HostFailure]
+
+    @property
+    def ok(self) -> int:
+        return len(self.files)
+
+    @property
+    def ng(self) -> int:
+        return len(self.failures)
+
+    @property
+    def failure_ratio(self) -> float:
+        """Fraction of attempted units that failed, for threshold-based
+        alerting. 0.0 when nothing was attempted."""
+        total = self.ok + self.ng
+        return self.ng / total if total else 0.0
+
+    @property
+    def total_bytes(self) -> int:
+        """Sum of every measured file's size — the peak RAM a collect-mode
+        ``download`` of this exact set would hold at once."""
+        return sum(f.size for f in self.files)
+
+    def by_host(self) -> dict[str, int]:
+        """Measured bytes per host: ``{host: total_bytes}``. Use it to spot the
+        heavy hosts and split a fleet run into RAM-bounded batches."""
+        out: dict[str, int] = {}
+        for f in self.files:
+            out[f.host] = out.get(f.host, 0) + f.size
+        return out
+
+    def to_specs(self) -> list["HostSpec"]:
+        """Turn measured paths into download-ready ``HostSpec`` objects.
+
+        Mirrors ``ListingReport.to_specs`` — each host's measured paths become
+        fixed ``files`` (no re-listing on download), so you download exactly the
+        set you just sized: ``downloader.download(report.to_specs())``.
+        """
+        by_host: dict[str, list[str]] = {}
+        for f in self.files:
+            by_host.setdefault(f.host, []).append(f.remote_path)
+        return [HostSpec(host=host, files=paths) for host, paths in by_host.items()]
+
+
 @runtime_checkable
 class FleetTransport(Protocol):
     """The interchange seam between the two FTP deployment paths.
@@ -271,8 +339,9 @@ class FleetTransport(Protocol):
     same surface over HTTP). A call site swaps one import line between them and
     nothing else changes — that swap is the whole point of the seam.
 
-    All three fleet operations are on the seam: ``list_dirs`` (the
-    look-before-you-download listing pass), ``download``, and ``upload`` (the
+    All four fleet operations are on the seam: ``list_dirs`` (the
+    look-before-you-download listing pass), ``size_dirs`` (the
+    estimate-RAM-before-you-pull sizing pass), ``download``, and ``upload`` (the
     write direction). The conformance test guards that both adapters keep
     matching every method, so neither path drifts.
     """
@@ -282,6 +351,8 @@ class FleetTransport(Protocol):
     ) -> DownloadReport: ...
 
     def list_dirs(self, specs: list[HostSpec]) -> ListingReport: ...
+
+    def size_dirs(self, specs: list[HostSpec]) -> SizingReport: ...
 
     def upload(self, specs: list[UploadSpec]) -> UploadReport: ...
 
@@ -368,6 +439,26 @@ class FtpFleetDownloader:
         """
         listings, failures = self._run_fleet(specs, self._list_worker)
         return ListingReport(listings=listings, failures=failures)
+
+    def size_dirs(self, specs: list[HostSpec]) -> SizingReport:
+        """Measure each spec's files concurrently via ``SIZE`` — no fetching.
+
+        The "estimate RAM before you pull" pass: resolve every host's paths
+        (fixed ``files`` plus whatever its ``listings`` discover, exactly as
+        ``download`` would), then ask the server each file's size with the FTP
+        ``SIZE`` command instead of RETR'ing the bytes. ``report.total_bytes`` is
+        then the peak RAM a collect-mode ``download`` of the same set would hold;
+        ``report.by_host()`` shows where the weight sits so you can chunk a large
+        run. Feed the measured set straight into ``download`` with
+        ``report.to_specs()``.
+
+        Same concurrency, per-host ``host_timeout`` backstop, per-host AND
+        per-file failure isolation, and event-loop-free safety as ``download``.
+        A file whose ``SIZE`` fails or is unsupported is recorded in
+        ``failures``, never counted as zero bytes.
+        """
+        sizes, failures = self._run_fleet(specs, self._size_worker)
+        return SizingReport(files=sizes, failures=failures)
 
     def upload(self, specs: list[UploadSpec]) -> UploadReport:
         """Push every spec's files to its host concurrently and return a report.
@@ -537,6 +628,56 @@ class FtpFleetDownloader:
             )
             return [], failures
         return [HostListing(host=spec.host, paths=paths)], failures
+
+    def _size_worker(
+        self,
+        spec: HostSpec,
+    ) -> tuple[list[FileSize], list[HostFailure]]:
+        # Sizing counterpart to _host_worker: connect once, resolve the same
+        # paths download would, then SIZE each instead of RETR. A connect/login
+        # failure sinks the whole host; a single SIZE failure is isolated to that
+        # file. _resolve_paths records any listing-expansion failures into the
+        # same `failures` list.
+        sizes: list[FileSize] = []
+        failures: list[HostFailure] = []
+        try:
+            with self._session(spec.host) as ftp:
+                # SIZE is only reliable in binary mode: RFC 3659 lets a server
+                # report a different (line-ending-adjusted) count for an
+                # ASCII-mode SIZE than the bytes a binary RETR transfers, so we
+                # switch to TYPE I first to size what download would actually pull.
+                ftp.voidcmd("TYPE I")
+                for remote_path in self._resolve_paths(ftp, spec, failures):
+                    try:
+                        size = ftp.size(remote_path)
+                    except all_errors as exc:
+                        failures.append(
+                            HostFailure(
+                                host=spec.host,
+                                error=f"{type(exc).__name__}: {exc}",
+                                remote_path=remote_path,
+                            )
+                        )
+                        continue
+                    if size is None:
+                        # ftplib returns None when the server has no SIZE support.
+                        failures.append(
+                            HostFailure(
+                                host=spec.host,
+                                error="SIZE unsupported by server",
+                                remote_path=remote_path,
+                            )
+                        )
+                        continue
+                    sizes.append(
+                        FileSize(host=spec.host, remote_path=remote_path, size=size)
+                    )
+        except all_errors as exc:
+            # connect / login failed — host measured nothing.
+            failures.append(
+                HostFailure(host=spec.host, error=f"{type(exc).__name__}: {exc}")
+            )
+        return sizes, failures
 
     def _upload_worker(
         self,
@@ -719,6 +860,24 @@ def list_fleet(
     """
     downloader = FtpFleetDownloader(user=user, password=password, **kwargs)  # type: ignore[arg-type]
     return downloader.list_dirs(specs)
+
+
+def size_fleet(
+    specs: list[HostSpec],
+    *,
+    user: str,
+    password: str,
+    **kwargs: object,
+) -> SizingReport:
+    """One-call convenience wrapper for the fleet-wide sizing pass.
+
+    ``size_fleet(specs, user=..., password=...)`` estimates the bytes each file
+    would cost in memory across the fleet without downloading any; extra keyword
+    args (port, max_concurrency, connect_timeout, host_timeout, passive) are
+    forwarded to the constructor.
+    """
+    downloader = FtpFleetDownloader(user=user, password=password, **kwargs)  # type: ignore[arg-type]
+    return downloader.size_dirs(specs)
 
 
 # Characters illegal in a Windows path component (plus control chars). A Linux

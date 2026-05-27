@@ -24,6 +24,11 @@ used by the host app:
     200 response JSON:
         {"files":[{"host","remote_path","data_b64"}],
          "failures":[{"host","error","remote_path"}]}
+    POST /size_dirs_sknn_v3  request JSON (same shape as /download_sknn_v3):
+        {... ,"specs":[{"host","files":[...],"listings":[...]}]}
+    200 response JSON (per-file byte counts, no file bytes):
+        {"files":[{"host","remote_path","size"}],
+         "failures":[{"host","error","remote_path"}]}
     POST /upload_sknn_v3     request JSON (same tuning keys):
         {"specs":[{"host","files":[{"remote_path","data_b64"}]}]}
     200 response JSON:
@@ -73,6 +78,7 @@ except ImportError:  # copied beside fleet_downloader.py and imported bare
 # Keep in sync with the paths ftp_flask_downloader.py POSTs to.
 URL_DOWNLOAD = "/download_sknn_v3"
 URL_LIST = "/list_dirs_sknn_v3"
+URL_SIZE = "/size_dirs_sknn_v3"
 URL_UPLOAD = "/upload_sknn_v3"
 URL_HEALTH = "/healthz_sknn_v3"
 
@@ -184,6 +190,33 @@ def list_dirs():
         {
             "listings": [
                 {"host": l.host, "paths": l.paths} for l in report.listings
+            ],
+            "failures": [
+                {"host": x.host, "error": x.error, "remote_path": x.remote_path}
+                for x in report.failures
+            ],
+        }
+    )
+
+
+@ftp_proxy_sknn_v3.post(URL_SIZE)
+def size_dirs():
+    # The sizing pass over HTTP: resolve each host's paths and SIZE them,
+    # returning per-file byte counts only (no file bytes), so like the listing
+    # route it carries none of the base64/RAM weight the download route does.
+    denied = _unauthorized()
+    if denied is not None:
+        return denied
+
+    body = request.get_json(force=True)
+    specs = [_spec_from_wire(entry) for entry in body.get("specs", [])]
+    report = _downloader_from(body).size_dirs(specs)
+
+    return jsonify(
+        {
+            "files": [
+                {"host": f.host, "remote_path": f.remote_path, "size": f.size}
+                for f in report.files
             ],
             "failures": [
                 {"host": x.host, "error": x.error, "remote_path": x.remote_path}

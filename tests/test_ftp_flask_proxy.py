@@ -85,6 +85,18 @@ class FakeFTP:
             raise err
         self._script().setdefault("stored", {})[remote_path] = fp.read()
 
+    def voidcmd(self, cmd):
+        return "200 ok"
+
+    def size(self, remote_path):
+        sizes = self._script().get("sizes", {})
+        if remote_path in sizes:
+            return sizes[remote_path]
+        files = self._script().get("files", {})
+        if remote_path in files:
+            return len(files[remote_path])
+        raise error_perm(f"550 {remote_path}")
+
 
 def _bridge(flask_client, fail_hosts=None):
     """A stand-in for requests.post that routes to the Flask test client.
@@ -171,6 +183,14 @@ class FtpProxyPairTests(unittest.TestCase):
             client_mod.requests, "post", _bridge(fclient, fail_hosts)
         ):
             return self._make_dl(token, **kw).upload(specs)
+
+    def _size_dirs(self, specs, *, fail_hosts=None, token=None, **kw):
+        app = proxy_mod.create_app()
+        fclient = app.test_client()
+        with patch.object(core, "FTP", FakeFTP), patch.object(
+            client_mod.requests, "post", _bridge(fclient, fail_hosts)
+        ):
+            return self._make_dl(token, **kw).size_dirs(specs)
 
     def test_round_trip_returns_same_bytes(self):
         FakeFTP.scripts = {"h1": {"files": {"/log": b"hello"}}}
@@ -277,7 +297,7 @@ class FtpProxyPairTests(unittest.TestCase):
         for adapter in (core.FtpFleetDownloader, client_mod.FtpFleetDownloader):
             with self.subTest(adapter=adapter.__module__):
                 self.assertTrue(issubclass(adapter, core.FleetTransport))
-                for name in ("download", "list_dirs", "upload"):
+                for name in ("download", "list_dirs", "size_dirs", "upload"):
                     self.assertEqual(
                         _seam_params(getattr(adapter, name)),
                         _seam_params(getattr(core.FleetTransport, name)),
@@ -323,6 +343,49 @@ class FtpProxyPairTests(unittest.TestCase):
 
     def test_list_dirs_empty_specs_short_circuits(self):
         report = self._list_dirs([])
+        self.assertEqual(report.ok, 0)
+        self.assertEqual(report.ng, 0)
+
+    def test_size_dirs_through_proxy_returns_byte_counts(self):
+        FakeFTP.scripts = {
+            "h1": {
+                "listing": {"/MEAS": ["a.dat", "b.txt"]},
+                "files": {"/MEAS/a.dat": b"1234567890"},
+            }
+        }
+        report = self._size_dirs(
+            [HostSpec("h1", listings=[ListDir("/MEAS", "*.dat")])]
+        )
+        self.assertEqual(report.total_bytes, 10)
+        self.assertEqual(report.by_host(), {"h1": 10})
+        self.assertEqual(report.ng, 0)
+
+    def test_size_dirs_then_download_closes_the_loop(self):
+        FakeFTP.scripts = {
+            "h1": {"listing": {"/MEAS": ["a.dat"]}, "files": {"/MEAS/a.dat": b"DATA"}}
+        }
+        sizing = self._size_dirs(
+            [HostSpec("h1", listings=[ListDir("/MEAS", "*.dat")])]
+        )
+        report = self._download(sizing.to_specs())
+        self.assertEqual(report.grouped(), {"h1": {"/MEAS/a.dat": b"DATA"}})
+
+    def test_size_dirs_batch_transport_failure_isolated(self):
+        FakeFTP.scripts = {
+            "h1": {"files": {"/a": b"AAAA"}},
+            "h2": {"files": {"/a": b"AAAA"}},
+        }
+        report = self._size_dirs(
+            [HostSpec("h1", files=["/a"]), HostSpec("h2", files=["/a"])],
+            fail_hosts=["h2"],
+            request_batch=1,
+        )
+        self.assertEqual(report.total_bytes, 4)
+        self.assertEqual(report.ng, 1)
+        self.assertEqual(report.failures[0].host, "h2")
+
+    def test_size_dirs_empty_specs_short_circuits(self):
+        report = self._size_dirs([])
         self.assertEqual(report.ok, 0)
         self.assertEqual(report.ng, 0)
 

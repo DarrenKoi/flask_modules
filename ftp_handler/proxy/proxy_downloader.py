@@ -45,12 +45,14 @@ try:
     from ..direct_downloader.fleet_downloader import (
         DownloadReport,
         FileResult,
+        FileSize,
         HostFailure,
         HostListing,
         HostSpec,
         ListDir,
         ListingReport,
         OnFile,
+        SizingReport,
         UploadFile,
         UploadReport,
         UploadResult,
@@ -66,12 +68,14 @@ except ImportError:  # copied beside fleet_downloader.py and imported bare
     from fleet_downloader import (
         DownloadReport,
         FileResult,
+        FileSize,
         HostFailure,
         HostListing,
         HostSpec,
         ListDir,
         ListingReport,
         OnFile,
+        SizingReport,
         UploadFile,
         UploadReport,
         UploadResult,
@@ -85,14 +89,17 @@ __all__ = [
     "FtpFleetDownloader",
     "download_fleet",
     "list_fleet",
+    "size_fleet",
     "upload_fleet",
     "HostSpec",
     "ListDir",
     "DownloadReport",
     "FileResult",
+    "FileSize",
     "HostFailure",
     "HostListing",
     "ListingReport",
+    "SizingReport",
     "UploadFile",
     "UploadSpec",
     "UploadResult",
@@ -236,6 +243,27 @@ class FtpFleetDownloader:
             listings.extend(batch_listings)
             failures.extend(batch_failures)
         return ListingReport(listings=listings, failures=failures)
+
+    def size_dirs(self, specs: list[HostSpec]) -> SizingReport:
+        """Measure the fleet's file sizes through the proxy — no fetching.
+
+        Same surface as the direct downloader's ``size_dirs``: the proxy resolves
+        each host's paths and SIZEs them, returning per-file byte counts (no file
+        bytes), merged into one SizingReport. Like ``list_dirs`` it carries no
+        bytes, so memory is never the constraint — the batching only keeps each
+        HTTP request under the proxy's harakiri budget.
+        """
+        if not specs:
+            return SizingReport(files=[], failures=[])
+
+        files: list[FileSize] = []
+        failures: list[HostFailure] = []
+        for batch_files, batch_failures in self._post_batches(
+            specs, self._post_size_batch
+        ):
+            files.extend(batch_files)
+            failures.extend(batch_failures)
+        return SizingReport(files=files, failures=failures)
 
     def upload(self, specs: list[UploadSpec]) -> UploadReport:
         """Push files to the fleet through the proxy — same surface as direct.
@@ -385,6 +413,39 @@ class FtpFleetDownloader:
         ]
         return listings, failures
 
+    def _post_size_batch(
+        self,
+        batch: list[HostSpec],
+    ) -> tuple[list[FileSize], list[HostFailure]]:
+        try:
+            data = self._post("/size_dirs_sknn_v3", self._payload(batch))
+        except Exception as exc:  # noqa: BLE001 - whole-batch transport failure
+            return [], [
+                HostFailure(
+                    host=s.host,
+                    error=f"proxy request failed: {type(exc).__name__}: {exc}",
+                )
+                for s in batch
+            ]
+
+        files = [
+            FileSize(
+                host=item["host"],
+                remote_path=item["remote_path"],
+                size=item["size"],
+            )
+            for item in data.get("files", [])
+        ]
+        failures = [
+            HostFailure(
+                host=item["host"],
+                error=item["error"],
+                remote_path=item.get("remote_path"),
+            )
+            for item in data.get("failures", [])
+        ]
+        return files, failures
+
     def _post_upload_batch(
         self,
         batch: list[UploadSpec],
@@ -438,6 +499,18 @@ def list_fleet(
     """One-call wrapper, mirroring ftp_fleet_downloader.list_fleet."""
     downloader = FtpFleetDownloader(user=user, password=password, **kwargs)  # type: ignore[arg-type]
     return downloader.list_dirs(specs)
+
+
+def size_fleet(
+    specs: list[HostSpec],
+    *,
+    user: str,
+    password: str,
+    **kwargs: object,
+) -> SizingReport:
+    """One-call wrapper, mirroring ftp_fleet_downloader.size_fleet."""
+    downloader = FtpFleetDownloader(user=user, password=password, **kwargs)  # type: ignore[arg-type]
+    return downloader.size_dirs(specs)
 
 
 def upload_fleet(

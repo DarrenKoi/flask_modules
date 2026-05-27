@@ -17,6 +17,7 @@ from ftp_handler.direct_downloader import (
     download_fleet,
     list_fleet,
     save_to_dir,
+    size_fleet,
     specs_from_hosts,
     upload_fleet,
     upload_specs_from_hosts,
@@ -66,6 +67,35 @@ def example_listing_then_download() -> None:
     # ... decide what's worth pulling here ...
     report = dl.download(listing.to_specs())
     print(f"downloaded ok={report.ok} ng={report.ng}")
+
+
+def example_estimate_size_before_download() -> None:
+    """Estimate the in-memory RAM cost of a fleet run before pulling any bytes.
+
+    size_dirs resolves the same paths download would (fixed files + whatever the
+    listings discover) and asks each server its file size via the FTP SIZE
+    command — no file is transferred. report.total_bytes is the peak RAM a
+    collect-mode download of this exact set would hold at once; by_host() shows
+    where the weight sits. Feed the measured set straight into download via
+    to_specs() so you size and pull exactly the same files.
+    """
+    specs = specs_from_hosts(FLEET_HOSTS, listings=[ListDir("/MEAS", "*.dat")])
+    dl = FtpFleetDownloader(user=USER, password=PASSWORD)
+
+    sizing = dl.size_dirs(specs)
+    mib = sizing.total_bytes / 1024**2
+    print(f"{sizing.ok} files, {mib:.1f} MiB total across {len(sizing.by_host())} hosts")
+    print("heaviest hosts:", sorted(sizing.by_host().items(), key=lambda kv: -kv[1])[:5])
+
+    # Budget check: only pull into memory if it fits; otherwise stream to disk.
+    if sizing.total_bytes < 500 * 1024**2:
+        report = dl.download(sizing.to_specs())            # safe to hold in RAM
+    else:
+        report = dl.download(sizing.to_specs(), on_file=save_to_dir("/data/eqp"))
+    print(f"downloaded ok={report.ok} ng={report.ng}")
+
+    # One-call form: size_fleet(specs, user=..., password=...)
+    _ = size_fleet(specs, user=USER, password=PASSWORD, max_concurrency=16)
 
 
 def example_streaming_to_disk() -> None:

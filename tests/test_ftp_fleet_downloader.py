@@ -20,6 +20,7 @@ from ftp_handler.direct_downloader.fleet_downloader import (
     HostSpec,
     ListDir,
     ListingReport,
+    SizingReport,
     UploadFile,
     UploadReport,
     UploadSpec,
@@ -27,6 +28,7 @@ from ftp_handler.direct_downloader.fleet_downloader import (
     download_fleet,
     list_fleet,
     save_to_dir,
+    size_fleet,
     specs_from_hosts,
     upload_fleet,
     upload_specs_from_hosts,
@@ -106,6 +108,29 @@ class FakeFTP:
             raise err
         self._script().setdefault("stored", {})[remote_path] = fp.read()
 
+    def voidcmd(self, cmd):
+        # size_dirs issues `TYPE I` before sizing; nothing to do for the fake.
+        return "200 ok"
+
+    def size(self, remote_path):
+        # An explicit `sizes` dict wins (lets a test inject None/Exception to
+        # exercise unsupported-SIZE and per-file failure paths); otherwise the
+        # size is derived from the file's bytes, so the same script that drives
+        # download also drives sizing.
+        sizes = self._script().get("sizes", {})
+        if remote_path in sizes:
+            value = sizes[remote_path]
+            if isinstance(value, Exception):
+                raise value
+            return value
+        files = self._script().get("files", {})
+        if remote_path in files:
+            value = files[remote_path]
+            if isinstance(value, Exception):
+                raise value
+            return len(value)
+        raise error_perm(f"550 No such file: {remote_path}")
+
 
 class _FakeFTPTestCase(unittest.TestCase):
     """Resets the shared FakeFTP script around every test."""
@@ -130,6 +155,11 @@ class _FakeFTPTestCase(unittest.TestCase):
         with patch(FTP_PATCH_TARGET, FakeFTP):
             dl = FtpFleetDownloader(user="u", password="p", **kwargs)
             return dl.upload(specs)
+
+    def _size(self, specs, **kwargs) -> SizingReport:
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p", **kwargs)
+            return dl.size_dirs(specs)
 
 
 class FtpFleetDownloaderTests(_FakeFTPTestCase):
@@ -590,6 +620,91 @@ class ListDirsTests(_FakeFTPTestCase):
                 max_concurrency=4,
             )
         self.assertEqual(report.grouped(), {"h1": ["/MEAS/a.dat"]})
+
+
+class SizingTests(_FakeFTPTestCase):
+    def test_sizes_fixed_paths_without_fetching(self):
+        # SIZE only; the file bytes drive the fake's reported size but are never
+        # RETR'd in a sizing pass.
+        FakeFTP.scripts = {"h1": {"files": {"/log/a.log": b"AAAA", "/log/b.log": b"BB"}}}
+        report = self._size([HostSpec("h1", files=["/log/a.log", "/log/b.log"])])
+        self.assertEqual(report.ok, 2)
+        self.assertEqual(report.ng, 0)
+        self.assertEqual(report.total_bytes, 6)
+
+    def test_sizes_discovered_paths_from_listings(self):
+        FakeFTP.scripts = {
+            "h1": {
+                "listing": {"/MEAS": ["a.dat", "b.txt"]},
+                "files": {"/MEAS/a.dat": b"1234567890"},
+            }
+        }
+        report = self._size([HostSpec("h1", listings=[ListDir("/MEAS", "*.dat")])])
+        self.assertEqual(report.total_bytes, 10)
+        self.assertEqual([f.remote_path for f in report.files], ["/MEAS/a.dat"])
+
+    def test_total_bytes_and_by_host_split(self):
+        FakeFTP.scripts = {
+            "h1": {"files": {"/a": b"AAA"}},          # 3 bytes
+            "h2": {"files": {"/b": b"BBBBB", "/c": b"C"}},  # 6 bytes
+        }
+        report = self._size(
+            [HostSpec("h1", files=["/a"]), HostSpec("h2", files=["/b", "/c"])]
+        )
+        self.assertEqual(report.total_bytes, 9)
+        self.assertEqual(report.by_host(), {"h1": 3, "h2": 6})
+
+    def test_per_file_size_failure_isolated(self):
+        FakeFTP.scripts = {
+            "h1": {"files": {"/ok": b"OK"}, "sizes": {"/bad": error_perm("550")}}
+        }
+        report = self._size([HostSpec("h1", files=["/ok", "/bad"])])
+        self.assertEqual(report.total_bytes, 2)
+        self.assertEqual(report.ng, 1)
+        self.assertEqual(report.failures[0].remote_path, "/bad")
+
+    def test_unsupported_size_recorded_not_counted(self):
+        # ftplib returns None when the server lacks SIZE support — that file is a
+        # failure, never silently summed as zero.
+        FakeFTP.scripts = {"h1": {"sizes": {"/x": None}}}
+        report = self._size([HostSpec("h1", files=["/x"])])
+        self.assertEqual(report.ok, 0)
+        self.assertEqual(report.ng, 1)
+        self.assertIn("SIZE unsupported", report.failures[0].error)
+        self.assertEqual(report.total_bytes, 0)
+
+    def test_per_host_connect_error_isolation(self):
+        FakeFTP.scripts = {
+            "h1": {"files": {"/a": b"AAAA"}},
+            "h2": {"connect_error": socket.timeout("dead")},
+        }
+        report = self._size(
+            [HostSpec("h1", files=["/a"]), HostSpec("h2", files=["/a"])]
+        )
+        self.assertEqual(report.total_bytes, 4)
+        self.assertEqual(report.ng, 1)
+        self.assertEqual(report.failures[0].host, "h2")
+
+    def test_to_specs_round_trips_into_download(self):
+        FakeFTP.scripts = {
+            "h1": {"listing": {"/MEAS": ["a.dat"]}, "files": {"/MEAS/a.dat": b"DATA"}}
+        }
+        sizing = self._size([HostSpec("h1", listings=[ListDir("/MEAS", "*.dat")])])
+        report = self._run(sizing.to_specs())
+        self.assertEqual(report.grouped(), {"h1": {"/MEAS/a.dat": b"DATA"}})
+
+    def test_empty_report_failure_ratio_is_zero(self):
+        report = self._size([])
+        self.assertEqual(report.total_bytes, 0)
+        self.assertEqual(report.failure_ratio, 0.0)
+
+    def test_size_fleet_helper(self):
+        FakeFTP.scripts = {"h1": {"files": {"/a": b"AAAA"}}}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            report = size_fleet(
+                [HostSpec("h1", files=["/a"])], user="u", password="p"
+            )
+        self.assertEqual(report.total_bytes, 4)
 
 
 class UploadTests(_FakeFTPTestCase):
