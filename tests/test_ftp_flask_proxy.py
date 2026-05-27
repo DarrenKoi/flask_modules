@@ -35,7 +35,7 @@ for _sub in ("core", "direct_downloader", "proxy"):
 import fleet_downloader as core  # noqa: E402
 import proxy_downloader as client_mod  # noqa: E402
 import flask_proxy as proxy_mod  # noqa: E402
-from fleet_downloader import HostSpec, ListDir  # noqa: E402
+from fleet_downloader import HostSpec, ListDir, UploadFile, UploadSpec  # noqa: E402
 
 
 class FakeFTP:
@@ -77,6 +77,13 @@ class FakeFTP:
         if remote_path not in files:
             raise error_perm(f"550 {remote_path}")
         callback(files[remote_path])
+
+    def storbinary(self, cmd, fp):
+        remote_path = cmd.split(" ", 1)[1]
+        err = self._script().get("store_errors", {}).get(remote_path)
+        if err is not None:
+            raise err
+        self._script().setdefault("stored", {})[remote_path] = fp.read()
 
 
 def _bridge(flask_client, fail_hosts=None):
@@ -128,17 +135,26 @@ class FtpProxyPairTests(unittest.TestCase):
         FakeFTP.scripts = {}
         os.environ.pop("FTP_PROXY_TOKEN", None)
 
+    def _make_dl(self, token, **kw):
+        # proxy_url/token are module constants now (the seam keeps the
+        # constructor identical to the direct downloader). The client token comes
+        # from PROXY_TOKEN; to simulate a client configured with a specific token
+        # independent of the server's env-based check, set the attribute directly.
+        # client_workers=1 keeps the Flask test client single-threaded in tests.
+        dl = client_mod.FtpFleetDownloader(
+            user="u", password="p", client_workers=1, **kw
+        )
+        if token is not None:
+            dl.token = token
+        return dl
+
     def _download(self, specs, *, on_file=None, fail_hosts=None, token=None, **kw):
         app = proxy_mod.create_app()
         fclient = app.test_client()
-        # client_workers=1 keeps the Flask test client single-threaded in tests.
         with patch.object(core, "FTP", FakeFTP), patch.object(
             client_mod.requests, "post", _bridge(fclient, fail_hosts)
         ):
-            dl = client_mod.FtpFleetDownloader(
-                user="u", password="p", token=token, client_workers=1, **kw
-            )
-            return dl.download(specs, on_file=on_file)
+            return self._make_dl(token, **kw).download(specs, on_file=on_file)
 
     def _list_dirs(self, specs, *, fail_hosts=None, token=None, **kw):
         app = proxy_mod.create_app()
@@ -146,10 +162,15 @@ class FtpProxyPairTests(unittest.TestCase):
         with patch.object(core, "FTP", FakeFTP), patch.object(
             client_mod.requests, "post", _bridge(fclient, fail_hosts)
         ):
-            dl = client_mod.FtpFleetDownloader(
-                user="u", password="p", token=token, client_workers=1, **kw
-            )
-            return dl.list_dirs(specs)
+            return self._make_dl(token, **kw).list_dirs(specs)
+
+    def _upload(self, specs, *, fail_hosts=None, token=None, **kw):
+        app = proxy_mod.create_app()
+        fclient = app.test_client()
+        with patch.object(core, "FTP", FakeFTP), patch.object(
+            client_mod.requests, "post", _bridge(fclient, fail_hosts)
+        ):
+            return self._make_dl(token, **kw).upload(specs)
 
     def test_round_trip_returns_same_bytes(self):
         FakeFTP.scripts = {"h1": {"files": {"/log": b"hello"}}}
@@ -234,6 +255,10 @@ class FtpProxyPairTests(unittest.TestCase):
             "HostSpec",
             "ListDir",
             "ListingReport",
+            "UploadFile",
+            "UploadSpec",
+            "UploadResult",
+            "UploadReport",
         ):
             self.assertIs(getattr(client, name), getattr(direct, name))
         self.assertIs(proxy.HostSpec, direct.HostSpec)
@@ -252,7 +277,7 @@ class FtpProxyPairTests(unittest.TestCase):
         for adapter in (core.FtpFleetDownloader, client_mod.FtpFleetDownloader):
             with self.subTest(adapter=adapter.__module__):
                 self.assertTrue(issubclass(adapter, core.FleetTransport))
-                for name in ("download", "list_dirs"):
+                for name in ("download", "list_dirs", "upload"):
                     self.assertEqual(
                         _seam_params(getattr(adapter, name)),
                         _seam_params(getattr(core.FleetTransport, name)),
@@ -300,6 +325,65 @@ class FtpProxyPairTests(unittest.TestCase):
         report = self._list_dirs([])
         self.assertEqual(report.ok, 0)
         self.assertEqual(report.ng, 0)
+
+    def test_upload_round_trip_lands_bytes_on_proxy_side(self):
+        # Client base64s the bytes, proxy decodes and STORs them. The fake on the
+        # proxy side records what landed — proves the bytes survived the wire.
+        FakeFTP.scripts = {"h1": {}}
+        report = self._upload(
+            [UploadSpec("h1", files=[UploadFile("/INBOX/r.csv", b"a,b\n1,2")])]
+        )
+        self.assertEqual(report.grouped(), {"h1": ["/INBOX/r.csv"]})
+        self.assertEqual(report.ng, 0)
+        self.assertEqual(FakeFTP.scripts["h1"]["stored"], {"/INBOX/r.csv": b"a,b\n1,2"})
+
+    def test_upload_batch_transport_failure_isolated(self):
+        FakeFTP.scripts = {"h1": {}, "h2": {}}
+        report = self._upload(
+            [
+                UploadSpec("h1", files=[UploadFile("/a", b"A")]),
+                UploadSpec("h2", files=[UploadFile("/a", b"A")]),
+            ],
+            fail_hosts={"h2"},
+            request_batch=1,
+        )
+        self.assertEqual(report.grouped(), {"h1": ["/a"]})
+        self.assertEqual(report.ng, 1)
+        self.assertEqual(report.failures[0].host, "h2")
+        self.assertIn("proxy request failed", report.failures[0].error)
+
+    def test_upload_empty_specs_short_circuits(self):
+        report = self._upload([])
+        self.assertEqual(report.ok, 0)
+        self.assertEqual(report.ng, 0)
+
+    def test_proxy_url_is_module_constant_not_a_constructor_arg(self):
+        # Regression guard for the seam: passing proxy_url to the constructor
+        # used to work on the proxy but break the moment a call site swapped to
+        # the direct downloader (which has no such arg). proxy_url is a module
+        # constant now, so the constructor stays identical across the swap.
+        with self.assertRaises(TypeError):
+            client_mod.FtpFleetDownloader(
+                user="u", password="p", proxy_url="http://x"
+            )
+
+        with patch.object(client_mod, "PROXY_URL", "http://proxy.host:9999"):
+            dl = client_mod.FtpFleetDownloader(user="u", password="p")
+        self.assertEqual(dl.proxy_url, "http://proxy.host:9999")
+
+    def test_proxy_constructor_accepts_direct_downloader_args(self):
+        # A call site written for the direct downloader must construct the proxy
+        # unchanged — swapping the import line is the whole seam.
+        dl = client_mod.FtpFleetDownloader(
+            user="u",
+            password="p",
+            port=21,
+            max_concurrency=48,
+            connect_timeout=8.0,
+            host_timeout=45.0,
+            passive=True,
+        )
+        self.assertEqual(dl.proxy_url, client_mod.PROXY_URL)
 
     def test_list_fleet_wrapper_matches_direct(self):
         # The proxy client's list_fleet mirrors ftp_fleet_downloader.list_fleet.

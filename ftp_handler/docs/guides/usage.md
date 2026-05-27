@@ -73,6 +73,25 @@ dl.download(specs, on_file=save_to_dir("/data/eqp"))   # 최대 RAM ~ concurrenc
 연결 후 멈춰버린 호스트를 backstop 하며, `max_concurrency`는 연결 수(및 RAM)를
 제한한다. `download_fleet` / `list_fleet`은 한 번 호출로 끝나는 함수 래퍼다.
 
+**업로드(쓰기 방향):** 같은 fan-out으로 원격 FTP에 파일을 올린다. `UploadFile`은
+디스크 파일이 아니라 raw `bytes`를 받아 `BytesIO`로 곧장 STOR 하므로 디스크를 거치지
+않는다. 호스트 단위뿐 아니라 파일 단위로도 실패가 격리된다. `upload_specs_from_hosts`는
+같은 파일을 여러 호스트에 올리는 흔한 경우의 헬퍼다:
+
+```python
+from ftp_handler.direct_downloader import (
+    FtpFleetDownloader, UploadSpec, UploadFile, upload_specs_from_hosts,
+)
+
+payload = df.to_csv().encode()   # 메모리상의 바이트 — 디스크에 쓰지 않음
+specs = upload_specs_from_hosts(hosts, files=[UploadFile("/INBOX/report.csv", payload)])
+report = FtpFleetDownloader(user="u", password="p").upload(specs)
+print(report.ok, report.ng, report.grouped())   # {host: [remote_path, ...]}
+```
+
+호스트마다 다른 파일을 올리려면 `UploadSpec`을 직접 만든다. `upload_fleet`은 한 번
+호출로 끝나는 함수 래퍼다.
+
 ---
 
 ## 케이스 3 — HTTP 프록시 경유의 방화벽 안 클라이언트 (`proxy`)
@@ -94,15 +113,16 @@ from ftp_handler.proxy.flask_proxy import ftp_proxy_sknn_v3   # 또는 create_ap
 app.register_blueprint(ftp_proxy_sknn_v3)
 ```
 
-**클라이언트 절반** — direct 다운로더와 동일하고, import만 다르다:
+**클라이언트 절반** — direct 다운로더와 동일하고, import만 다르다. 프록시 위치/토큰은
+생성자 인자가 아니라 `proxy_downloader.py` 상단의 모듈 상수(`PROXY_URL`,
+`PROXY_TOKEN`)로 준다. 그래야 생성자 시그니처가 direct와 똑같아져 import 한 줄만
+바꿔도 호출부가 깨지지 않는다:
 
 ```python
+# proxy_downloader.py 상단에서 한 번만 편집: PROXY_URL = "http://proxy.host:8080"
 from ftp_handler.proxy import FtpFleetDownloader, HostSpec, ListDir, save_to_dir
 
-dl = FtpFleetDownloader(
-    user="u", password="p",
-    proxy_url="http://proxy.host:8080",   # 또는 환경변수 FTP_PROXY_URL
-)
+dl = FtpFleetDownloader(user="u", password="p")   # 프록시 위치는 PROXY_URL 상수
 report = dl.download(specs, on_file=save_to_dir(r"C:\eqp"))  # on_file은 로컬에서 실행
 ```
 
@@ -110,6 +130,10 @@ report = dl.download(specs, on_file=save_to_dir(r"C:\eqp"))  # on_file은 로컬
 객체라서 `report.grouped()`, `to_specs()` 등이 똑같이 동작한다. copy-out: 이 쌍에
 `fleet_downloader.py`와 `listing.py`를 더하면 클라이언트 PC에 평평하게 떨궈 bare
 이름으로 import 할 수 있다.
+
+`download` / `list_dirs`와 마찬가지로 `upload`도 같은 표면으로 프록시 너머에서 동작한다
+(케이스 2의 업로드 예제에서 import만 `ftp_handler.proxy`로 바꾸면 된다). 클라이언트가
+바이트를 base64로 실어 보내면 프록시가 풀어서 STOR 한다.
 
 ---
 
@@ -225,6 +249,59 @@ report = collect_fleet(
 )
 print(report.ok, report.ng, report.failure_ratio)
 ```
+
+### 텍스트 vs 바이너리 (이미지 등)
+
+`f.data`(또는 `parse`의 `data`)는 언제나 원시 `bytes`다. **무엇으로 다루느냐**만
+파일 종류에 따라 다르다:
+
+- **텍스트 로그** → `data.decode("utf-8", errors="replace")`로 `str`로 디코딩한다
+  (위 `parse_records` 참고). 한국어 Windows 툴이 CP949를 내보내면 `data.decode("cp949")`.
+- **이미지·압축 파일·`.dat` 블롭** → **디코딩하지 않는다.** 이미지는 어떤 인코딩의
+  텍스트도 아니므로 UTF-8 디코딩은 `UnicodeDecodeError`를 내거나(또는 `errors=`로
+  뭉개서) 데이터를 망가뜨린다. `bytes` 그대로 두고 `io.BytesIO`로 감싸 라이브러리에
+  넘긴다.
+
+이미지 파일을 다루는 예 — 디코딩 없이 메타데이터를 뽑아 색인하고, 원시 바이트는
+`archive`가 이미 MinIO에 그대로 저장한다:
+
+```python
+import io
+from PIL import Image
+
+def parse_records(host: str, remote_path: str, data: bytes) -> list[dict]:
+    if remote_path.lower().endswith((".png", ".jpg", ".jpeg", ".bmp")):
+        # 디코딩하지 않음 — bytes를 그대로 이미지 라이브러리에 넘긴다.
+        img = Image.open(io.BytesIO(data))
+        return [{
+            "doc_id": f"{host}:{remote_path}",
+            "host": host,
+            "remote_path": remote_path,
+            "width": img.width,
+            "height": img.height,
+            "format": img.format,
+            # 픽셀이 아니라 메타데이터만 색인한다; 원시 이미지는 archive가 MinIO에 보관.
+        }]
+    # 그 외(텍스트 로그)는 디코딩 경로로.
+    text = data.decode("utf-8", errors="replace")
+    return [{"doc_id": f"{host}:{remote_path}", "host": host,
+             "remote_path": remote_path, "line": line}
+            for line in text.splitlines() if line]
+```
+
+원시 바이트를 정확한 MIME 타입으로 보관하려면 `archive`에서 `content_type`을 지정한다:
+
+```python
+def archive(host: str, remote_path: str, data: bytes) -> str:
+    key = f"{host}/{remote_path.lstrip('/')}"
+    ctype = "image/png" if remote_path.lower().endswith(".png") else "application/octet-stream"
+    storage.put(key, data, content_type=ctype)   # bytes 그대로 — 디코딩 없음
+    return key
+```
+
+(케이스 5 밖에서, 리포트의 바이트를 직접 쓸 때도 같다: 텍스트는
+`f.data.decode(...)`, 이미지는 `Image.open(io.BytesIO(f.data))` 또는
+`Path("out.png").write_bytes(f.data)`.)
 
 ### 결과 읽기 & 알림
 

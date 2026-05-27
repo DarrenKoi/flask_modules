@@ -11,7 +11,15 @@ import 줄뿐이라, 호출부는 다른 변경 없이 전송 방식만 바꿀 �
 """
 
 # 클라이언트 쪽: direct 다운로더와 같은 이름들을 HTTP 너머로 사용한다.
-from ftp_handler.proxy import FtpFleetDownloader, HostSpec, ListDir, save_to_dir
+from ftp_handler.proxy import (
+    FtpFleetDownloader,
+    HostSpec,
+    ListDir,
+    UploadFile,
+    UploadSpec,
+    save_to_dir,
+    upload_specs_from_hosts,
+)
 
 USER = "ftpuser"
 PASSWORD = "ftppass"
@@ -37,17 +45,34 @@ def example_run_the_proxy_server() -> None:
 def example_download_through_proxy() -> None:
     """클라이언트 절반 — direct 다운로더의 대체재로 HTTP 너머에서 동작한다.
 
-    proxy_url(또는 환경변수 FTP_PROXY_URL)로 프록시를 가리킨다. 토큰 없음: 프록시는
-    인증 없이 동작한다. on_file은 여전히 여기 클라이언트에서 실행되므로 save_to_dir는
-    파일을 로컬 PC에 떨군다.
+    프록시 위치는 proxy_downloader.py 상단의 모듈 상수 PROXY_URL로 지정한다(생성자
+    인자가 아니다 — 그래야 생성자 시그니처가 direct 다운로더와 똑같아서 import 한
+    줄만 바꿔도 깨지지 않는다). 토큰 없음: 프록시는 인증 없이 동작한다. on_file은
+    여전히 여기 클라이언트에서 실행되므로 save_to_dir는 파일을 로컬 PC에 떨군다.
+
+        # proxy_downloader.py 상단에서 한 번만 편집:
+        # PROXY_URL = "http://proxy.host:8080"
     """
     specs = [HostSpec(host, listings=[ListDir("/MEAS", "*.dat")]) for host in FLEET_HOSTS]
-    dl = FtpFleetDownloader(
-        user=USER,
-        password=PASSWORD,
-        proxy_url="http://proxy.host:8080",
-    )
+    dl = FtpFleetDownloader(user=USER, password=PASSWORD)   # 프록시 위치는 PROXY_URL 상수
     report = dl.download(specs, on_file=save_to_dir(r"C:\eqp_downloads"))
+    print(f"ok={report.ok} ng={report.ng}")
+
+
+def example_upload_through_proxy() -> None:
+    """클라이언트 절반 — 메모리상의 바이트를 프록시 너머로 원격 FTP에 올린다.
+
+    ``UploadFile``은 디스크 파일이 아니라 raw ``bytes``를 받는다. 클라이언트가
+    바이트를 base64로 실어 보내면 프록시가 풀어서 STOR한다. download의 ``request_batch``
+    와 동일한 배치 방식으로 프록시 쪽 메모리를 제한한다(ADR 0001, 요청 방향에 적용).
+    download과 마찬가지로 import 한 줄만 바꾸면 direct 버전과 동일하게 쓸 수 있다.
+    """
+    payload = b"col_a,col_b\n1,2\n"  # 예: df.to_csv().encode(); 디스크를 거치지 않음
+    specs = upload_specs_from_hosts(
+        FLEET_HOSTS, files=[UploadFile("/INBOX/report.csv", payload)]
+    )
+    dl = FtpFleetDownloader(user=USER, password=PASSWORD)   # 프록시 위치는 PROXY_URL 상수
+    report = dl.upload(specs)
     print(f"ok={report.ok} ng={report.ng}")
 
 

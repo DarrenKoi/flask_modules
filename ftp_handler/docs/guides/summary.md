@@ -38,10 +38,12 @@ ftp_handler/
 ### `direct_downloader` — 동시 플릿, 직접 FTP
 - **`FtpFleetDownloader`** (`fleet_downloader.py`): 동기식, **이벤트 루프 없음**
   (순수 `ThreadPoolExecutor`)이라 async 웹 워커를 포함한 어떤 컨텍스트에서도
-  안전하다. `download`(수집 또는 `on_file`로 스트리밍)와 `list_dirs`(탐색 패스 →
-  `to_specs()` → `download`)가 하나의 엔진을 공유하며 `max_concurrency` 상한,
-  호스트별 타임아웃, 호스트별 실패 격리를 갖는다. 헬퍼: `specs_from_hosts`,
-  `download_fleet`, `list_fleet`, `save_to_dir`.
+  안전하다. `download`(수집 또는 `on_file`로 스트리밍), `list_dirs`(탐색 패스 →
+  `to_specs()` → `download`), `upload`(쓰기 방향; `UploadSpec`/`UploadFile`이 메모리상
+  `bytes`를 `BytesIO`로 곧장 STOR — 디스크 파일 불필요, 파일 단위 실패 격리)가 하나의
+  엔진을 공유하며 `max_concurrency` 상한, 호스트별 타임아웃, 호스트별 실패 격리를
+  갖는다. 헬퍼: `specs_from_hosts`, `download_fleet`, `list_fleet`, `save_to_dir`,
+  `upload_specs_from_hosts`, `upload_fleet`.
 - **`collect_fleet` / `build_host_specs`** (`collect.py`): 파일마다 archive → parse
   → index. 각 단계를 콜러블로 주입받으므로 minio/opensearch를 import 하지 않는다 —
   DAG은 얇게 유지되고 이 계층은 단위 테스트가 가능하다.

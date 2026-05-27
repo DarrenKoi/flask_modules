@@ -102,6 +102,42 @@ class FileResult:
 
 
 @dataclass(slots=True)
+class UploadFile:
+    """One file to push to a host: the remote destination path and its bytes.
+
+    The mirror of a download's ``FileResult`` for the write direction — here the
+    caller supplies ``data`` (a download returns it). ``remote_path`` is STOR'd
+    verbatim and overwrites any existing file at that path.
+    """
+
+    remote_path: str
+    data: bytes
+
+
+@dataclass(slots=True)
+class UploadSpec:
+    """One equipment host and the files to push to it in a run.
+
+    The upload counterpart to ``HostSpec``: ``files`` are uploaded over a single
+    FTP connection that is opened once, reused for every STOR, then closed.
+    There is no listing analogue — upload destinations are always explicit.
+    """
+
+    host: str
+    files: list[UploadFile] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class UploadResult:
+    """A successfully uploaded file. Unlike ``FileResult`` it carries no bytes —
+    the caller already holds the source data; this only records that the STOR
+    landed."""
+
+    host: str
+    remote_path: str
+
+
+@dataclass(slots=True)
 class HostFailure:
     """A failed download. ``remote_path`` is ``None`` when the failure happened
     before any specific file (connect / login / directory listing)."""
@@ -141,6 +177,38 @@ class DownloadReport:
         out: dict[str, dict[str, bytes]] = {}
         for f in self.files:
             out.setdefault(f.host, {})[f.remote_path] = f.data
+        return out
+
+
+@dataclass(slots=True)
+class UploadReport:
+    """Outcome of a fleet upload run, mirroring ``DownloadReport``'s shape so
+    the same ``ok`` / ``ng`` / ``failure_ratio`` threshold-alerting code works
+    unchanged for the write direction."""
+
+    results: list[UploadResult]
+    failures: list[HostFailure]
+
+    @property
+    def ok(self) -> int:
+        return len(self.results)
+
+    @property
+    def ng(self) -> int:
+        return len(self.failures)
+
+    @property
+    def failure_ratio(self) -> float:
+        """Fraction of attempted units that failed, for threshold-based
+        alerting. 0.0 when nothing was attempted."""
+        total = self.ok + self.ng
+        return self.ng / total if total else 0.0
+
+    def grouped(self) -> dict[str, list[str]]:
+        """Uploaded paths as ``{host: [remote_path, ...]}``."""
+        out: dict[str, list[str]] = {}
+        for r in self.results:
+            out.setdefault(r.host, []).append(r.remote_path)
         return out
 
 
@@ -203,9 +271,10 @@ class FleetTransport(Protocol):
     same surface over HTTP). A call site swaps one import line between them and
     nothing else changes — that swap is the whole point of the seam.
 
-    Both phases of a fleet run are on the seam: ``list_dirs`` (the
-    look-before-you-download listing pass) and ``download``. The conformance test
-    guards that both adapters keep matching both methods, so neither path drifts.
+    All three fleet operations are on the seam: ``list_dirs`` (the
+    look-before-you-download listing pass), ``download``, and ``upload`` (the
+    write direction). The conformance test guards that both adapters keep
+    matching every method, so neither path drifts.
     """
 
     def download(
@@ -213,6 +282,8 @@ class FleetTransport(Protocol):
     ) -> DownloadReport: ...
 
     def list_dirs(self, specs: list[HostSpec]) -> ListingReport: ...
+
+    def upload(self, specs: list[UploadSpec]) -> UploadReport: ...
 
 
 class FtpFleetDownloader:
@@ -297,6 +368,22 @@ class FtpFleetDownloader:
         """
         listings, failures = self._run_fleet(specs, self._list_worker)
         return ListingReport(listings=listings, failures=failures)
+
+    def upload(self, specs: list[UploadSpec]) -> UploadReport:
+        """Push every spec's files to its host concurrently and return a report.
+
+        The write-direction counterpart to ``download``: each host's files are
+        STOR'd over one reused connection, overwriting any file already at the
+        destination path. Same concurrency cap, per-host ``host_timeout``
+        backstop, per-host AND per-file failure isolation, and event-loop-free
+        safety as ``download`` — they share the ``_run_fleet`` engine.
+
+        Bytes live in memory here (``UploadSpec.files`` carries them), so peak
+        RAM is the sum of all queued upload data; for a large push, send it in
+        chunks of specs rather than one giant call.
+        """
+        results, failures = self._run_fleet(specs, self._upload_worker)
+        return UploadReport(results=results, failures=failures)
 
     # ── concurrent orchestration (private) ──────────────────────────────────
     @contextmanager
@@ -451,6 +538,40 @@ class FtpFleetDownloader:
             return [], failures
         return [HostListing(host=spec.host, paths=paths)], failures
 
+    def _upload_worker(
+        self,
+        spec: "UploadSpec",
+    ) -> tuple[list[UploadResult], list[HostFailure]]:
+        # Write-direction counterpart to _host_worker: connect once, STOR each
+        # file. A connect/login failure sinks the whole host (no file got a
+        # chance); a single STOR failure is isolated to that file and never
+        # aborts the host's remaining uploads.
+        results: list[UploadResult] = []
+        failures: list[HostFailure] = []
+        try:
+            with self._session(spec.host) as ftp:
+                for item in spec.files:
+                    try:
+                        ftp.storbinary(f"STOR {item.remote_path}", BytesIO(item.data))
+                    except all_errors as exc:
+                        failures.append(
+                            HostFailure(
+                                host=spec.host,
+                                error=f"{type(exc).__name__}: {exc}",
+                                remote_path=item.remote_path,
+                            )
+                        )
+                    else:
+                        results.append(
+                            UploadResult(host=spec.host, remote_path=item.remote_path)
+                        )
+        except all_errors as exc:
+            # connect / login failed — no file got a chance.
+            failures.append(
+                HostFailure(host=spec.host, error=f"{type(exc).__name__}: {exc}")
+            )
+        return results, failures
+
     def _resolve_paths(
         self,
         ftp: FTP,
@@ -529,6 +650,40 @@ def specs_from_hosts(
         HostSpec(host=host, files=list(files or []), listings=list(listings or []))
         for host in hosts
     ]
+
+
+def upload_specs_from_hosts(
+    hosts: list[str],
+    *,
+    files: list[UploadFile],
+) -> list[UploadSpec]:
+    """Wrap a plain host list into ``UploadSpec`` objects sharing the same files.
+
+    The common write case: push the SAME file(s) to every host (a recipe, a
+    config drop). Each spec gets its own copy of the list so mutating one host's
+    spec never bleeds into another's::
+
+        specs = upload_specs_from_hosts(ips, files=[UploadFile("/INBOX/r.csv", data)])
+        report = FtpFleetDownloader(user=u, password=p).upload(specs)
+    """
+    return [UploadSpec(host=host, files=list(files)) for host in hosts]
+
+
+def upload_fleet(
+    specs: list[UploadSpec],
+    *,
+    user: str,
+    password: str,
+    **kwargs: object,
+) -> UploadReport:
+    """One-call convenience wrapper around ``FtpFleetDownloader.upload``.
+
+    ``upload_fleet(specs, user=..., password=...)`` pushes files across the
+    fleet; extra keyword args (port, max_concurrency, connect_timeout,
+    host_timeout, passive) are forwarded to the constructor.
+    """
+    downloader = FtpFleetDownloader(user=user, password=password, **kwargs)  # type: ignore[arg-type]
+    return downloader.upload(specs)
 
 
 def download_fleet(

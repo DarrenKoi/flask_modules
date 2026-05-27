@@ -284,8 +284,12 @@ report = dl.download(specs)                 # same call as direct mode
 Notes:
 - **Security:** the FTP password and file bytes cross the HTTP hop — run the
   proxy behind **HTTPS** and set `FTP_PROXY_TOKEN` (the proxy enforces
-  `Authorization: Bearer <token>`). Constructor `proxy_url`/`token` override the
-  env defaults.
+  `Authorization: Bearer <token>`).
+- **Seam-clean config:** proxy location/auth are module constants in
+  `proxy_downloader.py` (`PROXY_URL`, `PROXY_TOKEN`), **not** constructor args —
+  that keeps the client constructor signature identical to the direct
+  downloader, so a shared call site swaps the import line and passes nothing
+  transport-specific. Edit the constants once for the deployment.
 - **Batching:** the client splits hosts into `request_batch` (default 5) and
   POSTs `client_workers` (default 4) batches concurrently, bounding response
   size and mirroring the direct fan-out. A whole-batch transport failure marks

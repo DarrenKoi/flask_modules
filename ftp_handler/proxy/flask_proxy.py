@@ -24,6 +24,11 @@ used by the host app:
     200 response JSON:
         {"files":[{"host","remote_path","data_b64"}],
          "failures":[{"host","error","remote_path"}]}
+    POST /upload_sknn_v3     request JSON (same tuning keys):
+        {"specs":[{"host","files":[{"remote_path","data_b64"}]}]}
+    200 response JSON:
+        {"results":[{"host","remote_path"}],
+         "failures":[{"host","error","remote_path"}]}
     GET  /healthz_sknn_v3 -> {"status":"ok"}
 
 Auth: if env FTP_PROXY_TOKEN is set, requests must carry
@@ -45,17 +50,30 @@ from flask import Blueprint, Flask, jsonify, request
 # Import the real downloader, whether this module is run as a package member or
 # copied out flat beside fleet_downloader.py and run as a script.
 try:
-    from ..direct_downloader.fleet_downloader import FtpFleetDownloader, HostSpec, ListDir
+    from ..direct_downloader.fleet_downloader import (
+        FtpFleetDownloader,
+        HostSpec,
+        ListDir,
+        UploadFile,
+        UploadSpec,
+    )
 except ImportError:  # copied beside fleet_downloader.py and imported bare
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from fleet_downloader import FtpFleetDownloader, HostSpec, ListDir
+    from fleet_downloader import (
+        FtpFleetDownloader,
+        HostSpec,
+        ListDir,
+        UploadFile,
+        UploadSpec,
+    )
 
 # Suffixed to avoid collisions with routes already mounted on the host app.
 # Keep in sync with the paths ftp_flask_downloader.py POSTs to.
 URL_DOWNLOAD = "/download_sknn_v3"
 URL_LIST = "/list_dirs_sknn_v3"
+URL_UPLOAD = "/upload_sknn_v3"
 URL_HEALTH = "/healthz_sknn_v3"
 
 ftp_proxy_sknn_v3 = Blueprint("ftp_proxy_sknn_v3", __name__)
@@ -71,6 +89,19 @@ def _spec_from_wire(entry: dict) -> HostSpec:
         files=list(entry.get("files", [])),
         listings=listings,
     )
+
+
+def _upload_spec_from_wire(entry: dict) -> UploadSpec:
+    # Upload data crosses the wire base64'd (it's bytes, not JSON-native); decode
+    # back to raw bytes here before the STOR.
+    files = [
+        UploadFile(
+            remote_path=item["remote_path"],
+            data=base64.b64decode(item["data_b64"]),
+        )
+        for item in entry.get("files", [])
+    ]
+    return UploadSpec(host=entry["host"], files=files)
 
 
 def _unauthorized():
@@ -153,6 +184,34 @@ def list_dirs():
         {
             "listings": [
                 {"host": l.host, "paths": l.paths} for l in report.listings
+            ],
+            "failures": [
+                {"host": x.host, "error": x.error, "remote_path": x.remote_path}
+                for x in report.failures
+            ],
+        }
+    )
+
+
+@ftp_proxy_sknn_v3.post(URL_UPLOAD)
+def upload():
+    # The write direction: the client POSTs base64'd file bytes, this side does
+    # the real STOR over FTP and returns a per-file ok/fail report (no bytes come
+    # back). The request body carries the data, so ADR 0001's batch math bounds
+    # RAM the same way — just on the inbound side.
+    denied = _unauthorized()
+    if denied is not None:
+        return denied
+
+    body = request.get_json(force=True)
+    specs = [_upload_spec_from_wire(entry) for entry in body.get("specs", [])]
+    report = _downloader_from(body).upload(specs)
+
+    return jsonify(
+        {
+            "results": [
+                {"host": r.host, "remote_path": r.remote_path}
+                for r in report.results
             ],
             "failures": [
                 {"host": x.host, "error": x.error, "remote_path": x.remote_path}

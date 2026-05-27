@@ -10,12 +10,16 @@ from ftp_handler.direct_downloader import (
     FtpFleetDownloader,
     HostSpec,
     ListDir,
+    UploadFile,
+    UploadSpec,
     build_host_specs,
     collect_fleet,
     download_fleet,
     list_fleet,
     save_to_dir,
     specs_from_hosts,
+    upload_fleet,
+    upload_specs_from_hosts,
 )
 
 USER = "ftpuser"
@@ -104,6 +108,36 @@ def example_tuning_for_large_fleet() -> None:
         passive=True,
     )
     print(f"discovered {dl.list_dirs(specs).total_paths} files")
+
+
+def example_upload_in_memory_to_fleet() -> None:
+    """Push in-memory bytes to many hosts — no disk file required.
+
+    ``UploadFile`` takes raw ``bytes`` (here a CSV built in memory), which go
+    straight to STOR via an in-memory buffer; nothing is written to local disk.
+    ``upload_specs_from_hosts`` is the upload counterpart to
+    ``specs_from_hosts``: same file(s) to every host. Per-host AND per-file
+    failure isolation, same concurrency knobs as download.
+    """
+    payload = b"col_a,col_b\n1,2\n"  # e.g. df.to_csv().encode(); never hits disk
+    specs = upload_specs_from_hosts(
+        FLEET_HOSTS, files=[UploadFile("/INBOX/report.csv", payload)]
+    )
+    report = FtpFleetDownloader(user=USER, password=PASSWORD).upload(specs)
+
+    print(f"uploaded ok={report.ok} ng={report.ng}")
+    for x in report.failures:
+        print("FAILED", x.host, x.remote_path, x.error)
+
+
+def example_upload_different_files_per_host() -> None:
+    """Different bytes to different hosts in one concurrent run."""
+    specs = [
+        UploadSpec("10.0.0.1", files=[UploadFile("/INBOX/a.cfg", b"host-1 config")]),
+        UploadSpec("10.0.0.2", files=[UploadFile("/INBOX/b.cfg", b"host-2 config")]),
+    ]
+    report = upload_fleet(specs, user=USER, password=PASSWORD)
+    print(report.grouped())  # {host: [remote_path, ...]}
 
 
 def example_fleet_specs_from_config() -> None:

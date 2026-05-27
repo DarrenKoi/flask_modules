@@ -20,11 +20,16 @@ from ftp_handler.direct_downloader.fleet_downloader import (
     HostSpec,
     ListDir,
     ListingReport,
+    UploadFile,
+    UploadReport,
+    UploadSpec,
     _safe_relative,
     download_fleet,
     list_fleet,
     save_to_dir,
     specs_from_hosts,
+    upload_fleet,
+    upload_specs_from_hosts,
 )
 
 FTP_PATCH_TARGET = "ftp_handler.direct_downloader.fleet_downloader.FTP"
@@ -91,6 +96,16 @@ class FakeFTP:
             raise value
         callback(value)
 
+    def storbinary(self, cmd, fp):
+        # STOR records the bytes into the host's `stored` dict so a test can
+        # assert what landed. A path listed in `store_errors` raises instead, to
+        # exercise per-file upload failure isolation.
+        remote_path = cmd.split(" ", 1)[1]
+        err = self._script().get("store_errors", {}).get(remote_path)
+        if err is not None:
+            raise err
+        self._script().setdefault("stored", {})[remote_path] = fp.read()
+
 
 class _FakeFTPTestCase(unittest.TestCase):
     """Resets the shared FakeFTP script around every test."""
@@ -110,6 +125,11 @@ class _FakeFTPTestCase(unittest.TestCase):
         with patch(FTP_PATCH_TARGET, FakeFTP):
             dl = FtpFleetDownloader(user="u", password="p", **kwargs)
             return dl.list_dirs(specs)
+
+    def _upload(self, specs, **kwargs) -> UploadReport:
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p", **kwargs)
+            return dl.upload(specs)
 
 
 class FtpFleetDownloaderTests(_FakeFTPTestCase):
@@ -570,6 +590,83 @@ class ListDirsTests(_FakeFTPTestCase):
                 max_concurrency=4,
             )
         self.assertEqual(report.grouped(), {"h1": ["/MEAS/a.dat"]})
+
+
+class UploadTests(_FakeFTPTestCase):
+    def test_uploads_in_memory_bytes(self):
+        # No disk file: raw bytes go straight to STOR via BytesIO. The fake
+        # records what landed so we can assert the bytes round-tripped.
+        FakeFTP.scripts = {"h1": {}}
+        report = self._upload(
+            [UploadSpec("h1", files=[UploadFile("/INBOX/r.csv", b"a,b\n1,2")])]
+        )
+
+        self.assertEqual(report.ok, 1)
+        self.assertEqual(report.ng, 0)
+        self.assertEqual(report.results[0].host, "h1")
+        self.assertEqual(report.results[0].remote_path, "/INBOX/r.csv")
+        self.assertEqual(FakeFTP.scripts["h1"]["stored"], {"/INBOX/r.csv": b"a,b\n1,2"})
+
+    def test_per_host_error_isolation(self):
+        # h1's connect fails; h2 still uploads. One dead host never sinks the rest.
+        FakeFTP.scripts = {
+            "h1": {"connect_error": socket.timeout("timed out")},
+            "h2": {},
+        }
+        report = self._upload(
+            [
+                UploadSpec("h1", files=[UploadFile("/a", b"A")]),
+                UploadSpec("h2", files=[UploadFile("/a", b"A")]),
+            ]
+        )
+
+        self.assertEqual(report.ok, 1)
+        self.assertEqual(report.ng, 1)
+        self.assertEqual(report.grouped(), {"h2": ["/a"]})
+        self.assertEqual(report.failures[0].host, "h1")
+        self.assertIsNone(report.failures[0].remote_path)  # failed at connect
+
+    def test_per_file_error_isolation(self):
+        # One STOR fails; the host's other files still upload. The failure is
+        # recorded against that specific path.
+        FakeFTP.scripts = {
+            "h1": {"store_errors": {"/bad": error_perm("550 denied")}}
+        }
+        report = self._upload(
+            [
+                UploadSpec(
+                    "h1",
+                    files=[UploadFile("/good", b"G"), UploadFile("/bad", b"B")],
+                )
+            ]
+        )
+
+        self.assertEqual(report.ok, 1)
+        self.assertEqual(report.ng, 1)
+        self.assertEqual(report.grouped(), {"h1": ["/good"]})
+        self.assertEqual(report.failures[0].remote_path, "/bad")
+
+    def test_empty_report_failure_ratio_is_zero(self):
+        self.assertEqual(UploadReport(results=[], failures=[]).failure_ratio, 0.0)
+
+    def test_upload_specs_from_hosts_shares_files_per_host(self):
+        files = [UploadFile("/INBOX/r.csv", b"data")]
+        specs = upload_specs_from_hosts(["a", "b"], files=files)
+        self.assertEqual([s.host for s in specs], ["a", "b"])
+        # Each spec owns its own list copy — mutating one never bleeds.
+        specs[0].files.append(UploadFile("/extra", b"x"))
+        self.assertEqual(len(specs[1].files), 1)
+
+    def test_upload_fleet_helper(self):
+        FakeFTP.scripts = {"h1": {}}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            report = upload_fleet(
+                [UploadSpec("h1", files=[UploadFile("/a", b"A")])],
+                user="u",
+                password="p",
+                max_concurrency=4,
+            )
+        self.assertEqual(report.grouped(), {"h1": ["/a"]})
 
 
 if __name__ == "__main__":
