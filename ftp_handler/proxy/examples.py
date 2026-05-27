@@ -1,18 +1,16 @@
-"""Worked examples for ftp_handler.proxy — the firewalled-client HTTP transport.
+"""ftp_handler.proxy 사용 예제 — 방화벽 안 클라이언트를 위한 HTTP 전송 방식.
 
-Two halves on two machines:
-  - SERVER (this office host can reach the FTP servers): run flask_proxy.
-  - CLIENT (your firewalled PC, can reach the proxy but not the FTP servers):
-    use proxy.FtpFleetDownloader exactly like the direct one.
+두 대의 장비에서 절반씩 실행된다:
+  - 서버(SERVER): FTP 서버에 접근 가능한 사내 호스트에서 flask_proxy 실행.
+  - 클라이언트(CLIENT): 방화벽에 막힌 PC. 프록시에는 닿지만 FTP 서버에는 못
+    닿는다. proxy.FtpFleetDownloader를 direct 버전과 똑같이 사용한다.
 
-The client surface is identical to direct_downloader — the only difference is
-the import line, so a call site swaps transports without any other change.
-Not tests; a copy-paste reference.
+클라이언트 쪽 인터페이스는 direct_downloader와 완전히 동일하다 — 유일한 차이는
+import 줄뿐이라, 호출부는 다른 변경 없이 전송 방식만 바꿀 수 있다.
+테스트가 아니라 복사해 붙여 쓰는 참고용 코드다.
 """
 
-import os
-
-# CLIENT side: same names as the direct downloader, over HTTP.
+# 클라이언트 쪽: direct 다운로더와 같은 이름들을 HTTP 너머로 사용한다.
 from ftp_handler.proxy import FtpFleetDownloader, HostSpec, ListDir, save_to_dir
 
 USER = "ftpuser"
@@ -21,48 +19,47 @@ FLEET_HOSTS = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
 
 
 def example_run_the_proxy_server() -> None:
-    """SERVER half — run on a firewall-free host that can reach the FTP servers.
+    """서버 절반 — FTP 서버에 닿을 수 있는, 방화벽 없는 호스트에서 실행한다.
 
-    Mount the blueprint on your existing Flask app, or run standalone. Set
-    FTP_PROXY_TOKEN to require a bearer token; always serve behind HTTPS (the FTP
-    password and file bytes cross this connection).
+    기존 Flask 앱에 블루프린트를 붙이거나 단독으로 실행한다. 인증 없음: 신뢰하는
+    단일 사용자뿐이라 FTP_PROXY_TOKEN은 설정하지 않으며 모든 요청이 그대로 통과한다.
+    다만 포트가 신뢰할 수 없는 네트워크에 노출되지 않게만 하라(FTP 비밀번호와 파일
+    바이트가 이 연결을 평문으로 오간다).
 
         from ftp_handler.proxy.flask_proxy import ftp_proxy_sknn_v3
         app.register_blueprint(ftp_proxy_sknn_v3)
     """
     from ftp_handler.proxy.flask_proxy import create_app
 
-    os.environ.setdefault("FTP_PROXY_TOKEN", "change-me")
     create_app().run(host="0.0.0.0", port=8080)
 
 
 def example_download_through_proxy() -> None:
-    """CLIENT half — drop-in for the direct downloader, over HTTP.
+    """클라이언트 절반 — direct 다운로더의 대체재로 HTTP 너머에서 동작한다.
 
-    Point it at the proxy via proxy_url/token (or env FTP_PROXY_URL /
-    FTP_PROXY_TOKEN). on_file still runs HERE on the client, so save_to_dir lands
-    files on your local PC.
+    proxy_url(또는 환경변수 FTP_PROXY_URL)로 프록시를 가리킨다. 토큰 없음: 프록시는
+    인증 없이 동작한다. on_file은 여전히 여기 클라이언트에서 실행되므로 save_to_dir는
+    파일을 로컬 PC에 떨군다.
     """
     specs = [HostSpec(host, listings=[ListDir("/MEAS", "*.dat")]) for host in FLEET_HOSTS]
     dl = FtpFleetDownloader(
         user=USER,
         password=PASSWORD,
-        proxy_url="https://proxy.host:8080",
-        token="change-me",
+        proxy_url="http://proxy.host:8080",
     )
     report = dl.download(specs, on_file=save_to_dir(r"C:\eqp_downloads"))
     print(f"ok={report.ok} ng={report.ng}")
 
 
 def example_swap_direct_for_proxy() -> None:
-    """The whole point of the seam: one import line changes the transport.
+    """이 분리 구조의 핵심: import 한 줄만 바꾸면 전송 방식이 바뀐다.
 
-        # direct (firewall-free host):
+        # direct (방화벽 없는 호스트):
         from ftp_handler.direct_downloader import FtpFleetDownloader
-        # via the proxy (firewalled client):
+        # 프록시 경유 (방화벽 안 클라이언트):
         from ftp_handler.proxy import FtpFleetDownloader
 
-    Everything below — specs, download(), the report, on_file — is identical.
+    아래의 모든 것 — specs, download(), report, on_file — 은 완전히 동일하다.
     """
     specs = [HostSpec(host, files=["/HITACHI/SYSFILE/LOG_RECIPE_EXE.log"]) for host in FLEET_HOSTS]
     report = FtpFleetDownloader(user=USER, password=PASSWORD).download(specs)
@@ -70,6 +67,6 @@ def example_swap_direct_for_proxy() -> None:
 
 
 if __name__ == "__main__":
-    # example_run_the_proxy_server()      # on the proxy host
-    # example_download_through_proxy()    # on the firewalled client
+    # example_run_the_proxy_server()      # 프록시 호스트에서
+    # example_download_through_proxy()    # 방화벽 안 클라이언트에서
     pass
