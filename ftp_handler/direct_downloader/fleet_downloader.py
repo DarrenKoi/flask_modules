@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from ftplib import FTP, all_errors
 from io import BytesIO
 from pathlib import Path
-from typing import Callable, Iterator, Protocol, runtime_checkable
+from typing import Any, Callable, Iterator, Protocol, runtime_checkable
 
 # The shared NLST normalizer lives in core so both downloaders behave
 # identically. Relative import in-package; bare fallback when copied out flat
@@ -56,6 +56,13 @@ except ImportError:  # copied out flat, imported by bare name
 
 # Invoked once per successfully downloaded file: (host, remote_path, data).
 OnFile = Callable[[str, str, bytes], None]
+
+# Turn one downloaded file's raw bytes into the value to store: a live Python
+# object for pickle, a pandas DataFrame for parquet. This is the processing
+# seam — parse / reshape the bytes here before they're written to MinIO.
+ToObject = Callable[[str, str, bytes], object]
+# Build the MinIO object key from (host, remote_path).
+KeyFn = Callable[[str, str], str]
 
 
 @dataclass(slots=True)
@@ -924,6 +931,91 @@ def save_to_dir(dest_dir: str | Path, *, then: OnFile | None = None) -> OnFile:
         target = base / _ILLEGAL_COMPONENT.sub("_", host) / _safe_relative(remote_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
+        if then is not None:
+            then(host, remote_path, data)
+
+    return on_file
+
+
+def _object_key(host: str, remote_path: str, suffix: str) -> str:
+    """Default MinIO key for a downloaded file: ``<host>/<remote path><suffix>``.
+
+    The remote path keeps its directory structure (slashes are just key
+    separators in S3/MinIO); a leading slash is dropped and Windows-FTP
+    backslashes are normalized so the key is stable across server types.
+    """
+    rel = remote_path.replace("\\", "/").lstrip("/")
+    return f"{host}/{rel}{suffix}"
+
+
+def put_pickle_to_minio(
+    client: Any,
+    transform: ToObject,
+    *,
+    key: KeyFn | None = None,
+    then: OnFile | None = None,
+) -> OnFile:
+    """Build an ``on_file`` callback that pickles each file and puts it to MinIO.
+
+    The MinIO counterpart to ``save_to_dir``: instead of writing to local disk,
+    each downloaded file is run through ``transform`` (bytes → a live Python
+    object) and uploaded via ``client.put_pickle`` — nothing touches disk, peak
+    RAM stays bounded by ``max_concurrency`` (streaming). ``client`` is an
+    injected ``minio_handler.MinioObject`` (passed in, never imported here, so
+    ``ftp_handler`` stays free of a minio dependency). By default the object
+    lands at ``<host>/<remote path>.pkl``; pass ``key`` to choose your own.
+
+    Reach for this when ``transform`` yields a non-tabular value (nested dict,
+    custom class, model object). For a ``pd.DataFrame`` prefer
+    ``put_parquet_to_minio`` — parquet is portable and not a code-execution risk
+    on read. The callback runs inside the per-host worker thread, so use a
+    thread-safe client (minio-py's object client is); ``then`` chains a second
+    callback after the upload (e.g. index to OpenSearch)::
+
+        mc = MinioObject()
+        dl.download(specs, on_file=put_pickle_to_minio(mc, parse))
+    """
+    key_for = key or (lambda host, remote_path: _object_key(host, remote_path, ".pkl"))
+
+    def on_file(host: str, remote_path: str, data: bytes) -> None:
+        client.put_pickle(key_for(host, remote_path), transform(host, remote_path, data))
+        if then is not None:
+            then(host, remote_path, data)
+
+    return on_file
+
+
+def put_parquet_to_minio(
+    client: Any,
+    transform: ToObject,
+    *,
+    key: KeyFn | None = None,
+    then: OnFile | None = None,
+) -> OnFile:
+    """Build an ``on_file`` callback that writes each file to MinIO as parquet.
+
+    Same shape as ``put_pickle_to_minio`` but ``transform`` must return a pandas
+    ``DataFrame``, which is serialized to parquet (pyarrow) and uploaded via
+    ``client.put_dataframe`` — nothing touches disk, RAM stays streaming-bounded.
+    ``client`` is an injected ``minio_handler.MinioObject``. By default the
+    object lands at ``<host>/<remote path>.parquet``; pass ``key`` to override.
+
+    Prefer this over pickle for tabular equipment data: parquet is compressed,
+    columnar, and readable by anything (Spark, DuckDB, pandas) without trusting
+    the producer. The callback runs in the per-host worker thread; ``then``
+    chains a follow-up callback after the upload::
+
+        mc = MinioObject()
+        dl.download(specs, on_file=put_parquet_to_minio(mc, parse_to_frame))
+    """
+    key_for = key or (
+        lambda host, remote_path: _object_key(host, remote_path, ".parquet")
+    )
+
+    def on_file(host: str, remote_path: str, data: bytes) -> None:
+        client.put_dataframe(
+            key_for(host, remote_path), transform(host, remote_path, data)
+        )
         if then is not None:
             then(host, remote_path, data)
 

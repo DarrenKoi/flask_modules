@@ -16,6 +16,8 @@ from ftp_handler.direct_downloader import (
     collect_fleet,
     download_fleet,
     list_fleet,
+    put_parquet_to_minio,
+    put_pickle_to_minio,
     save_to_dir,
     size_fleet,
     specs_from_hosts,
@@ -109,6 +111,67 @@ def example_streaming_to_disk() -> None:
     dl = FtpFleetDownloader(user=USER, password=PASSWORD)
     report = dl.download(specs, on_file=save_to_dir("/data/eqp_downloads"))
     print(f"wrote {report.ok} files, {report.ng} failures")
+
+
+def example_stream_to_minio_pickle() -> None:
+    """Download in-memory, process, and upload each file to MinIO as pickle.
+
+    The end-to-end "FTP → process → object storage" pass with bounded RAM:
+    put_pickle_to_minio returns an on_file callback, so each file is fetched,
+    run through your transform (bytes → a live Python object), pickled, and
+    PUT to MinIO the moment it lands — nothing hits local disk and peak memory
+    stays at concurrency x file size. MinioObject is injected (ftp_handler never
+    imports minio); minio-py's object client is thread-safe, so one shared
+    instance is fine across the per-host worker threads. Objects land at
+    <host>/<remote path>.pkl by default.
+
+    Reach for pickle when the parsed value isn't a clean table (nested dict,
+    custom object). For tabular data prefer example_stream_to_minio_parquet.
+    """
+    from minio_handler import MinioObject
+
+    def parse(host: str, remote_path: str, data: bytes) -> dict:
+        # YOUR processing: bytes -> any Python object. Toy example here.
+        return {"host": host, "path": remote_path, "raw_len": len(data)}
+
+    mc = MinioObject()  # reads MinIO env vars; bucket/prefix from config
+    specs = specs_from_hosts(FLEET_HOSTS, listings=[ListDir("/MEAS", "*.dat")])
+    report = FtpFleetDownloader(user=USER, password=PASSWORD).download(
+        specs, on_file=put_pickle_to_minio(mc, parse)
+    )
+
+    print(f"stored ok={report.ok} ng={report.ng}")
+    for x in report.failures:  # a parse/upload raise is isolated to its file
+        print("FAILED", x.host, x.remote_path, x.error)
+
+
+def example_stream_to_minio_parquet() -> None:
+    """Same streaming pass, but parse to a DataFrame and store as parquet.
+
+    put_parquet_to_minio's transform must return a pd.DataFrame; it's serialized
+    to parquet (pyarrow) and PUT via client.put_dataframe. Objects land at
+    <host>/<remote path>.parquet. The ``key`` arg overrides the default layout —
+    here we drop the source extension and partition by host so the lake reads as
+    one dataset. ``then`` could chain an OpenSearch index call after each upload.
+    """
+    import pandas as pd
+
+    from minio_handler import MinioObject
+
+    def parse_to_frame(host: str, remote_path: str, data: bytes) -> pd.DataFrame:
+        # YOUR real parser builds the frame from the measurement bytes.
+        return pd.DataFrame({"host": [host], "raw_len": [len(data)]})
+
+    def key(host: str, remote_path: str) -> str:
+        name = remote_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        return f"meas/host={host}/{name}.parquet"
+
+    mc = MinioObject()
+    specs = specs_from_hosts(FLEET_HOSTS, listings=[ListDir("/MEAS", "*.dat")])
+    report = FtpFleetDownloader(user=USER, password=PASSWORD).download(
+        specs, on_file=put_parquet_to_minio(mc, parse_to_frame, key=key)
+    )
+    print(f"stored ok={report.ok} ng={report.ng}")
 
 
 def example_one_call_helpers() -> None:

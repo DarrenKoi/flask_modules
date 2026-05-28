@@ -27,6 +27,8 @@ from ftp_handler.direct_downloader.fleet_downloader import (
     _safe_relative,
     download_fleet,
     list_fleet,
+    put_parquet_to_minio,
+    put_pickle_to_minio,
     save_to_dir,
     size_fleet,
     specs_from_hosts,
@@ -512,6 +514,89 @@ class SaveToDirTests(_FakeFTPTestCase):
             )
         self.assertEqual((self.tmp_path / "h1" / "a").read_bytes(), b"A")
         self.assertEqual(chained, [("h1", "/a", b"A")])
+
+
+class FakeMinio:
+    """Stand-in for minio_handler.MinioObject. Records put_pickle / put_dataframe
+    calls so the sink helpers can be tested without a live MinIO."""
+
+    def __init__(self) -> None:
+        self.pickles: list[tuple[str, object]] = []
+        self.frames: list[tuple[str, object]] = []
+        self.raise_on: str | None = None
+
+    def put_pickle(self, key: str, obj: object) -> None:
+        if self.raise_on is not None and self.raise_on in key:
+            raise RuntimeError("boom")
+        self.pickles.append((key, obj))
+
+    def put_dataframe(self, key: str, df: object) -> None:
+        self.frames.append((key, df))
+
+
+class MinioSinkTests(_FakeFTPTestCase):
+    def test_put_pickle_to_minio_transforms_and_keys_by_default(self):
+        FakeFTP.scripts = {"10.0.0.1": {"files": {"/MEAS/x.dat": b"RAW"}}}
+        mc = FakeMinio()
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p")
+            report = dl.download(
+                [HostSpec("10.0.0.1", files=["/MEAS/x.dat"])],
+                on_file=put_pickle_to_minio(
+                    mc, lambda h, p, d: {"host": h, "n": len(d)}
+                ),
+            )
+
+        self.assertEqual(report.ok, 1)
+        self.assertEqual(
+            mc.pickles, [("10.0.0.1/MEAS/x.dat.pkl", {"host": "10.0.0.1", "n": 3})]
+        )
+        # Streaming sink — report retains no bytes.
+        self.assertTrue(all(f.data == b"" for f in report.files))
+
+    def test_put_pickle_custom_key_and_then_chain(self):
+        FakeFTP.scripts = {"h1": {"files": {"/a.dat": b"AB"}}}
+        mc = FakeMinio()
+        chained: list = []
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            FtpFleetDownloader(user="u", password="p").download(
+                [HostSpec("h1", files=["/a.dat"])],
+                on_file=put_pickle_to_minio(
+                    mc,
+                    lambda h, p, d: d.decode(),
+                    key=lambda h, p: f"raw/{h}.pkl",
+                    then=lambda h, p, d: chained.append((h, p, d)),
+                ),
+            )
+        self.assertEqual(mc.pickles, [("raw/h1.pkl", "AB")])
+        self.assertEqual(chained, [("h1", "/a.dat", b"AB")])
+
+    def test_put_pickle_upload_failure_isolated_per_file(self):
+        FakeFTP.scripts = {
+            "h1": {"files": {"/good.dat": b"G", "/bad.dat": b"B"}},
+        }
+        mc = FakeMinio()
+        mc.raise_on = "bad"
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            report = FtpFleetDownloader(user="u", password="p").download(
+                [HostSpec("h1", files=["/good.dat", "/bad.dat"])],
+                on_file=put_pickle_to_minio(mc, lambda h, p, d: d),
+            )
+        self.assertEqual(report.ok, 1)
+        self.assertEqual(report.ng, 1)
+        self.assertEqual(report.failures[0].remote_path, "/bad.dat")
+        self.assertEqual(mc.pickles, [("h1/good.dat.pkl", b"G")])
+
+    def test_put_parquet_to_minio_uses_dataframe_and_default_suffix(self):
+        FakeFTP.scripts = {"h1": {"files": {"/m.dat": b"DATA"}}}
+        mc = FakeMinio()
+        sentinel = object()  # stand in for a DataFrame; helper just forwards it
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            FtpFleetDownloader(user="u", password="p").download(
+                [HostSpec("h1", files=["/m.dat"])],
+                on_file=put_parquet_to_minio(mc, lambda h, p, d: sentinel),
+            )
+        self.assertEqual(mc.frames, [("h1/m.dat.parquet", sentinel)])
 
 
 class SpecBuildersTests(unittest.TestCase):
