@@ -69,6 +69,29 @@ from ftp_handler.direct_downloader import save_to_dir
 dl.download(specs, on_file=save_to_dir("/data/eqp"))   # 최대 RAM ~ concurrency x 파일 크기
 ```
 
+**내려받기 전에 크기 재기 (`size_dirs`):** `list_dirs`가 "어떤 파일이 있나"를
+답한다면, `size_dirs`는 "그것들을 메모리에 담으면 몇 바이트인가"를 답한다. 가져오는
+대신 FTP `SIZE` 명령으로 각 파일 크기만 묻는다(바이트 전송 없음). `download`와 똑같이
+경로를 해석하므로(고정 `files` + `listings`가 탐색하는 것), `total_bytes`는 수집
+모드 `download`가 한 번에 들고 있을 최대 RAM과 같다. `by_host()`로 무거운 호스트를
+찾아 큰 실행을 RAM 한도에 맞춰 나누고, `to_specs()`로 잰 집합을 그대로 `download`에
+넘긴다:
+
+```python
+sizing = dl.size_dirs(discover)                 # SIZE만 — 가져오지 않음
+print(f"{sizing.total_bytes / 1024**2:.1f} MiB, {sizing.ok} files")
+print(sizing.by_host())                          # {host: bytes}
+
+if sizing.total_bytes < 500 * 1024**2:
+    report = dl.download(sizing.to_specs())                       # RAM에 들어감
+else:
+    report = dl.download(sizing.to_specs(), on_file=save_to_dir("/data/eqp"))  # 스트리밍
+```
+
+`SIZE`가 실패하거나(서버가 미지원) 디렉터리를 가리키면 0으로 묵살하지 않고
+`failures`에 기록되므로, `total_bytes`는 실제로 잰 파일만 더한다. 한 번 호출로 끝나는
+함수 래퍼는 `size_fleet(specs, user=..., password=...)`.
+
 **튜닝:** `connect_timeout`은 죽은 호스트를 빠르게 포기시키고, `host_timeout`은
 연결 후 멈춰버린 호스트를 backstop 하며, `max_concurrency`는 연결 수(및 RAM)를
 제한한다. `download_fleet` / `list_fleet`은 한 번 호출로 끝나는 함수 래퍼다.
@@ -131,9 +154,10 @@ report = dl.download(specs, on_file=save_to_dir(r"C:\eqp"))  # on_file은 로컬
 `fleet_downloader.py`와 `listing.py`를 더하면 클라이언트 PC에 평평하게 떨궈 bare
 이름으로 import 할 수 있다.
 
-`download` / `list_dirs`와 마찬가지로 `upload`도 같은 표면으로 프록시 너머에서 동작한다
-(케이스 2의 업로드 예제에서 import만 `ftp_handler.proxy`로 바꾸면 된다). 클라이언트가
-바이트를 base64로 실어 보내면 프록시가 풀어서 STOR 한다.
+`download` / `list_dirs` / `size_dirs`와 마찬가지로 `upload`도 같은 표면으로 프록시
+너머에서 동작한다(케이스 2의 예제에서 import만 `ftp_handler.proxy`로 바꾸면 된다).
+클라이언트가 바이트를 base64로 실어 보내면 프록시가 풀어서 STOR 한다. `size_dirs`는
+`list_dirs`처럼 바이트를 싣지 않으므로 가볍다.
 
 ---
 

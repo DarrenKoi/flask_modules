@@ -14,7 +14,7 @@ ftp_handler/
     client.py           FtpClient — 단일 서버, 즉석 list/download/upload/remove
     listing.py          _normalize_listing — 두 규모 모두에서 쓰는 NLST 정규화기
   direct_downloader/    FTP 서버와 직접 통신
-    fleet_downloader.py FtpFleetDownloader — 동시 팬아웃 + list_dirs 탐색
+    fleet_downloader.py FtpFleetDownloader — 동시 팬아웃 + list_dirs 탐색 + size_dirs 크기측정
     collect.py          collect_fleet — archive → parse → index 글루 (minio/opensearch import 없음)
   proxy/                방화벽 안 클라이언트용 HTTP 전송
     flask_proxy.py      서버 절반 (flask 필요) — 실제 FTP를 수행, base64 바이트 반환
@@ -39,10 +39,12 @@ ftp_handler/
 - **`FtpFleetDownloader`** (`fleet_downloader.py`): 동기식, **이벤트 루프 없음**
   (순수 `ThreadPoolExecutor`)이라 async 웹 워커를 포함한 어떤 컨텍스트에서도
   안전하다. `download`(수집 또는 `on_file`로 스트리밍), `list_dirs`(탐색 패스 →
-  `to_specs()` → `download`), `upload`(쓰기 방향; `UploadSpec`/`UploadFile`이 메모리상
-  `bytes`를 `BytesIO`로 곧장 STOR — 디스크 파일 불필요, 파일 단위 실패 격리)가 하나의
-  엔진을 공유하며 `max_concurrency` 상한, 호스트별 타임아웃, 호스트별 실패 격리를
-  갖는다. 헬퍼: `specs_from_hosts`, `download_fleet`, `list_fleet`, `save_to_dir`,
+  `to_specs()` → `download`), `size_dirs`(RAM 예산 패스; `SIZE`만, 가져오지 않음 →
+  `SizingReport.total_bytes`/`by_host()`/`to_specs()`), `upload`(쓰기 방향;
+  `UploadSpec`/`UploadFile`이 메모리상 `bytes`를 `BytesIO`로 곧장 STOR — 디스크 파일
+  불필요, 파일 단위 실패 격리)가 하나의 엔진을 공유하며 `max_concurrency` 상한,
+  호스트별 타임아웃, 호스트별 실패 격리를 갖는다. 헬퍼: `specs_from_hosts`,
+  `download_fleet`, `list_fleet`, `size_fleet`, `save_to_dir`,
   `upload_specs_from_hosts`, `upload_fleet`.
 - **`collect_fleet` / `build_host_specs`** (`collect.py`): 파일마다 archive → parse
   → index. 각 단계를 콜러블로 주입받으므로 minio/opensearch를 import 하지 않는다 —
@@ -50,7 +52,8 @@ ftp_handler/
 
 ### `proxy` — 방화벽 안 클라이언트용 HTTP 전송
 - **`flask_proxy.py`** (서버): FTP egress가 허용된 곳에서 실행된다. Flask
-  블루프린트(`/download_sknn_v3`, `/list_dirs_sknn_v3`, `/healthz_sknn_v3`),
+  블루프린트(`/download_sknn_v3`, `/list_dirs_sknn_v3`, `/size_dirs_sknn_v3`,
+  `/upload_sknn_v3`, `/healthz_sknn_v3`),
   선택적 `FTP_PROXY_TOKEN`. 실제 FTP는 `FtpFleetDownloader`를 재사용한다.
 - **`proxy_downloader.py`** (클라이언트): 패키지가 이 모듈의 `FtpFleetDownloader`를
   re-export 한다 — `direct_downloader`와 같은 이름·같은 데이터클래스를 HTTP로
