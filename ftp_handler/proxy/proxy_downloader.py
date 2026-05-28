@@ -28,7 +28,7 @@ Proxy location & auth are module constants (NOT constructor args), so the
 constructor signature stays identical to the direct downloader — a shared call
 site swaps the import line and passes nothing transport-specific. Edit these at
 the top of this file for your deployment:
-    PROXY_URL    e.g. "https://proxy.host:8080"   (default "http://localhost:8080")
+    PROXY_URL    e.g. "https://proxy.host:8080"   (default the SEM fileloader webapp)
     PROXY_TOKEN  bearer-token string the proxy enforces, or None for no auth
 
 Run: pip install requests
@@ -116,7 +116,7 @@ __all__ = [
 # nothing transport-specific. The firewalled client box reaches the proxy at
 # PROXY_URL; set PROXY_TOKEN to the bearer-token string if the proxy enforces
 # auth (leave None for the trusted single-user, no-auth case).
-PROXY_URL = "http://localhost:8080"
+PROXY_URL = "http://advanced-cd-sem-applications-fileloader-webapp.aipp01.skhynix.com"
 PROXY_TOKEN = None
 
 
