@@ -17,7 +17,6 @@ from ftp_handler.direct_downloader.collect import build_host_specs, collect_flee
 from ftp_handler.direct_downloader.fleet_downloader import (
     DownloadReport,
     FtpFleetDownloader,
-    HostFailure,
     HostSpec,
     ListDir,
     ListingReport,
@@ -25,7 +24,6 @@ from ftp_handler.direct_downloader.fleet_downloader import (
     UploadFile,
     UploadReport,
     UploadSpec,
-    _plan_retry,
     _safe_relative,
     download_fleet,
     list_fleet,
@@ -82,13 +80,6 @@ class FakeFTP:
         self.passive = value
 
     def nlst(self, remote_dir):
-        # `nlst_fail_times` makes a directory's listing fail that many times
-        # before succeeding, so a retry test can prove a transient listing
-        # failure is re-listed (not retried as a bogus file RETR).
-        nlst_fail_times = self._script().get("nlst_fail_times")
-        if nlst_fail_times and nlst_fail_times.get(remote_dir, 0) > 0:
-            nlst_fail_times[remote_dir] -= 1
-            raise error_perm(f"450 transient listing: {remote_dir}")
         listing = self._script().get("listing", {})
         if remote_dir not in listing:
             raise error_perm(f"550 No such directory: {remote_dir}")
@@ -99,12 +90,6 @@ class FakeFTP:
 
     def retrbinary(self, cmd, callback):
         remote_path = cmd.split(" ", 1)[1]
-        # `fail_times` makes a path fail that many times before succeeding, so a
-        # retry test can prove a transient failure recovers on a later pass.
-        fail_times = self._script().get("fail_times")
-        if fail_times and fail_times.get(remote_path, 0) > 0:
-            fail_times[remote_path] -= 1
-            raise error_perm(f"450 transient: {remote_path}")
         files = self._script().get("files", {})
         if remote_path not in files:
             raise error_perm(f"550 No such file: {remote_path}")
@@ -635,154 +620,6 @@ class ListDirsTests(_FakeFTPTestCase):
                 max_concurrency=4,
             )
         self.assertEqual(report.grouped(), {"h1": ["/MEAS/a.dat"]})
-
-
-class RetryTests(_FakeFTPTestCase):
-    def _download(self, specs, *, retries, **kwargs):
-        with patch(FTP_PATCH_TARGET, FakeFTP):
-            dl = FtpFleetDownloader(user="u", password="p", **kwargs)
-            return dl.download(specs, retries=retries)
-
-    def test_transient_per_file_failure_recovers_on_retry(self):
-        FakeFTP.scripts = {"h1": {"files": {"/a": b"OK"}, "fail_times": {"/a": 1}}}
-        report = self._download([HostSpec("h1", files=["/a"])], retries=2)
-        self.assertEqual(report.ng, 0)
-        self.assertEqual(report.grouped(), {"h1": {"/a": b"OK"}})
-
-    def test_retries_exhausted_keeps_failure(self):
-        # Fails more times than we retry — stays a failure, loop still terminates.
-        FakeFTP.scripts = {"h1": {"files": {"/a": b"OK"}, "fail_times": {"/a": 5}}}
-        report = self._download([HostSpec("h1", files=["/a"])], retries=2)
-        self.assertEqual(report.ok, 0)
-        self.assertEqual(report.ng, 1)
-        self.assertEqual(report.failures[0].remote_path, "/a")
-
-    def test_retries_zero_disables_retry(self):
-        FakeFTP.scripts = {"h1": {"files": {"/a": b"OK"}, "fail_times": {"/a": 1}}}
-        report = self._download([HostSpec("h1", files=["/a"])], retries=0)
-        self.assertEqual(report.ng, 1)
-
-    def test_default_retries_is_one(self):
-        # download() defaults to retries=1, so a single transient failure recovers
-        # without the caller asking. _run goes through dl.download(specs) with no
-        # retries kwarg, exercising the default.
-        FakeFTP.scripts = {"h1": {"files": {"/a": b"OK"}, "fail_times": {"/a": 1}}}
-        report = self._run([HostSpec("h1", files=["/a"])])
-        self.assertEqual(report.ng, 0)
-        self.assertEqual(report.grouped(), {"h1": {"/a": b"OK"}})
-
-    def test_retry_refetches_only_failed_not_succeeded(self):
-        # /good succeeds first pass; /bad fails once then recovers. The retry pass
-        # must touch only /bad, so /good appears exactly once (no duplicate).
-        FakeFTP.scripts = {
-            "h1": {
-                "files": {"/good": b"G", "/bad": b"B"},
-                "fail_times": {"/bad": 1},
-            }
-        }
-        report = self._download([HostSpec("h1", files=["/good", "/bad"])], retries=1)
-        self.assertEqual(report.ng, 0)
-        paths = [f.remote_path for f in report.files]
-        self.assertEqual(sorted(paths), ["/bad", "/good"])
-        self.assertEqual(len(paths), 2)  # /good not re-downloaded
-
-    def test_transient_whole_host_failure_reruns_original_spec(self):
-        # A whole-host failure (login dies before any file, so remote_path=None)
-        # must retry the host's ORIGINAL spec — here a listing, which the retry
-        # then re-discovers and pulls. login fails once, then heals.
-        FakeFTP.scripts = {
-            "h1": {
-                "listing": {"/MEAS": ["a.dat"]},
-                "files": {"/MEAS/a.dat": b"DATA"},
-            }
-        }
-        state = {"attempts": 0}
-
-        def flaky_login(self, user, passwd):
-            state["attempts"] += 1
-            if state["attempts"] == 1:
-                raise error_perm("530 transient login")
-
-        with patch.object(FakeFTP, "login", flaky_login), patch(FTP_PATCH_TARGET, FakeFTP):
-            dl = FtpFleetDownloader(user="u", password="p")
-            report = dl.download(
-                [HostSpec("h1", listings=[ListDir("/MEAS", "*.dat")])], retries=1
-            )
-        self.assertEqual(report.ng, 0)
-        self.assertEqual(report.grouped(), {"h1": {"/MEAS/a.dat": b"DATA"}})
-
-    def test_plan_retry_splits_file_whole_host_listing_and_callback(self):
-        original = {
-            "h1": HostSpec("h1", files=["/x"], listings=[ListDir("/MEAS", "*.dat")]),
-            "h2": HostSpec("h2", files=["/y"]),
-            "h3": HostSpec("h3", listings=[ListDir("/RES", "*.csv")]),
-            "h4": HostSpec("h4", files=["/z"]),
-        }
-        failures = [
-            HostFailure(host="h1", error="connect died"),               # whole-host
-            HostFailure(host="h2", error="bad", remote_path="/y"),       # per-file
-            HostFailure(host="h3", error="list failed", remote_path="/RES"),  # listing dir
-            HostFailure(host="h4", error="index failed", remote_path="/z",
-                        from_callback=True),                             # callback
-        ]
-        retry_specs, kept = _plan_retry(failures, original)
-        specs = {s.host: s for s in retry_specs}
-        # h1 re-runs its original spec (files + listings).
-        self.assertEqual(specs["h1"].files, ["/x"])
-        self.assertEqual(len(specs["h1"].listings), 1)
-        # h2 re-fetches just /y as a fixed file.
-        self.assertEqual(specs["h2"].files, ["/y"])
-        self.assertEqual(specs["h2"].listings, [])
-        # h3's failed remote_path matched a listing dir -> re-LIST it (pattern kept),
-        # never RETR'd as a file.
-        self.assertEqual(specs["h3"].files, [])
-        self.assertEqual(specs["h3"].listings[0].remote_dir, "/RES")
-        self.assertEqual(specs["h3"].listings[0].pattern, "*.csv")
-        # h4's callback failure is NOT retried — kept as a failure.
-        self.assertNotIn("h4", specs)
-        self.assertEqual([f.host for f in kept], ["h4"])
-
-    def test_callback_failure_not_retried_and_runs_once(self):
-        # Finding #1: a file whose on_file raises must not be re-downloaded by the
-        # retry default — re-running the callback would duplicate side effects.
-        FakeFTP.scripts = {"h1": {"files": {"/good": b"G", "/bad": b"B"}}}
-        calls: list = []
-
-        def on_file(host, remote_path, data):
-            calls.append(remote_path)
-            if remote_path == "/bad":
-                raise RuntimeError("index write failed")
-
-        with patch(FTP_PATCH_TARGET, FakeFTP):
-            dl = FtpFleetDownloader(user="u", password="p")
-            report = dl.download(
-                [HostSpec("h1", files=["/good", "/bad"])], on_file=on_file, retries=3
-            )
-
-        self.assertEqual(report.ok, 1)
-        self.assertEqual(report.ng, 1)
-        self.assertEqual(report.failures[0].remote_path, "/bad")
-        self.assertTrue(report.failures[0].from_callback)
-        # /bad's callback ran exactly once despite retries=3 (never re-downloaded).
-        self.assertEqual(calls.count("/bad"), 1)
-
-    def test_transient_listing_failure_is_relisted_on_retry(self):
-        # Finding #2: a transient nlst failure must re-LIST the dir (re-discovering
-        # its files), not retry it as a RETR of the directory path.
-        FakeFTP.scripts = {
-            "h1": {
-                "listing": {"/MEAS": ["a.dat"]},
-                "files": {"/MEAS/a.dat": b"DATA"},
-                "nlst_fail_times": {"/MEAS": 1},  # listing fails once, then works
-            }
-        }
-        with patch(FTP_PATCH_TARGET, FakeFTP):
-            dl = FtpFleetDownloader(user="u", password="p")
-            report = dl.download(
-                [HostSpec("h1", listings=[ListDir("/MEAS", "*.dat")])], retries=1
-            )
-        self.assertEqual(report.ng, 0)
-        self.assertEqual(report.grouped(), {"h1": {"/MEAS/a.dat": b"DATA"}})
 
 
 class SizingTests(_FakeFTPTestCase):

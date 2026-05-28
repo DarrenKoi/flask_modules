@@ -111,27 +111,6 @@ def example_streaming_to_disk() -> None:
     print(f"wrote {report.ok} files, {report.ng} failures")
 
 
-def example_download_with_retries() -> None:
-    """Re-attempt whatever fails, for a flaky fleet — set it and forget it.
-
-    retries=N runs up to N extra passes over only the work that failed: a failed
-    file re-fetches just that path, a host that died before any file re-runs its
-    whole spec. Files that already landed are never re-downloaded, and the loop
-    stops as soon as nothing is left failing. Good for a large run where a few
-    hosts blip on connection resets or transient busy errors.
-
-    The default is retries=1 (one retry); pass retries=0 to disable, or a higher
-    number for a flakier fleet.
-    """
-    specs = [HostSpec(host, listings=[ListDir("/MEAS", "*.dat")]) for host in FLEET_HOSTS]
-    report = FtpFleetDownloader(user=USER, password=PASSWORD).download(specs, retries=2)
-    print(f"ok={report.ok} ng={report.ng} (after up to 2 retries)")
-
-    # Same knob on the one-call helper and through the proxy (swap the import).
-    report = download_fleet(specs, user=USER, password=PASSWORD, retries=2)
-    print(report.ng)
-
-
 def example_one_call_helpers() -> None:
     """For callers that just want a function, not an object."""
     specs = [HostSpec(host, listings=[ListDir("/MEAS", "*.dat")]) for host in FLEET_HOSTS]

@@ -57,7 +57,6 @@ try:
         UploadReport,
         UploadResult,
         UploadSpec,
-        _plan_retry,
         save_to_dir,
         specs_from_hosts,
         upload_specs_from_hosts,
@@ -81,7 +80,6 @@ except ImportError:  # copied beside fleet_downloader.py and imported bare
         UploadReport,
         UploadResult,
         UploadSpec,
-        _plan_retry,
         save_to_dir,
         specs_from_hosts,
         upload_specs_from_hosts,
@@ -205,7 +203,6 @@ class FtpFleetDownloader:
         specs: list[HostSpec],
         *,
         on_file: OnFile | None = None,
-        retries: int = 1,
     ) -> DownloadReport:
         """Synchronous, same signature as the direct downloader.
 
@@ -213,12 +210,6 @@ class FtpFleetDownloader:
         merges the results into one DownloadReport. A whole-batch transport
         failure marks every host in that batch failed — per-host isolation one
         level up.
-
-        ``retries`` re-attempts whatever failed, up to that many extra passes
-        (default 1 = one retry; pass 0 to disable), exactly like the direct
-        downloader: only the failed work is re-POSTed, so files that already
-        landed never download twice, and ``on_file`` (which runs HERE on the
-        client) fires at most once per file.
         """
         if not specs:
             return DownloadReport(files=[], failures=[])
@@ -230,20 +221,6 @@ class FtpFleetDownloader:
         ):
             files.extend(batch_files)
             failures.extend(batch_failures)
-
-        by_host = {spec.host: spec for spec in specs}
-        while retries > 0:
-            retry_specs, kept = _plan_retry(failures, by_host)
-            if not retry_specs:
-                break
-            retries -= 1
-            retried_failures: list[HostFailure] = []
-            for batch_files, batch_failures in self._post_batches(
-                retry_specs, lambda b: self._post_batch(b, on_file)
-            ):
-                files.extend(batch_files)
-                retried_failures.extend(batch_failures)
-            failures = kept + retried_failures
         return DownloadReport(files=files, failures=failures)
 
     def list_dirs(self, specs: list[HostSpec]) -> ListingReport:
@@ -390,20 +367,17 @@ class FtpFleetDownloader:
             remote_path = item["remote_path"]
             raw = base64.b64decode(item["data_b64"])
             if on_file is not None:
-                # Same contract as direct mode: callback consumes the bytes, the
-                # report keeps none; a callback raise fails that file only and is
-                # tagged from_callback so the retry planner keeps it rather than
-                # re-downloading (which would re-run the callback's side effects).
+                # Same contract as direct mode: callback consumes the bytes,
+                # the report keeps none; a callback raise fails that file only.
                 try:
                     on_file(host, remote_path, raw)
                     files.append(FileResult(host=host, remote_path=remote_path, data=b""))
-                except Exception as exc:  # noqa: BLE001 - downstream, NOT retryable
+                except Exception as exc:  # noqa: BLE001
                     failures.append(
                         HostFailure(
                             host=host,
                             error=f"{type(exc).__name__}: {exc}",
                             remote_path=remote_path,
-                            from_callback=True,
                         )
                     )
             else:
@@ -508,12 +482,11 @@ def download_fleet(
     user: str,
     password: str,
     on_file: OnFile | None = None,
-    retries: int = 1,
     **kwargs: object,
 ) -> DownloadReport:
     """One-call wrapper, mirroring ftp_fleet_downloader.download_fleet."""
     downloader = FtpFleetDownloader(user=user, password=password, **kwargs)  # type: ignore[arg-type]
-    return downloader.download(specs, on_file=on_file, retries=retries)
+    return downloader.download(specs, on_file=on_file)
 
 
 def list_fleet(
