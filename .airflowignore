@@ -1,0 +1,34 @@
+# Airflow DAG-discovery ignore list (default regexp syntax).
+#
+# Patterns are Python regex, matched with re.search against each path RELATIVE
+# to this file's directory (the registered bundle root = repo root). If a path
+# matches any line, Airflow's scanner will NOT parse it as a DAG file.
+#
+# Why this exists: Airflow's safe-mode scanner imports any *.py containing both
+# the substrings "airflow" and "dag" as a standalone module. For library code
+# that uses relative imports (e.g. ftp_handler/direct_downloader/collect.py),
+# that standalone import fails with:
+#     ImportError: attempted relative import with no known parent package
+# These packages are meant to be IMPORTED at runtime, never parsed as DAGs.
+#
+# The ONLY directory holding real DAGs is airflow_mgmt/dags/ — everything else
+# below is ignored.
+
+# ── Top-level first-party packages (importable libs, not DAGs) ───────────────
+^ftp_handler/
+^ops_store/
+^minio_handler/
+^ops_index_mgmt/
+^url_shortner/
+^api/
+^tests/
+^utils/
+
+# ── Non-DAG folders inside airflow_mgmt/ (keep dags/ scanned) ────────────────
+^airflow_mgmt/dag_templates/
+^airflow_mgmt/scripts/
+^airflow_mgmt/templates/
+^airflow_mgmt/tests/
+^airflow_mgmt/utils/
+^airflow_mgmt/minio_handler/
+^airflow_mgmt/docs/
