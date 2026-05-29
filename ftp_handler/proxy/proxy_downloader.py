@@ -57,6 +57,7 @@ try:
         UploadReport,
         UploadResult,
         UploadSpec,
+        group_files_by_host,
         save_to_dir,
         specs_from_hosts,
         upload_specs_from_hosts,
@@ -80,6 +81,7 @@ except ImportError:  # copied beside fleet_downloader.py and imported bare
         UploadReport,
         UploadResult,
         UploadSpec,
+        group_files_by_host,
         save_to_dir,
         specs_from_hosts,
         upload_specs_from_hosts,
@@ -106,6 +108,7 @@ __all__ = [
     "UploadReport",
     "save_to_dir",
     "specs_from_hosts",
+    "group_files_by_host",
     "upload_specs_from_hosts",
 ]
 

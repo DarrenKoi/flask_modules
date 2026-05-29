@@ -26,6 +26,7 @@ from ftp_handler.direct_downloader.fleet_downloader import (
     UploadSpec,
     _safe_relative,
     download_fleet,
+    group_files_by_host,
     list_fleet,
     put_parquet_to_minio,
     put_pickle_to_minio,
@@ -618,6 +619,49 @@ class SpecBuildersTests(unittest.TestCase):
         specs = specs_from_hosts(["a"])
         self.assertEqual(specs[0].files, [])
         self.assertEqual(specs[0].listings, [])
+
+    def test_group_files_by_host_folds_pairs_per_host(self):
+        # Same host across rows collapses to one spec; paths accumulate as files.
+        specs = group_files_by_host(
+            [
+                ("10.0.0.1", "/a/1.idp"),
+                ("10.0.0.2", "/b/2.idp"),
+                ("10.0.0.1", "/a/3.idp"),
+            ]
+        )
+        self.assertEqual([s.host for s in specs], ["10.0.0.1", "10.0.0.2"])
+        self.assertEqual(specs[0].files, ["/a/1.idp", "/a/3.idp"])
+        self.assertEqual(specs[1].files, ["/b/2.idp"])
+        # files-only — this helper never produces listings.
+        self.assertEqual(specs[0].listings, [])
+
+    def test_group_files_by_host_preserves_first_appearance_order(self):
+        specs = group_files_by_host(
+            [("b", "/x"), ("a", "/y"), ("b", "/z")]
+        )
+        self.assertEqual([s.host for s in specs], ["b", "a"])
+
+    def test_group_files_by_host_accepts_generator(self):
+        # The DataFrame case feeds a generator, not a list — must consume it.
+        rows = [
+            ("10.0.0.1", "CLSA", "W1", "P100"),
+            ("10.0.0.1", "CLSA", "W1", "P101"),
+        ]
+        specs = group_files_by_host(
+            (ip, f"/HITACHI/DEVICE/HD/{cls}/data/{idw}/{idp}.idp")
+            for ip, cls, idw, idp in rows
+        )
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(
+            specs[0].files,
+            [
+                "/HITACHI/DEVICE/HD/CLSA/data/W1/P100.idp",
+                "/HITACHI/DEVICE/HD/CLSA/data/W1/P101.idp",
+            ],
+        )
+
+    def test_group_files_by_host_empty(self):
+        self.assertEqual(group_files_by_host([]), [])
 
 
 class ListDirsTests(_FakeFTPTestCase):

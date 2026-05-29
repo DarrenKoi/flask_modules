@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from ftplib import FTP, all_errors
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Callable, Iterator, Protocol, runtime_checkable
+from typing import Any, Callable, Iterable, Iterator, Protocol, runtime_checkable
 
 # The shared NLST normalizer lives in core so both downloaders behave
 # identically. Relative import in-package; bare fallback when copied out flat
@@ -798,6 +798,35 @@ def specs_from_hosts(
         HostSpec(host=host, files=list(files or []), listings=list(listings or []))
         for host in hosts
     ]
+
+
+def group_files_by_host(pairs: Iterable[tuple[str, str]]) -> list[HostSpec]:
+    """Fold ``(host, remote_path)`` pairs into one ``HostSpec`` per host.
+
+    The fan-in for the "I have a flat table of (IP, file-path) rows" case — a
+    DataFrame, a CSV, a SQL result — where the same host recurs across many rows
+    and each row names one fixed file to RETR. Rows are bucketed by host so each
+    host opens a single reused FTP connection (not one per file); host order
+    follows first appearance::
+
+        # df_meas_hist has columns eqp_ip, class_name, idw_name, idp_name
+        specs = group_files_by_host(
+            (row.eqp_ip,
+             f"/HITACHI/DEVICE/HD/{row.class_name}/data/{row.idw_name}/{row.idp_name}.idp")
+            for row in df_meas_hist.itertuples(index=False)
+        )
+        report = FtpFleetDownloader(user="hitachi", password="hid").download(specs)
+
+    Composing the remote path is the caller's one line — kept out of here because
+    the layout differs per deployment. Accepts any iterable of pairs (not a
+    DataFrame), so ``ftp_handler`` stays free of a pandas dependency. This is the
+    different-files-per-host counterpart to ``specs_from_hosts`` (same files to
+    every host).
+    """
+    by_host: dict[str, list[str]] = {}
+    for host, remote_path in pairs:
+        by_host.setdefault(host, []).append(remote_path)
+    return [HostSpec(host=host, files=paths) for host, paths in by_host.items()]
 
 
 def upload_specs_from_hosts(

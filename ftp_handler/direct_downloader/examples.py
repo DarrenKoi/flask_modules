@@ -15,6 +15,7 @@ from ftp_handler.direct_downloader import (
     build_host_specs,
     collect_fleet,
     download_fleet,
+    group_files_by_host,
     list_fleet,
     put_parquet_to_minio,
     put_pickle_to_minio,
@@ -49,6 +50,41 @@ def example_download_known_paths() -> None:
         print(f.host, f.remote_path, len(f.data))
     for x in report.failures:
         print("FAILED", x.host, x.remote_path, x.error)
+
+
+def example_per_host_paths_from_dataframe() -> None:
+    """Build specs from a DataFrame where each row is one (IP, file) to fetch.
+
+    The common "I have a measurement-history table, pull each row's file" case.
+    The same eqp_ip recurs across many rows, so group_files_by_host folds them
+    into one HostSpec per host — one reused FTP connection per host, not one per
+    file. Composing the remote path from the row's columns is the single caller
+    line below; group_files_by_host takes plain (host, path) pairs so this layer
+    never imports pandas. Credentials are shared across the whole fleet here:
+    user "hitachi", password "hid".
+    """
+    import pandas as pd
+
+    df_meas_hist = pd.DataFrame(
+        [
+            {"eqp_ip": "10.0.0.1", "class_name": "CLSA", "idw_name": "W1", "idp_name": "P100"},
+            {"eqp_ip": "10.0.0.1", "class_name": "CLSA", "idw_name": "W1", "idp_name": "P101"},
+            {"eqp_ip": "10.0.0.2", "class_name": "CLSB", "idw_name": "W2", "idp_name": "P200"},
+        ]
+    )
+
+    specs = group_files_by_host(
+        (
+            row.eqp_ip,
+            f"/HITACHI/DEVICE/HD/{row.class_name}/data/{row.idw_name}/{row.idp_name}.idp",
+        )
+        for row in df_meas_hist.itertuples(index=False)
+    )
+    report = FtpFleetDownloader(user="hitachi", password="hid").download(specs)
+
+    print(f"ok={report.ok} ng={report.ng}")
+    for f in report.files:
+        print(f.host, f.remote_path, len(f.data))
 
 
 def example_listing_then_download() -> None:

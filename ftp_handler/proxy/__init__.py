@@ -32,6 +32,7 @@ from .proxy_downloader import (
     UploadResult,
     UploadSpec,
     download_fleet,
+    group_files_by_host,
     list_fleet,
     save_to_dir,
     size_fleet,
@@ -62,5 +63,6 @@ __all__ = [
     "UploadReport",
     "save_to_dir",
     "specs_from_hosts",
+    "group_files_by_host",
     "upload_specs_from_hosts",
 ]
