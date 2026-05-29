@@ -1,9 +1,15 @@
 """Glue between the FTP fleet downloader and your storage + processing.
 
-Deliberately free of ``airflow.*``, ``minio``, and ``opensearch`` imports: the
+Deliberately free of orchestrator, ``minio``, and ``opensearch`` imports: the
 archive, parse, and index steps are passed in as callables, so this module is
 unit-testable with plain fakes and the DAG decides which concrete clients to
 use. That keeps the DAG thin and this layer portable.
+
+NOTE: the orchestrator's product name is intentionally not spelled out
+anywhere in this file. Its DAG-discovery scanner imports any source file
+containing both that name and "dag" as a *standalone* module, which breaks
+this package's relative imports ("attempted relative import with no known
+parent package"). Keep the literal name out of here.
 
 The data flow for one file, inside ``collect_fleet``'s ``on_file`` callback —
 this is the "room to process before sending to ops" you asked about:
@@ -38,7 +44,7 @@ IndexFn = Callable[[list[dict]], None]
 def build_host_specs(fleet: list[dict]) -> list[HostSpec]:
     """Turn runtime config into HostSpec objects.
 
-    ``fleet`` is the deserialized JSON from the Airflow Variable, e.g.::
+    ``fleet`` is the deserialized JSON from the orchestrator Variable, e.g.::
 
         [
           {"host": "10.0.0.1",
