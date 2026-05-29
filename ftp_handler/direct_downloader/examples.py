@@ -87,6 +87,44 @@ def example_per_host_paths_from_dataframe() -> None:
         print(f.host, f.remote_path, len(f.data))
 
 
+def example_per_host_paths_with_provenance() -> None:
+    """Carry extra DataFrame columns alongside each file for downstream tracking.
+
+    Same fan-in as example_per_host_paths_from_dataframe, but df_meas_hist also
+    has columns you need *later* (lot_id, recipe, ...) — they have nothing to do
+    with the download itself, you just want them attached to each file when you
+    store or index it. Keep them in a side dict keyed by (eqp_ip, remote_path):
+    that pair is exactly what a FileResult / on_file carries back, so it's the
+    natural join key. The metadata stays local (it never enters a HostSpec, so
+    it never hits the proxy wire). No helper needed — one loop builds both the
+    download pairs and the lookup.
+    """
+    import pandas as pd
+
+    df_meas_hist = pd.DataFrame(
+        [
+            {"eqp_ip": "10.0.0.1", "class_name": "CLSA", "idw_name": "W1",
+             "idp_name": "P100", "lot_id": "LOT777", "recipe": "R1"},
+            {"eqp_ip": "10.0.0.2", "class_name": "CLSB", "idw_name": "W2",
+             "idp_name": "P200", "lot_id": "LOT888", "recipe": "R2"},
+        ]
+    )
+
+    pairs: list[tuple[str, str]] = []
+    meta_by_key: dict[tuple[str, str], object] = {}
+    for row in df_meas_hist.itertuples(index=False):
+        path = f"/HITACHI/DEVICE/HD/{row.class_name}/data/{row.idw_name}/{row.idp_name}.idp"
+        pairs.append((row.eqp_ip, path))
+        meta_by_key[(row.eqp_ip, path)] = row  # keep the whole row, or pick columns
+
+    specs = group_files_by_host(pairs)
+    report = FtpFleetDownloader(user="hitachi", password="hid").download(specs)
+
+    for f in report.files:
+        m = meta_by_key[(f.host, f.remote_path)]  # join back to the source row
+        print(f.host, m.lot_id, m.recipe, len(f.data))
+
+
 def example_listing_then_download() -> None:
     """The "look before you download" pass for a large fleet.
 
