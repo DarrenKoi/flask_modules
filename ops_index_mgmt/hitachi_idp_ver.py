@@ -49,7 +49,8 @@ def build_mappings() -> dict[str, Any]:
                       name it means "last touched in OS" — used for
                       operational cleanup of the live write index by
                       activity, not by ingest cohort.
-    Reference-only wide objects (`raw_data`, `parameters`) are mapped
+    Reference-only wide objects (`raw_data`, `parameters`,
+    `wafer_para_loc_info`) are mapped
     `enabled: false`: stored verbatim in `_source` and returned on
     fetch, but never parsed or indexed. Their
     (potentially hundreds of) subfields therefore never count against
@@ -72,6 +73,7 @@ def build_mappings() -> dict[str, Any]:
             "os_inserted": {"type": "date"},
             "raw_data": {"type": "object", "enabled": False},
             "parameters": {"type": "object", "enabled": False},
+            "wafer_para_loc_info": {"type": "object", "enabled": False},
         },
         "dynamic_templates": [
             {
@@ -221,6 +223,26 @@ def put_index_templates(client: Any) -> dict[str, dict[str, Any]]:
 
     return {
         alias: put_index_template(client, alias)
+        for alias in INDEX_ALIASES
+    }
+
+
+def put_live_index_mappings(client: Any) -> dict[str, dict[str, Any]]:
+    """Add newly declared mapping fields to the already-created indices.
+
+    Index templates only shape indices created *after* the template is
+    updated, so a field added to `build_mappings()` never reaches the
+    backing indices that already exist. `PUT mapping` is additive: it
+    creates new fields and is a no-op for fields whose definition is
+    unchanged. It CANNOT redefine an already-mapped field, so run this
+    only before the new field has been ingested — once a document writes
+    it, dynamic mapping fixes its type and the `enabled: false` change is
+    rejected. Targets the rollover aliases, so the write index of each
+    family picks the new field up immediately.
+    """
+
+    return {
+        alias: client.indices.put_mapping(index=alias, body=build_mappings())
         for alias in INDEX_ALIASES
     }
 
