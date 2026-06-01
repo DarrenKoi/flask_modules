@@ -35,6 +35,11 @@ class MinioObject(MinioBase):
     ) -> Any:
         """Write raw bytes or a binary stream to ``key``.
 
+        ``data`` must already be bytes or a binary stream. For a live Python
+        value (list, dict, ...) use ``put_json`` / ``put_pickle`` instead —
+        they serialize first and set the right ``content_type``; passing the
+        value here routes it through the stream branch and fails downstream.
+
         For streams without a known size, pass ``length=-1`` and a non-zero
         ``part_size`` (e.g. 10 * 1024 * 1024).
         """
