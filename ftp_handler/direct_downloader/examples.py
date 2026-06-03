@@ -17,6 +17,7 @@ from ftp_handler.direct_downloader import (
     download_fleet,
     group_files_by_host,
     list_fleet,
+    put_bytes_to_minio,
     put_parquet_to_minio,
     put_pickle_to_minio,
     save_to_dir,
@@ -185,6 +186,42 @@ def example_streaming_to_disk() -> None:
     dl = FtpFleetDownloader(user=USER, password=PASSWORD)
     report = dl.download(specs, on_file=save_to_dir("/data/eqp_downloads"))
     print(f"wrote {report.ok} files, {report.ng} failures")
+
+
+def example_stream_to_minio_raw() -> None:
+    """Archive each file's RAW bytes to MinIO, unchanged, with bounded RAM.
+
+    The simplest sink: put_bytes_to_minio returns an on_file callback that PUTs
+    the downloaded bytes straight to MinIO via client.put — no parse, no
+    serialization. Each file is uploaded the moment it lands, so nothing hits
+    local disk and peak memory stays at concurrency x file size. Objects land at
+    <host>/<remote path> by default; the ``key`` arg below partitions by host
+    and KST date so old data is easy to list and purge later. ``then`` could
+    chain a parse + OpenSearch index call to archive AND process in one pass.
+
+    Reach for this to keep equipment logs/.dat files byte-for-byte. For parsed
+    values use example_stream_to_minio_pickle / _parquet instead.
+    """
+    from datetime import datetime
+    from pathlib import PurePosixPath
+    from zoneinfo import ZoneInfo
+
+    from minio_handler import MinioObject
+
+    day = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+
+    def key(host: str, remote_path: str) -> str:
+        return f"eqp/{host}/{day}/{PurePosixPath(remote_path).name}"
+
+    mc = MinioObject(bucket="eqp-logs")  # reads MinIO env vars
+    specs = specs_from_hosts(FLEET_HOSTS, listings=[ListDir("/MEAS", "*.dat")])
+    report = FtpFleetDownloader(user=USER, password=PASSWORD).download(
+        specs, on_file=put_bytes_to_minio(mc, key=key)
+    )
+
+    print(f"stored ok={report.ok} ng={report.ng}")
+    for x in report.failures:  # an upload raise is isolated to its file
+        print("FAILED", x.host, x.remote_path, x.error)
 
 
 def example_stream_to_minio_pickle() -> None:

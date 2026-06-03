@@ -1049,3 +1049,44 @@ def put_parquet_to_minio(
             then(host, remote_path, data)
 
     return on_file
+
+
+def put_bytes_to_minio(
+    client: Any,
+    *,
+    key: KeyFn | None = None,
+    then: OnFile | None = None,
+) -> OnFile:
+    """Build an ``on_file`` callback that puts each file's RAW bytes to MinIO.
+
+    The simplest MinIO sink: the downloaded bytes are uploaded unchanged via
+    ``client.put`` — no serialization, no transform. Use this to archive files
+    exactly as they came off the FTP server (logs, .dat, anything). Nothing
+    touches disk and peak RAM stays bounded by ``max_concurrency`` (streaming),
+    same as ``put_pickle_to_minio`` / ``put_parquet_to_minio``. ``client`` is an
+    injected ``minio_handler.MinioObject`` (passed in, never imported here, so
+    ``ftp_handler`` stays free of a minio dependency).
+
+    By default the object lands at ``<host>/<remote path>`` (the remote
+    directory structure preserved as the key, no suffix); pass ``key`` to choose
+    your own scheme. ``then`` chains a second callback after the upload (e.g.
+    parse + index to OpenSearch), so you archive AND process in one pass::
+
+        mc = MinioObject(bucket="eqp-logs")
+        dl.download(specs, on_file=put_bytes_to_minio(mc))
+
+        # custom key + index in the same streaming pass
+        dl.download(specs, on_file=put_bytes_to_minio(
+            mc,
+            key=lambda host, rp: f"eqp/{host}/{day}/{PurePosixPath(rp).name}",
+            then=lambda host, rp, data: index(parse(host, rp, data)),
+        ))
+    """
+    key_for = key or (lambda host, remote_path: _object_key(host, remote_path, ""))
+
+    def on_file(host: str, remote_path: str, data: bytes) -> None:
+        client.put(key_for(host, remote_path), data)
+        if then is not None:
+            then(host, remote_path, data)
+
+    return on_file
