@@ -90,7 +90,7 @@ FLEET_VARIABLE = os.getenv("EQP_FTP_FLEET_VARIABLE", "eqp_ftp_fleet")
 FTP_CONN_ID = os.getenv("EQP_FTP_CONN_ID", "eqp_ftp")
 MINIO_BUCKET = os.getenv("EQP_FTP_BUCKET", "eqp-logs")
 OPENSEARCH_INDEX = os.getenv("EQP_FTP_INDEX", "eqp_meas")
-MAX_CONCURRENCY = int(os.getenv("EQP_FTP_MAX_CONCURRENCY", "48"))
+MAX_CONCURRENCY = int(os.getenv("EQP_FTP_MAX_CONCURRENCY", "16"))
 CONNECT_TIMEOUT = float(os.getenv("EQP_FTP_CONNECT_TIMEOUT", "8"))
 HOST_TIMEOUT = float(os.getenv("EQP_FTP_HOST_TIMEOUT", "60"))
 # Fail (alert) only when more than this fraction of hosts/files fail.
