@@ -1,7 +1,8 @@
 """Object-level CRUD operations against a MinIO / S3-compatible bucket."""
 
 import io
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -13,6 +14,20 @@ def _delete_object_class() -> type[Any]:
     from minio.deleteobjects import DeleteObject
 
     return DeleteObject
+
+
+@dataclass(slots=True)
+class GetManyResult:
+    """Outcome of a batch ``get_many``.
+
+    ``objects`` maps each key that loaded to its value, in the order the keys
+    were requested — raw bytes, or whatever ``decode`` returned. ``errors``
+    maps each key that failed to the exception raised, so a skipped key is
+    never silently lost.
+    """
+
+    objects: dict[str, Any]
+    errors: dict[str, Exception]
 
 
 class MinioObject(MinioBase):
@@ -118,6 +133,38 @@ class MinioObject(MinioBase):
         finally:
             response.close()
             response.release_conn()
+
+    def get_many(
+        self,
+        keys: Iterable[str],
+        *,
+        bucket: str | None = None,
+        decode: Callable[[bytes], Any] | None = None,
+    ) -> GetManyResult:
+        """Fetch many objects in sequence; skip (don't raise on) failures.
+
+        Keys are fetched one at a time. A key that fails is recorded in
+        ``GetManyResult.errors`` and the rest still load; both result maps keep
+        the order the keys were requested. The whole batch stays resident in
+        ``objects`` at once, so call this for bounded key lists — for sweeping a
+        large prefix, loop and process each object instead.
+
+        ``decode`` turns each body into a value (e.g. ``pickle.loads`` or
+        ``lambda b: pd.read_parquet(io.BytesIO(b))``); it runs inside the
+        per-key guard, so a body that fails to decode lands in ``errors`` just
+        like a failed download. Omit it to keep raw bytes. A single ``decode``
+        assumes every key in the batch is the same type.
+        """
+
+        objects: dict[str, Any] = {}
+        errors: dict[str, Exception] = {}
+        for key in keys:
+            try:
+                body = self.get(key, bucket=bucket)
+                objects[key] = decode(body) if decode is not None else body
+            except Exception as exc:
+                errors[key] = exc
+        return GetManyResult(objects=objects, errors=errors)
 
     def put_json(
         self,
