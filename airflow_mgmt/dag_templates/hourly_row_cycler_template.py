@@ -40,8 +40,8 @@ How to adapt:
     bootstrap; delete the bootstrap entirely if you end up importing nothing
     repo-local.
   4. Tune OVERLAP to your expected per-run row drift — benchmark it against
-    your real churn with `python3 airflow_mgmt/scripts/row_cycler.py`. A
-    runnable usage demo lives in scripts/examples.py.
+    your real churn with `python3 airflow_mgmt/scripts/row_cycler.py`, which
+    also prints runnable usage demos.
 
 This file lives OUTSIDE airflow_mgmt/dags/ so Airflow does not auto-load it.
 The slot math mirrors scripts/row_cycler.py, which carries the coverage
