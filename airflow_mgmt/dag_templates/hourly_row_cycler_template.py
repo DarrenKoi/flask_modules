@@ -28,7 +28,7 @@ Do NOT use this when:
   - Newly inserted rows need to be checked within the same week. Positional
     slicing covers mid-week inserts only ~50% that week (they wait until the
     next week, worst case ~2 weeks from insert). Add a separate "new rows
-    since last run" fast-path if that SLA matters. See row_cycler.py.
+    since last run" fast-path if that SLA matters. See scripts/row_cycler.py.
   - Per-row work is heavy I/O at ~n/168 rows/run that won't fit the hourly
     pod budget. Partition further with .expand() (see mapped_batch_template).
 
@@ -40,11 +40,15 @@ How to adapt:
     bootstrap; delete the bootstrap entirely if you end up importing nothing
     repo-local.
   4. Tune OVERLAP to your expected per-run row drift — benchmark it against
-    your real churn with `python3 row_cycler.py` at the repo root.
+    your real churn with `python3 airflow_mgmt/scripts/row_cycler.py`. A
+    runnable usage demo lives in scripts/examples.py.
 
 This file lives OUTSIDE airflow_mgmt/dags/ so Airflow does not auto-load it.
-The slot math mirrors the repo-root row_cycler.py, which carries the coverage
-benchmark — keep them in sync if you change the boundary formula.
+The slot math mirrors scripts/row_cycler.py, which carries the coverage
+benchmark — keep them in sync if you change the boundary formula. (Now that
+row_cycler lives under scripts/, you can instead import it directly here with
+`from scripts.row_cycler import rows_for_this_run` after the bootstrap and
+drop the inlined copy, the way item_check_dag.py imports its helpers.)
 """
 
 import logging
@@ -84,7 +88,7 @@ if str(ROOT_DIR) not in sys.path:
 # from minio_handler import MinioObject  # noqa: E402
 
 
-# ── periodic row-cycler math (mirrors repo-root row_cycler.py) ───────────────
+# ── periodic row-cycler math (mirrors scripts/row_cycler.py) ─────────────────
 RUNS_PER_WEEK = 24 * 7  # 168 hourly runs per week (fixed by the hourly schedule)
 CYCLES_PER_WEEK = 2  # full sweeps per week; pick a divisor of RUNS_PER_WEEK
 CYCLE_SLOTS = RUNS_PER_WEEK // CYCLES_PER_WEEK  # runs to complete one full sweep
@@ -175,7 +179,12 @@ with DAG(
     dag_id="template_hourly_row_cycler",
     description="Template: hourly weekly-cycle row checker (one slice/run, full sweep/week)",
     start_date=datetime(2026, 1, 1),
-    schedule="0 * * * *",
+    # Fire at :30, not :00 — dodges the top-of-hour scheduler congestion and
+    # centers each run in its hour, leaving 30 min of margin to either hour
+    # boundary so a delayed run still reads the intended slot from the wall
+    # clock. The slot uses only the hour, so the minute offset is otherwise
+    # invisible to the cycle.
+    schedule="30 * * * *",
     catchup=False,
     max_active_runs=1,
     tags=["template", "row-cycler", "hourly"],

@@ -24,7 +24,7 @@ and be missed for that cycle. `overlap` re-covers small drift; it does NOT
 cover bulk reindexing. The benchmark below measures exactly this — run it
 with your expected per-run churn to size `overlap`.
 
-    python3 row_cycler.py
+    python3 airflow_mgmt/scripts/row_cycler.py
 """
 
 import random
