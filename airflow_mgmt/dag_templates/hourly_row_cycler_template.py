@@ -1,16 +1,21 @@
 """
 template / hourly_row_cycler_template.
 
-Classic `with DAG(...)` hourly job that sweeps a large dataframe over a week:
-each hourly run processes ONE contiguous slice so every row is checked at
-least once per week. 24 * 7 = 168 runs/week, so ~n/168 rows per run (e.g.
-15000 rows -> ~90/run, ~104-120/run with overlap=15).
+Classic `with DAG(...)` hourly job that sweeps a large dataframe on a fixed
+cadence: each hourly run processes ONE contiguous slice so every row is
+checked CYCLES_PER_WEEK times per week. 24 * 7 = 168 runs/week; one full
+sweep takes CYCLE_SLOTS = 168 // CYCLES_PER_WEEK runs, so ~n/CYCLE_SLOTS rows
+per run. Dial CYCLES_PER_WEEK (a divisor of 168) to trade frequency vs.
+per-run load — e.g. 15000 rows:
+    CYCLES_PER_WEEK=1 -> ~90/run  (once a week)
+    CYCLES_PER_WEEK=2 -> ~178/run (twice a week, ~193-209 with overlap=15)
+    CYCLES_PER_WEEK=4 -> ~357/run (four times a week)
 
 The slot is derived from the wall clock (KST) at run time, so the DAG behaves
 identically inside or outside Airflow. The only cost is the rare case where a
 run is delayed or retried ACROSS an hour boundary: it then reads the later
 hour and processes that slot's slice instead of its own. For "at least once a
-week" that just defers ~n/168 rows to the following week — harmless here. If
+week" that just defers ~n/CYCLE_SLOTS rows to the next cycle — harmless here. If
 you ever need the scheduled hour pinned regardless of execution time, swap
 datetime.now(KST) for context["logical_date"] in _select_rows.
 
@@ -79,24 +84,28 @@ if str(ROOT_DIR) not in sys.path:
 # from minio_handler import MinioObject  # noqa: E402
 
 
-# ── weekly row-cycler math (mirrors repo-root row_cycler.py) ─────────────────
-TOTAL_SLOTS = 24 * 7  # 168 hourly runs per week
+# ── periodic row-cycler math (mirrors repo-root row_cycler.py) ───────────────
+RUNS_PER_WEEK = 24 * 7  # 168 hourly runs per week (fixed by the hourly schedule)
+CYCLES_PER_WEEK = 2  # full sweeps per week; pick a divisor of RUNS_PER_WEEK
+CYCLE_SLOTS = RUNS_PER_WEEK // CYCLES_PER_WEEK  # runs to complete one full sweep
 KST = ZoneInfo("Asia/Seoul")
 OVERLAP = 15  # rows of margin on each slice side; absorbs small per-run drift
 
 
 def _slot_for(when: datetime) -> int:
-    """Hour-of-week as 0..167 in KST. A naive datetime is taken to already be
-    KST (ingest convention); an aware one is converted."""
+    """Slot 0..CYCLE_SLOTS-1: position within the current sweep, from the KST
+    hour-of-week folded into the cycle. A naive datetime is taken to already
+    be KST (ingest convention); an aware one is converted."""
     when = when.replace(tzinfo=KST) if when.tzinfo is None else when.astimezone(KST)
-    return when.weekday() * 24 + when.hour
+    return (when.weekday() * 24 + when.hour) % CYCLE_SLOTS
 
 
 def _slot_bounds(slot: int, n: int, overlap: int = OVERLAP) -> tuple[int, int]:
     """Half-open [lo, hi) row range this slot owns. Fractional boundaries tile
-    [0, n) exactly across the 168 slots, with `overlap` margin each side."""
-    start = (slot * n) // TOTAL_SLOTS
-    end = ((slot + 1) * n) // TOTAL_SLOTS
+    [0, n) exactly across the CYCLE_SLOTS slots, with `overlap` margin each
+    side."""
+    start = (slot * n) // CYCLE_SLOTS
+    end = ((slot + 1) * n) // CYCLE_SLOTS
     return max(0, start - overlap), min(n, end + overlap)
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -132,7 +141,7 @@ def _select_rows() -> list[str]:
     selected = keys[lo:hi]
     log.info(
         "slot=%d/%d slice=[%d:%d] rows=%d of %d",
-        slot, TOTAL_SLOTS, lo, hi, len(selected), len(keys),
+        slot, CYCLE_SLOTS, lo, hi, len(selected), len(keys),
     )
     return selected
 
