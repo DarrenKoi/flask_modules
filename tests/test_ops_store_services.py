@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 _HAS_PANDAS = importlib.util.find_spec("pandas") is not None
 
 from ops_store import (
+    BulkCreateResult,
     OSConfig,
     OSDoc,
     OSIndex,
@@ -349,6 +350,100 @@ class OSDocTests(unittest.TestCase):
         self.assertEqual(len(actions), 2)
         for action in actions:
             self.assertEqual(action["_op_type"], "create")
+
+    def test_bulk_create_lifts_id_out_of_source_and_uses_create_op(self) -> None:
+        documents = [
+            {"_id": "a", "title": "one"},
+            {"_id": "b", "title": "two"},
+        ]
+
+        with patch("ops_store.document._bulk_helper") as bulk_helper:
+            bulk_function = Mock(return_value=(2, []))
+            bulk_helper.return_value = bulk_function
+            result = self.service.bulk_create(documents, refresh=True)
+
+        self.assertEqual(result, BulkCreateResult(created=2, skipped=0, errors=[]))
+        actions = list(bulk_function.call_args.args[1])
+        self.assertEqual(
+            actions,
+            [
+                {
+                    "_op_type": "create",
+                    "_index": "articles",
+                    "_id": "a",
+                    "_source": {"title": "one"},
+                },
+                {
+                    "_op_type": "create",
+                    "_index": "articles",
+                    "_id": "b",
+                    "_source": {"title": "two"},
+                },
+            ],
+        )
+        self.assertEqual(bulk_function.call_args.kwargs["chunk_size"], 500)
+        self.assertTrue(bulk_function.call_args.kwargs["refresh"])
+        self.assertFalse(bulk_function.call_args.kwargs["raise_on_error"])
+
+    def test_bulk_create_accepts_custom_id_field(self) -> None:
+        documents = [{"key": "k1", "title": "one"}]
+
+        with patch("ops_store.document._bulk_helper") as bulk_helper:
+            bulk_function = Mock(return_value=(1, []))
+            bulk_helper.return_value = bulk_function
+            self.service.bulk_create(documents, id_field="key")
+
+        actions = list(bulk_function.call_args.args[1])
+        self.assertEqual(
+            actions,
+            [
+                {
+                    "_op_type": "create",
+                    "_index": "articles",
+                    "_id": "k1",
+                    "_source": {"title": "one"},
+                },
+            ],
+        )
+
+    def test_bulk_create_counts_existing_ids_as_skipped(self) -> None:
+        documents = [
+            {"_id": "a", "title": "one"},
+            {"_id": "b", "title": "two"},
+            {"_id": "c", "title": "three"},
+        ]
+        raw_errors = [
+            {"create": {"_id": "b", "status": 409, "error": {"type": "version_conflict_engine_exception"}}},
+            {"create": {"_id": "c", "status": 400, "error": {"type": "mapper_parsing_exception"}}},
+        ]
+
+        with patch("ops_store.document._bulk_helper") as bulk_helper:
+            bulk_function = Mock(return_value=(1, raw_errors))
+            bulk_helper.return_value = bulk_function
+            result = self.service.bulk_create(documents)
+
+        self.assertEqual(result.created, 1)
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(
+            result.errors,
+            [{"create": {"_id": "c", "status": 400, "error": {"type": "mapper_parsing_exception"}}}],
+        )
+
+    def test_bulk_create_normalizes_when_requested(self) -> None:
+        documents = [
+            {"_id": "a", "created_at": datetime(2024, 4, 21, 10, 30, 0), "score": float("nan")},
+        ]
+
+        with patch("ops_store.document._bulk_helper") as bulk_helper:
+            bulk_function = Mock(return_value=(1, []))
+            bulk_helper.return_value = bulk_function
+            self.service.bulk_create(documents, normalize=True)
+
+        actions = list(bulk_function.call_args.args[1])
+        self.assertEqual(
+            actions[0]["_source"],
+            {"created_at": "2024-04-21T10:30:00", "score": None},
+        )
 
 
 @unittest.skipUnless(_HAS_PANDAS, "pandas not installed")

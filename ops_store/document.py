@@ -2,6 +2,7 @@
 
 import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from functools import lru_cache
@@ -109,6 +110,20 @@ def normalize_document(document: Mapping[str, Any]) -> dict[str, Any]:
     """Convert a document into a JSON-safe structure for bulk indexing."""
 
     return {str(key): _normalize_value(value) for key, value in document.items()}
+
+
+@dataclass(slots=True, frozen=True)
+class BulkCreateResult:
+    """Outcome of a :meth:`OSDoc.bulk_create` call.
+
+    ``created`` counts documents written, ``skipped`` counts ids that already
+    existed (HTTP 409 conflicts, treated as a no-op), and ``errors`` holds any
+    remaining bulk-item failures that are *not* id collisions.
+    """
+
+    created: int
+    skipped: int
+    errors: list[Any] = field(default_factory=list)
 
 
 class OSDoc(OSBase):
@@ -319,6 +334,66 @@ class OSDoc(OSBase):
             refresh=refresh,
             raise_on_error=raise_on_error,
         )
+
+    def bulk_create(
+        self,
+        documents: Iterable[Mapping[str, Any]],
+        *,
+        id_field: str = "_id",
+        index: str | None = None,
+        normalize: bool = False,
+        chunk_size: int | None = None,
+        refresh: bool = False,
+    ) -> BulkCreateResult:
+        """Insert documents under caller-supplied ids, skipping ids already present.
+
+        Each document carries its id under ``id_field`` (default ``"_id"``); that
+        key is lifted out to become the document ``_id`` and is **not** stored in
+        ``_source``. Uses the bulk ``create`` op type, so a document whose id
+        already exists is skipped (HTTP 409) instead of overwriting the existing
+        one — making the call safe to re-run. Set ``normalize=True`` to coerce
+        non-JSON values (datetimes, Decimals, NaN, numpy scalars) before sending.
+
+        Returns a :class:`BulkCreateResult` separating ``created`` from ``skipped``
+        (already-existing) ids, with any non-conflict failures in ``errors``.
+        """
+
+        name = self._resolve_index(index)
+        actual_chunk_size = chunk_size or (
+            self.config.bulk_chunk if self.config is not None else 500
+        )
+
+        def iter_actions() -> Iterator[dict[str, Any]]:
+            for document in documents:
+                source = (
+                    normalize_document(document) if normalize else dict(document)
+                )
+                doc_id = source.pop(id_field, None)
+                action: dict[str, Any] = {
+                    "_op_type": "create",
+                    "_index": name,
+                    "_id": str(doc_id),
+                    "_source": source,
+                }
+                yield action
+
+        created, raw_errors = self._run_bulk(
+            iter_actions(),
+            chunk_size=actual_chunk_size,
+            refresh=refresh,
+            raise_on_error=False,
+        )
+
+        skipped = 0
+        errors: list[Any] = []
+        for item in raw_errors:
+            status = item.get("create", {}).get("status") if isinstance(item, Mapping) else None
+            if status == 409:
+                skipped += 1
+            else:
+                errors.append(item)
+
+        return BulkCreateResult(created=created, skipped=skipped, errors=errors)
 
     def bulk_index_dataframe(
         self,
