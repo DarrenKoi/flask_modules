@@ -292,6 +292,30 @@ OSDoc(index="recipe-events-write").bulk_create(records)
 저장됩니다. 별도 field로도 남기고 싶으면 다른 이름으로 한 번 더 넣으세요
 (예: `{"_id": cid, "composite_id": cid, **r}`).
 
+### `id_field`로 다른 key를 id로 지정하기
+
+dict를 새로 만들지 않고, 이미 들고 있는 field를 그대로 `_id`로 쓰고 싶을 때는
+`id_field`에 그 key 이름을 넘깁니다. 해당 key는 꺼내서 document `_id`로 올라가고
+`_source`에는 저장되지 않습니다.
+
+```python
+records = [
+    {"event_id": "recipe-001", "tool_id": "CDSEM-01", "status": "done"},
+    {"event_id": "recipe-002", "tool_id": "CDSEM-02", "status": "failed"},
+]
+
+result = OSDoc(index="recipe-events-write").bulk_create(
+    records,
+    id_field="event_id",   # event_id를 _id로 올림 → _source에는 tool_id, status만 남음
+)
+# 위 records의 _id는 각각 "recipe-001", "recipe-002"가 되고,
+# 다시 같은 batch를 돌리면 result.skipped == 2 (전부 이미 존재)
+```
+
+`id_field`로 지정한 key가 `_source`에서 빠지는 게 싫다면(= id로도 쓰고 field로도
+남기고 싶다면), `id_field`를 쓰지 말고 위의 "직접 넣기"처럼 `_id`를 따로 넣으세요:
+`{"_id": r["event_id"], **r}`.
+
 ## Search task 예제
 
 ```python
