@@ -198,6 +198,88 @@ doc_service.bulk_index_dataframe(
 )
 ```
 
+## beam_shape_cdsem + reso_center_cdsem indices
+
+`beam_reso_cdsem.py` creates two low-volume CD-SEM measurement families
+that **share one ISM policy** — same shape as `hitachi_idp_ver.py`, but
+with per-alias mappings:
+
+- shared ISM policy `beam_reso_cdsem_retention_policy`
+- index template `beam_shape_cdsem_template`
+- index template `reso_center_cdsem_template`
+- first backing index `beam_shape_cdsem-000001`
+- first backing index `reso_center_cdsem-000001`
+- write/search alias `beam_shape_cdsem`
+- write/search alias `reso_center_cdsem`
+
+Settings (both families):
+
+- primary shards: `2`
+- replicas: `1`
+- rollover: write index reaches `500000` docs (safety net only — the data
+  is low-volume, so each family normally stays a single backing index)
+- retention: delete backing indices after `1095d` (3 years)
+
+The one policy's `ism_template` lists both `beam_shape_cdsem-*` and
+`reso_center_cdsem-*`, so rolled-over backing indices in either family
+auto-attach to the same policy.
+
+Field mapping:
+
+- `os_inserted` → `date` (explicit; KST write-time stamp, doesn't end in
+  `_tm`/`_dt` so the dynamic templates miss it) — both families
+- any `*_tm` / `*_dt` columns → `date` via `dynamic_templates` — both
+- **`reso_center_cdsem` only**: `Resolution_Range`,
+  `Resolution_Range_Raw`, `Resolution_Range_Smooth` are dicts whose
+  sub-keys hold lists of floats — fetched whole to plot, never
+  filtered/aggregated → `object` with `enabled: false`. The entire dict
+  (lists and all) is stored verbatim in `_source` and returned on fetch,
+  but never parsed, so its sub-keys are never mapped and cost nothing
+  against `index.mapping.total_fields.limit` (default 1000) no matter how
+  many or which keys appear. To query one sub-key later, promote it to a
+  real top-level field and reindex.
+- everything else falls through to default dynamic mapping
+
+```bash
+python -m ops_index_mgmt.beam_reso_cdsem --dry-run
+python -m ops_index_mgmt.beam_reso_cdsem
+```
+
+Ingest a list of dicts with a composite `_id` built from `eqp_ip`,
+`timestamp`, `beam_condition`. `iter_bulk_actions` builds the id, stamps
+`os_inserted` (KST), and **skips any doc missing an id field**
+(`has_id_fields`: key absent, `None`, or blank string — but `0` is kept).
+A composite id needs the raw-action `OSDoc.bulk`; `bulk_index` only copies
+a single field into `_id`:
+
+```python
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from ops_store import OSDoc, create_client
+from ops_index_mgmt.beam_reso_cdsem import has_id_fields, iter_bulk_actions
+
+doc_service = OSDoc(client=create_client(...))
+
+skipped = sum(1 for doc in docs if not has_id_fields(doc))
+if skipped:
+    print(f"skipping {skipped} docs missing an id field")
+
+os_inserted_kst = (
+    datetime.now(tz=ZoneInfo("Asia/Seoul")).replace(microsecond=0).isoformat()
+)
+actions = iter_bulk_actions(
+    docs,
+    index="beam_shape_cdsem",   # or "reso_center_cdsem"
+    os_inserted=os_inserted_kst,
+    op_type="create",           # "index" to overwrite-by-id
+)
+success_count, errors = doc_service.bulk(actions, refresh=False)
+```
+
+The full annotated version lives in the reference block at the bottom of
+`beam_reso_cdsem.py`.
+
 ## Elasticsearch → OpenSearch reindex
 
 `es_to_os_reindex.py` copies one ES index into one OpenSearch index using the

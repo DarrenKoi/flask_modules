@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import Mock, call, patch
 
+from ops_index_mgmt import beam_reso_cdsem as beam_reso
 from ops_index_mgmt import hitachi_sem_msr_info as mgmt
 
 
@@ -187,6 +188,115 @@ class SemMsrInfoIndexMgmtTests(unittest.TestCase):
             ["meas_hist_cdsem", "meas_hist_hvsem"],
         )
         self.assertEqual(client.indices.create.call_count, 2)
+
+
+class BeamResoCdsemTests(unittest.TestCase):
+    def test_make_doc_id_joins_the_three_id_fields_in_order(self) -> None:
+        doc = {
+            "eqp_ip": "10.1.2.3",
+            "timestamp": "2026-06-09T10:00:00+09:00",
+            "beam_condition": "lowkv",
+            "other": "ignored",
+        }
+
+        self.assertEqual(
+            beam_reso.make_doc_id(doc),
+            "10.1.2.3_2026-06-09T10:00:00+09:00_lowkv",
+        )
+
+    def test_make_doc_id_coerces_non_string_values(self) -> None:
+        doc = {"eqp_ip": "10.1.2.3", "timestamp": 1700000000, "beam_condition": 5}
+
+        self.assertEqual(beam_reso.make_doc_id(doc), "10.1.2.3_1700000000_5")
+
+    def test_make_doc_id_raises_when_an_id_field_is_missing(self) -> None:
+        with self.assertRaises(KeyError):
+            beam_reso.make_doc_id({"eqp_ip": "10.1.2.3", "timestamp": "t"})
+
+    def test_has_id_fields_accepts_complete_doc_including_zero_values(self) -> None:
+        self.assertTrue(
+            beam_reso.has_id_fields(
+                {"eqp_ip": "10.1.2.3", "timestamp": 0, "beam_condition": 0}
+            )
+        )
+
+    def test_has_id_fields_rejects_missing_none_and_blank(self) -> None:
+        base = {"eqp_ip": "ip", "timestamp": "t", "beam_condition": "b"}
+
+        self.assertFalse(beam_reso.has_id_fields({k: v for k, v in base.items() if k != "timestamp"}))
+        self.assertFalse(beam_reso.has_id_fields({**base, "eqp_ip": None}))
+        self.assertFalse(beam_reso.has_id_fields({**base, "beam_condition": "   "}))
+
+    def test_iter_bulk_actions_skips_docs_missing_an_id_field(self) -> None:
+        docs = [
+            {"eqp_ip": "ip1", "timestamp": "t1", "beam_condition": "b1", "v": 1},
+            {"eqp_ip": "ip2", "timestamp": "t2"},  # missing beam_condition -> skip
+            {"eqp_ip": "ip3", "timestamp": "t3", "beam_condition": "b3", "v": 3},
+        ]
+
+        actions = list(
+            beam_reso.iter_bulk_actions(
+                docs,
+                index="beam_shape_cdsem",
+                os_inserted="2026-06-09T10:00:00+09:00",
+            )
+        )
+
+        self.assertEqual([a["_id"] for a in actions], ["ip1_t1_b1", "ip3_t3_b3"])
+        first = actions[0]
+        self.assertEqual(first["_op_type"], "create")
+        self.assertEqual(first["_index"], "beam_shape_cdsem")
+        self.assertEqual(first["_source"]["v"], 1)
+        self.assertEqual(
+            first["_source"]["os_inserted"], "2026-06-09T10:00:00+09:00"
+        )
+
+    def test_iter_bulk_actions_honors_op_type_override(self) -> None:
+        docs = [{"eqp_ip": "ip", "timestamp": "t", "beam_condition": "b"}]
+
+        actions = list(
+            beam_reso.iter_bulk_actions(
+                docs,
+                index="reso_center_cdsem",
+                os_inserted="2026-06-09T10:00:00+09:00",
+                op_type="index",
+            )
+        )
+
+        self.assertEqual(actions[0]["_op_type"], "index")
+
+    def test_reso_center_mapping_disables_the_three_resolution_objects(self) -> None:
+        mappings = beam_reso.build_mappings("reso_center_cdsem")
+        props = mappings["properties"]
+
+        for field in (
+            "Resolution_Range",
+            "Resolution_Range_Raw",
+            "Resolution_Range_Smooth",
+        ):
+            self.assertEqual(props[field], {"type": "object", "enabled": False})
+        self.assertEqual(props["os_inserted"], {"type": "date"})
+
+    def test_beam_shape_mapping_has_no_disabled_objects(self) -> None:
+        props = beam_reso.build_mappings("beam_shape_cdsem")["properties"]
+
+        self.assertEqual(list(props), ["os_inserted"])
+
+    def test_shared_policy_covers_both_index_patterns(self) -> None:
+        policy = beam_reso.build_ism_policy_body()["policy"]
+
+        self.assertEqual(
+            policy["ism_template"][0]["index_patterns"],
+            ["beam_shape_cdsem-*", "reso_center_cdsem-*"],
+        )
+        self.assertEqual(
+            policy["states"][0]["actions"],
+            [{"rollover": {"min_doc_count": 500000}}],
+        )
+        self.assertEqual(
+            policy["states"][0]["transitions"][0]["conditions"],
+            {"min_index_age": "1095d"},
+        )
 
 
 if __name__ == "__main__":
