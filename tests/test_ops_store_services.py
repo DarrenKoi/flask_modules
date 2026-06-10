@@ -1122,6 +1122,94 @@ class OSSearchTests(unittest.TestCase):
 
         self.assertIsNone(service.latest("event_tm"))
 
+    def test_latest_match_dataframe_builds_match_query_and_sorts_desc(self) -> None:
+        client = Mock()
+        client.indices.get_mapping.return_value = {
+            "people": {"mappings": {"properties": {"timestamp": {"type": "date"}}}}
+        }
+        client.search.return_value = {
+            "hits": {
+                "hits": [
+                    {
+                        "_id": "p-1",
+                        "_source": {
+                            "fullname": "Jane Doe",
+                            "timestamp": "2026-05-10T00:00:00Z",
+                        },
+                    }
+                ]
+            }
+        }
+        service = OSSearch(client=client, index="people")
+
+        with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
+            dataframe = service.latest_match_dataframe("fullname", "Jane Doe")
+
+        client.search.assert_called_once_with(
+            index="people",
+            body={
+                "sort": [{"timestamp": {"order": "desc"}}],
+                "size": 1,
+                "query": {"match": {"fullname": "Jane Doe"}},
+            },
+        )
+        self.assertEqual(
+            dataframe.records,
+            [{"fullname": "Jane Doe", "timestamp": "2026-05-10T00:00:00Z"}],
+        )
+
+    def test_latest_match_dataframe_honors_custom_args_and_meta(self) -> None:
+        client = Mock()
+        client.indices.get_mapping.return_value = {
+            "people": {"mappings": {"properties": {"event_tm": {"type": "date"}}}}
+        }
+        client.search.return_value = {
+            "hits": {
+                "hits": [
+                    {
+                        "_id": "p-2",
+                        "_index": "people",
+                        "_score": None,
+                        "_source": {"fullname": "Jane Doe"},
+                    }
+                ]
+            }
+        }
+        service = OSSearch(client=client, index="people")
+
+        with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
+            dataframe = service.latest_match_dataframe(
+                "fullname",
+                "Jane Doe",
+                time_field="event_tm",
+                size=3,
+                include_meta=True,
+            )
+
+        body = client.search.call_args.kwargs["body"]
+        self.assertEqual(body["sort"], [{"event_tm": {"order": "desc"}}])
+        self.assertEqual(body["size"], 3)
+        self.assertEqual(body["query"], {"match": {"fullname": "Jane Doe"}})
+        self.assertEqual(
+            dataframe.records,
+            [{"fullname": "Jane Doe", "_id": "p-2", "_index": "people", "_score": None}],
+        )
+
+    def test_latest_match_dataframe_returns_empty_when_index_missing(self) -> None:
+        from opensearchpy.exceptions import NotFoundError
+
+        client = Mock()
+        client.indices.get_mapping.side_effect = NotFoundError(
+            404, "index_not_found_exception", {}
+        )
+        service = OSSearch(client=client, index="people")
+
+        with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
+            dataframe = service.latest_match_dataframe("fullname", "Jane Doe")
+
+        self.assertEqual(dataframe.records, [])
+        client.search.assert_not_called()
+
     def test_range_search_defaults_to_timestamp_and_seven_days(self) -> None:
         client = Mock()
         service = OSSearch(client=client, index="events")

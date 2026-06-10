@@ -429,6 +429,32 @@ class OSSearch(OSBase):
         except NotFoundError:
             return None
 
+    def latest_match_dataframe(
+        self,
+        field: str,
+        keyword: str,
+        *,
+        time_field: str = "timestamp",
+        index: str | None = None,
+        size: int = 1,
+        include_meta: bool = False,
+    ) -> Any:
+        """Return the most recent docs matching ``keyword`` on ``field`` as a DataFrame.
+
+        Runs a ``match`` query on ``field``, sorts by ``time_field`` descending, and
+        returns the top ``size`` hits (default 1 = just the latest) as a pandas
+        DataFrame. Returns an empty DataFrame when the index is missing.
+        """
+        result = self.latest(
+            time_field,
+            index=index,
+            size=size,
+            query={"match": {field: keyword}},
+        )
+        if result is None:
+            return _records_to_dataframe([])
+        return self.to_dataframe(result, include_meta=include_meta)
+
     def range_search(
         self,
         *,

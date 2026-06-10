@@ -12,6 +12,7 @@
 | 최근 N일 데이터를 빠르게 보고 싶음 | `range_dataframe(time_field=..., days=...)` | 기본값 `timestamp` / 7일, single-shot (`size` cap) |
 | 최근 N일이지만 10k를 넘을 수 있음 | `range_dataframe_all(time_field=..., days=..., max_rows=N)` | scroll 기반 |
 | match query 결과 전체가 필요 | `match_dataframe_all(field, query)` | scroll 기반 |
+| 특정 field가 keyword와 매칭되는 **최신** row만 | `latest_match_dataframe(field, keyword)` | match + 시간 desc, 기본 `size=1` |
 | 임의 query 결과 전체가 필요 | `search_dataframe_all(body)` | scroll 기반, body 직접 작성 |
 | row가 수백만 쏟아질 수 있음 | `*_dataframe_all(..., max_rows=N)` | N개에서 잘림 |
 
@@ -111,6 +112,37 @@ df = search.match_dataframe_all(
     include_meta=True,   # _id, _index, _score 컬럼 포함
 )
 ```
+
+## `latest_match_dataframe` (keyword 매칭 + 최신순)
+
+특정 field가 keyword와 매칭되는 document 중 **가장 최근 것**만 DataFrame으로
+받고 싶을 때 씁니다. `match` query로 거른 뒤 `time_field` 기준 내림차순으로
+정렬해 상위 `size`개(기본 1 = 최신 한 건)를 돌려줍니다.
+
+```python
+search = OSSearch(client, index="people")
+
+# 1) fullname이 "Jane Doe"와 매칭되는 최신 한 건
+df = search.latest_match_dataframe("fullname", "Jane Doe")
+
+# 2) 최신 5건, 다른 시간 field, 메타 컬럼 포함
+df = search.latest_match_dataframe(
+    "fullname",
+    "Jane Doe",
+    size=5,
+    time_field="event_tm",   # 기본값 "timestamp"
+    include_meta=True,        # _id, _index, _score 컬럼 포함
+)
+```
+
+- `latest()` 위에 얹은 single-shot 헬퍼라, 검색 전에 mapping을 확인해
+  `time_field`가 `date` / `date_nanos`인지 검증합니다. index가 없으면 빈
+  DataFrame을 돌려줍니다.
+- `match` query라 `text` field와 `keyword` field 모두에서 동작합니다.
+  엄격한 정확 일치(term)가 필요하면 `term`을 직접 build해 `latest(query=...)`를
+  쓰세요.
+- 결과 전체(>10k)가 아니라 "최신 몇 건"만 필요할 때 쓰는 메서드입니다.
+  전부 필요하면 `match_dataframe_all`을 보세요.
 
 ## DataFrame 메타 컬럼
 
