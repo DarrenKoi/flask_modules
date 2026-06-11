@@ -280,6 +280,53 @@ success_count, errors = doc_service.bulk(actions, refresh=False)
 The full annotated version lives in the reference block at the bottom of
 `beam_reso_cdsem.py`.
 
+## network_fdc_cdsem index
+
+`network_fdc_cdsem.py` sets up a single 1-year retention rollover family —
+same shape as `fab_inform_notes.py` but with `dynamic_templates` instead of
+enumerated columns and a one-year retention:
+
+- ISM policy `network_fdc_cdsem_retention_policy`
+- index template `network_fdc_cdsem_template`
+- first backing index `network_fdc_cdsem-000001`
+- write/search alias `network_fdc_cdsem`
+
+Settings:
+
+- primary shards: `2`
+- replicas: `1`
+- rollover: write index reaches `1000000` docs
+- retention: delete backing indices after `365d` (1 year)
+
+Field mapping:
+
+- `os_inserted` → `date` (explicit; KST write-time stamp, doesn't end in
+  `_tm`/`_dt` so the dynamic templates miss it)
+- any `*_tm` / `*_dt` columns → `date` via `dynamic_templates`
+- everything else falls through to default dynamic mapping
+
+```bash
+python -m ops_index_mgmt.network_fdc_cdsem --dry-run
+python -m ops_index_mgmt.network_fdc_cdsem
+```
+
+Ingest dataframes through the `network_fdc_cdsem` alias:
+
+```python
+from ops_store import OSDoc
+
+doc_service = OSDoc(client=client)
+doc_service.bulk_index_dataframe(
+    fdc_df,
+    index="network_fdc_cdsem",
+    id_field="doc_id",
+    op_type="create",
+)
+```
+
+The full annotated ingest example lives in the reference block at the bottom
+of `network_fdc_cdsem.py`.
+
 ## Elasticsearch → OpenSearch reindex
 
 `es_to_os_reindex.py` copies one ES index into one OpenSearch index using the
