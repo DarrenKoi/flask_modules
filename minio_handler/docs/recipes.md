@@ -171,7 +171,51 @@ default prefix와 합성되므로 위 호출은 실제로
 # mo.delete_prefix("")    # 의도가 분명할 때만 쓰세요
 ```
 
+### 키 이름 조건으로 일괄 삭제 (`delete_matching`)
+
+key 문자열에 조건이 있을 때 — timestamp가 path 중간에 박혀 있거나, 형식이
+제각각이거나, 확장자로 거르고 싶을 때 — `delete_matching`이 `list` + 필터 +
+`delete_many`를 한 번에 묶어 줍니다. predicate가 `True`를 돌려준 key만 지우고,
+`delete_prefix`와 똑같이 실패 entry list를 반환합니다.
+
+```python
+# 파일명 안에 날짜가 박혀 있는 하루치 삭제. prefix로 sem/ 아래만 훑음
+errors = mo.delete_matching(lambda k: "2026-06-11" in k, prefix="sem")
+```
+
+predicate는 *full key* (`default_prefix`까지 붙은 `object_name`)를 그대로
+받습니다 — bucket에 저장된 문자열과 동일합니다. 따라서 `lambda k: ...`
+안에서 `k`는 `2067928/sem/...` 형태입니다.
+
+```python
+# 확장자로 거르기 — .tmp 산출물 전체
+mo.delete_matching(lambda k: k.endswith(".tmp"), prefix="scratch")
+
+# 정규식으로 날짜 범위 거르기
+import re
+pat = re.compile(r"/2026-06-(0[1-9]|1[0-5])/")   # 6/1 ~ 6/15
+mo.delete_matching(lambda k: bool(pat.search(k)), prefix="logs")
+```
+
+`prefix`는 **성능 레버**입니다. predicate는 Python 단에서 도는 fine filter일
+뿐이고, `prefix`는 그 앞단에서 MinIO에게 server-side로 범위를 좁혀 달라고
+넘기는 값입니다. `prefix` 없이 부르면 bucket 전체를 훑어 가며 필터하므로,
+가능한 한 좁은 `prefix`를 항상 같이 주세요.
+
+> **언제 `delete_prefix` 대신 이걸 쓰나.** 날짜가 key의 *맨 앞* path 조각이면
+> (`sem/2026/06/11/...`) `delete_prefix("sem/2026/06/11")`가 더 낫습니다 —
+> MinIO가 server-side로 범위를 좁혀 주니까요. `delete_matching`은 매칭 대상이
+> 맨 앞 prefix가 *아닐* 때(파일명 중간, 형식 혼재, 확장자)를 위한 도구입니다.
+
+> **시간 기준(`last_modified`) 삭제에는 못 씁니다.** predicate는 key 문자열만
+>받지 `obj.last_modified`는 못 봅니다. "N일 지난 객체" 같은 조건은 아래
+> "조건부 일괄 삭제" / "정기 cleanup"의 수동 패턴을 쓰세요.
+
 ### 조건부 일괄 삭제 (예: 7일 지난 .tmp 파일)
+
+> key 문자열만으로 거를 수 있다면 위의 `delete_matching`이 더 짧습니다.
+> 아래 패턴은 `last_modified` 같은 *객체 metadata*가 필요할 때의 형태입니다.
+
 
 ```python
 from datetime import datetime, timedelta, timezone

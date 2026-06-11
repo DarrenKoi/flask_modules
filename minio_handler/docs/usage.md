@@ -252,6 +252,19 @@ if errors:
 `delete_many`는 한 번의 HTTP 요청으로 여러 object를 지웁니다. 반환값은
 실패 항목들의 리스트입니다.
 
+key 목록을 미리 모르고 패턴으로 지우고 싶을 때는 두 가지가 더 있습니다.
+
+```python
+# 맨 앞 prefix 통째로 (날짜가 path 앞조각일 때 가장 효율적)
+mo.delete_prefix("scratch/2026-06-11/")
+
+# key 문자열 조건으로 (날짜가 파일명 중간, 확장자, 형식 혼재일 때)
+mo.delete_matching(lambda k: "2026-06-11" in k, prefix="sem")
+```
+
+넷 다 실패 entry list를 돌려줍니다. 선택 기준과 더 많은 예시는
+`recipes.md`의 "Bulk 삭제 패턴"을 참고하세요.
+
 ## 목록 조회
 
 ```python
