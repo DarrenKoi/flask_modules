@@ -378,6 +378,43 @@ class MinioObject(MinioBase):
             return []
         return list(self.client.remove_objects(bucket_name, targets))
 
+    def delete_matching(
+        self,
+        predicate: Callable[[str], bool],
+        *,
+        prefix: str | None = None,
+        bucket: str | None = None,
+    ) -> list[Any]:
+        """Delete every object whose key satisfies ``predicate``. Returns error entries.
+
+        Use this when the part you match on isn't a leading path segment — a
+        date embedded mid-key, a varying format, an extension, etc. For a clean
+        leading prefix (``runs/2026/06/11/...``) prefer ``delete_prefix``: it
+        lets MinIO do the narrowing server-side instead of scanning.
+
+        ``predicate`` receives each object's full key (``object_name``,
+        ``default_prefix`` included) exactly as stored, and returns ``True`` to
+        delete. ``prefix`` narrows the listing the same way ``list``/
+        ``delete_prefix`` do (composed with ``default_prefix``); pass it
+        whenever you can to avoid walking the whole bucket just to filter in
+        Python. Matches are batched into a single ``remove_objects`` call.
+
+        Deleting a day's worth of objects whose date sits inside the filename::
+
+            store.delete_matching(lambda k: "2026-06-11" in k, prefix="sem")
+        """
+
+        bucket_name = self._resolve_bucket(bucket)
+        delete_object = _delete_object_class()
+        targets = [
+            delete_object(obj.object_name)
+            for obj in self.list(prefix, bucket=bucket, recursive=True)
+            if predicate(obj.object_name)
+        ]
+        if not targets:
+            return []
+        return list(self.client.remove_objects(bucket_name, targets))
+
     def presigned_get_url(
         self,
         key: str,

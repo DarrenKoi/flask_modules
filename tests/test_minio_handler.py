@@ -116,5 +116,64 @@ class MinioGetManyTests(unittest.TestCase):
         service.client.get_object.assert_not_called()
 
 
+def _make_list_service(keys: list[str], *, remove_errors: list = None):
+    """MinioObject whose client.list_objects yields objects for ``keys``."""
+
+    client = Mock()
+    client.list_objects.return_value = [
+        Mock(object_name=key) for key in keys
+    ]
+    client.remove_objects.return_value = list(remove_errors or [])
+    service = MinioObject(client=client, bucket="bucket")
+    service.use_prefix(None)   # ignore any minio_config.py PREFIX
+    return service
+
+
+class MinioDeleteMatchingTests(unittest.TestCase):
+    def test_delete_matching_deletes_only_matching_keys(self) -> None:
+        keys = [
+            "sem/wafer_2026-06-11_a.parquet",
+            "sem/wafer_2026-06-12_b.parquet",
+            "sem/wafer_2026-06-11_c.parquet",
+        ]
+        service = _make_list_service(keys)
+
+        result = service.delete_matching(lambda k: "2026-06-11" in k)
+
+        self.assertEqual(result, [])
+        service.client.remove_objects.assert_called_once()
+        bucket_name, targets = service.client.remove_objects.call_args.args
+        self.assertEqual(bucket_name, "bucket")
+        deleted = {t.name for t in targets}
+        self.assertEqual(
+            deleted,
+            {"sem/wafer_2026-06-11_a.parquet", "sem/wafer_2026-06-11_c.parquet"},
+        )
+
+    def test_delete_matching_no_match_makes_no_remove_call(self) -> None:
+        service = _make_list_service(["a.txt", "b.txt"])
+
+        result = service.delete_matching(lambda k: k.endswith(".parquet"))
+
+        self.assertEqual(result, [])
+        service.client.remove_objects.assert_not_called()
+
+    def test_delete_matching_narrows_listing_with_prefix(self) -> None:
+        service = _make_list_service(["sem/2026/06/11/x"])
+
+        service.delete_matching(lambda k: True, prefix="sem")
+
+        kwargs = service.client.list_objects.call_args.kwargs
+        self.assertEqual(kwargs["prefix"], "sem/")
+        self.assertTrue(kwargs["recursive"])
+
+    def test_delete_matching_returns_remove_error_entries(self) -> None:
+        service = _make_list_service(["a.parquet"], remove_errors=["boom"])
+
+        result = service.delete_matching(lambda k: True)
+
+        self.assertEqual(result, ["boom"])
+
+
 if __name__ == "__main__":
     unittest.main()
