@@ -162,8 +162,54 @@ def example_download_images_with_cond(
     return image_paths, cond_paths
 
 
+def get_date_key_for_sorting(folder_name: str) -> str:
+    """정렬 키 — 당신의 기존 함수로 교체하라(여기서는 자리표시자).
+
+    날짜 기반 폴더명(예: ``"20260615"``)을 받아 정렬용 키를 돌려준다. 아래
+    ``example_download_latest_images_with_cond``가 이 키로 폴더를 내림차순 정렬해
+    가장 최신 폴더를 고른다.
+    """
+    return folder_name
+
+
+def example_download_latest_images_with_cond(
+    host: str = "10.0.0.1",
+    root: str = "/IMAGES",
+    dest: str | Path = r"C:\eqp_downloads",
+) -> tuple[list[Path], list[Path | None]]:
+    """``root`` 아래 최신 날짜 폴더를 고른 뒤 그 안의 이미지+cond.txt를 받는다.
+
+    이미지 폴더로 들어가기 전에, 날짜 기반 폴더들을 먼저 나열하고 기존 정렬 로직
+    ``sorted(folders, key=get_date_key_for_sorting, reverse=True)``으로 최신 폴더를
+    고른다. 그 폴더를 ``parent``로 삼아 ``example_download_images_with_cond``에
+    위임하므로, 이미지(``*01AP.jpeg``)와 사이드카 cond.txt 처리는 그대로 재사용된다.
+
+    반환값은 ``example_download_images_with_cond``와 동일한 인덱스 정렬
+    ``(image_paths, cond_paths)``다. ``root``에 폴더가 하나도 없으면 빈 리스트 둘을
+    돌려준다.
+    """
+    dl = FtpFleetDownloader(user=USER, password=PASSWORD)   # 프록시 위치는 PROXY_URL 상수
+
+    # 1. root 아래 항목을 나열한다(이름만, 가져오지 않음). 날짜 폴더만 있다고 가정.
+    listing = dl.list_dirs(specs_from_hosts([host], listings=[ListDir(root, None)]))
+    folders = [p for l in listing.listings for p in l.paths]
+    if not folders:
+        return [], []
+
+    # 2. 기존 정렬 키로 내림차순 정렬해 최신 폴더를 고른다(폴더명 기준).
+    latest = sorted(
+        folders,
+        key=lambda p: get_date_key_for_sorting(PurePosixPath(p).name),
+        reverse=True,
+    )[0]
+
+    # 3. 최신 폴더로 들어가 이미지+cond.txt를 받는다(위 함수 재사용).
+    return example_download_images_with_cond(host, latest, dest)
+
+
 if __name__ == "__main__":
     # example_run_the_proxy_server()      # 프록시 호스트에서
     # example_download_through_proxy()    # 방화벽 안 클라이언트에서
     # images, conds = example_download_images_with_cond()
+    # images, conds = example_download_latest_images_with_cond()
     pass
