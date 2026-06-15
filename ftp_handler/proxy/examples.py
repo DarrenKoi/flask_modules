@@ -11,6 +11,8 @@ import 줄뿐이라, 호출부는 다른 변경 없이 전송 방식만 바꿀 �
 """
 
 # 클라이언트 쪽: direct 다운로더와 같은 이름들을 HTTP 너머로 사용한다.
+from pathlib import Path, PurePosixPath
+
 from ftp_handler.proxy import (
     FtpFleetDownloader,
     HostSpec,
@@ -18,6 +20,7 @@ from ftp_handler.proxy import (
     UploadFile,
     UploadSpec,
     save_to_dir,
+    specs_from_hosts,
     upload_specs_from_hosts,
 )
 
@@ -91,7 +94,76 @@ def example_swap_direct_for_proxy() -> None:
     print(report.grouped().keys())
 
 
+def _local_path(base: Path, host: str, remote_path: str) -> Path:
+    """원격 FTP 경로를 base/<host>/... 아래로 미러링한다(하위 폴더 구조 보존)."""
+    parts = [p for p in PurePosixPath(remote_path).parts if p not in ("/", "")]
+    return base.joinpath(host, *parts)
+
+
+def example_download_images_with_cond(
+    host: str = "10.0.0.1",
+    parent: str = "/IMAGES",
+    dest: str | Path = r"C:\eqp_downloads",
+) -> tuple[list[Path], list[Path | None]]:
+    """이미지(``*01AP.jpeg``)와 그 사이드카 cond.txt를 짝지어 받아 로컬에 저장한다.
+
+    고정 규칙: 각 이미지에는 "." + 이미지 파일명으로 된 하위 폴더가 있고 그 안에
+    cond.txt가 있다(예: ``S09_M0047-01AP.jpeg`` → ``.S09_M0047-01AP.jpeg/cond.txt``).
+    먼저 ``list_dirs``로 이미지 이름만 탐색하고(가져오지 않음), 각 이미지에 대해
+    cond.txt 경로를 규칙으로 만들어 둘을 함께 RETR한다. ``on_file``은 파일을 쓰는
+    동시에 그 로컬 경로를 (host, remote_path) 키로 기록하므로, 스레드 완료 순서와
+    무관하게 결과를 조회할 수 있다.
+
+    반환값은 인덱스가 정렬된 ``(image_paths, cond_paths)``다 — ``cond_paths[i]``는
+    ``image_paths[i]``의 cond.txt이며, 서버에 cond.txt가 없으면 ``None``이다. 두
+    리스트 모두 정렬된 탐색 순서를 따르므로 cond.txt 하나가 빠져도 정렬이 어긋나지
+    않는다. (서버에 없는 파일은 RETR이 550으로 실패해 ``on_file``이 호출되지 않으므로
+    반환 리스트에 들어가지 않는다.)
+    """
+    base = Path(dest)
+    dl = FtpFleetDownloader(user=USER, password=PASSWORD)   # 프록시 위치는 PROXY_URL 상수
+
+    def cond_for(image_path: str) -> str:
+        p = PurePosixPath(image_path)
+        return str(p.with_name(f".{p.name}") / "cond.txt")
+
+    # 1. 이미지 탐색(이름만, 가져오지 않음). 재현 가능한 순서를 위해 정렬한다.
+    listing = dl.list_dirs(
+        specs_from_hosts([host], listings=[ListDir(parent, "*01AP.jpeg")])
+    )
+    discovered = sorted((l.host, img) for l in listing.listings for img in l.paths)
+
+    # 2. 호스트당 한 spec: 이미지 + 그 cond.txt를 고정 경로로 묶는다.
+    by_host: dict[str, list[str]] = {}
+    for h, img in discovered:
+        by_host.setdefault(h, []).extend((img, cond_for(img)))
+    specs = [HostSpec(host=h, files=files) for h, files in by_host.items()]
+
+    # 3. 파일을 쓰면서 로컬 경로를 (host, remote_path) 키로 기록한다(순서 무관).
+    written: dict[tuple[str, str], Path] = {}
+
+    def on_file(h: str, remote_path: str, data: bytes) -> None:
+        target = _local_path(base, h, remote_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        written[(h, remote_path)] = target   # list.append이 아니라 키 기록 → 스레드 안전
+
+    dl.download(specs, on_file=on_file)
+
+    # 4. 콜백 순서가 아니라 탐색 순서를 따라 인덱스가 정렬된 리스트를 만든다.
+    image_paths: list[Path] = []
+    cond_paths: list[Path | None] = []
+    for h, img in discovered:
+        img_local = written.get((h, img))
+        if img_local is None:
+            continue   # 이미지 자체가 없음 — 정렬 유지를 위해 짝 전체를 건너뛴다
+        image_paths.append(img_local)
+        cond_paths.append(written.get((h, cond_for(img))))   # cond 없으면 None
+    return image_paths, cond_paths
+
+
 if __name__ == "__main__":
     # example_run_the_proxy_server()      # 프록시 호스트에서
     # example_download_through_proxy()    # 방화벽 안 클라이언트에서
+    # images, conds = example_download_images_with_cond()
     pass
