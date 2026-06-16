@@ -43,7 +43,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from ftplib import FTP, all_errors
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Iterator, Protocol, runtime_checkable
 
 # The shared NLST normalizer lives in core so both downloaders behave
@@ -1010,6 +1010,67 @@ def save_to_dir(
     """
     def on_file(host: str, remote_path: str, data: bytes) -> None:
         target = local_target(dest_dir, host, remote_path, keep_last=keep_last)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        if then is not None:
+            then(host, remote_path, data)
+
+    return on_file
+
+
+def image_sidecar_target(
+    dest_dir: str | Path,
+    remote_path: str,
+    *,
+    sidecar_name: str = "cond.txt",
+) -> Path:
+    """Local Path for the image + sidecar layout (image at root, sidecar in its folder).
+
+    Equipment image folders pair each image with a sidecar file that lives in a
+    subfolder named after the image (e.g. ``S09-01AP.jpeg`` alongside
+    ``.S09-01AP.jpeg/cond.txt``). A uniform ``keep_last`` can't lay these out
+    well — ``keep_last=1`` collapses every sidecar to the same ``cond.txt`` and
+    they overwrite each other. This maps the two kinds ASYMMETRICALLY:
+
+      - sidecar (basename == ``sidecar_name``) -> ``dest/<parent folder>/<name>``
+        (keeps the per-image folder, so sidecars never collide)
+      - anything else (the image)             -> ``dest/<name>`` (bare, at root)
+
+        .../S09-01AP.jpeg            -> dest/S09-01AP.jpeg
+        .../.S09-01AP.jpeg/cond.txt  -> dest/.S09-01AP.jpeg/cond.txt
+
+    Pure mapping (no ``<host>`` segment, no I/O) — the counterpart to
+    ``local_target`` for this layout, so you can recover paths from
+    ``report.files`` the same way. Flat across hosts: if you fan out over
+    multiple hosts whose image names overlap, prefix the dest per host.
+    """
+    p = PurePosixPath(remote_path)
+    base = Path(dest_dir)
+    if p.name == sidecar_name:
+        return base / _safe_relative(f"{p.parent.name}/{p.name}")
+    return base / _safe_relative(p.name)
+
+
+def save_image_with_sidecar(
+    dest_dir: str | Path,
+    *,
+    sidecar_name: str = "cond.txt",
+    then: OnFile | None = None,
+) -> OnFile:
+    """Build an ``on_file`` that saves paired image + sidecar files in a flat layout.
+
+    The image lands directly under ``dest_dir`` and its sidecar (a file named
+    ``sidecar_name``, default ``cond.txt``) keeps the per-image subfolder it
+    lived in on the server, so sidecars from different images don't collide.
+    See ``image_sidecar_target`` for the exact mapping and why a uniform
+    ``keep_last`` can't express it. ``then`` chains a second callback after the
+    write, same as ``save_to_dir``.
+
+        # spec carries both the image and its .../<sidecar folder>/cond.txt
+        dl.download(specs, on_file=save_image_with_sidecar(r"C:\\eqp_images"))
+    """
+    def on_file(host: str, remote_path: str, data: bytes) -> None:
+        target = image_sidecar_target(dest_dir, remote_path, sidecar_name=sidecar_name)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         if then is not None:

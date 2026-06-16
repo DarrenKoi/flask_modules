@@ -110,6 +110,27 @@ paths = [
 
 `local_target`은 `save_to_dir`이 내부에서 쓰는 바로 그 매핑 함수라 경로가 항상 일치한다.
 
+**이미지 + 사이드카(cond.txt) 저장 (`save_image_with_sidecar`):** 장비 이미지 폴더는
+이미지마다 그 이미지명을 딴 하위 폴더에 사이드카 파일을 둔다(예: `S09-01AP.jpeg`와
+`.S09-01AP.jpeg/cond.txt`). 이 경우 균일한 `keep_last`로는 잘 안 된다 — `keep_last=1`은
+모든 cond.txt를 같은 `cond.txt` 한 경로로 뭉개 서로 덮어쓴다. `save_image_with_sidecar`는
+둘을 비대칭으로 가른다: 이미지는 `dest` 바로 아래, 사이드카는 원래의 이미지별 폴더를
+살려 충돌을 막는다(`<host>` 단계는 붙이지 않는 평탄 레이아웃):
+
+```python
+from ftp_handler.direct_downloader import save_image_with_sidecar, image_sidecar_target
+
+# spec.files에 이미지와 .../<사이드카 폴더>/cond.txt를 함께 담아 내려받는다
+report = dl.download(specs, on_file=save_image_with_sidecar("/data/eqp_images"))
+# /data/eqp_images/S09-01AP.jpeg
+# /data/eqp_images/.S09-01AP.jpeg/cond.txt
+
+# 저장 경로 되찾기 — local_target의 사이드카용 짝
+paths = [image_sidecar_target("/data/eqp_images", f.remote_path) for f in report.files]
+```
+
+사이드카 파일명이 `cond.txt`가 아니면 `sidecar_name=`으로 바꾼다.
+
 **내려받기 전에 크기 재기 (`size_dirs`):** `list_dirs`가 "어떤 파일이 있나"를
 답한다면, `size_dirs`는 "그것들을 메모리에 담으면 몇 바이트인가"를 답한다. 가져오는
 대신 FTP `SIZE` 명령으로 각 파일 크기만 묻는다(바이트 전송 없음). `download`와 똑같이

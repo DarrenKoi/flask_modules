@@ -28,8 +28,10 @@ from ftp_handler.direct_downloader.fleet_downloader import (
     _safe_relative,
     download_fleet,
     group_files_by_host,
+    image_sidecar_target,
     list_fleet,
     local_target,
+    save_image_with_sidecar,
     put_bytes_to_minio,
     put_parquet_to_minio,
     put_pickle_to_minio,
@@ -503,6 +505,72 @@ class LocalTargetTests(unittest.TestCase):
             self.assertTrue(paths[0].exists())  # the recomputed path really points at the file
         finally:
             tmp.cleanup()
+
+
+class ImageSidecarTargetTests(unittest.TestCase):
+    def test_image_lands_at_root(self):
+        self.assertEqual(
+            image_sidecar_target("/out", "/IMAGES/20260615/S09-01AP.jpeg"),
+            Path("/out/S09-01AP.jpeg"),
+        )
+
+    def test_sidecar_keeps_its_per_image_folder(self):
+        self.assertEqual(
+            image_sidecar_target("/out", "/IMAGES/20260615/.S09-01AP.jpeg/cond.txt"),
+            Path("/out/.S09-01AP.jpeg/cond.txt"),
+        )
+
+    def test_sidecars_from_different_images_do_not_collide(self):
+        a = image_sidecar_target("/out", "/D/.S09-01AP.jpeg/cond.txt")
+        b = image_sidecar_target("/out", "/D/.S10-01AP.jpeg/cond.txt")
+        self.assertNotEqual(a, b)
+
+    def test_custom_sidecar_name(self):
+        self.assertEqual(
+            image_sidecar_target("/out", "/D/.x.jpeg/meta.json", sidecar_name="meta.json"),
+            Path("/out/.x.jpeg/meta.json"),
+        )
+
+
+class SaveImageWithSidecarTests(_FakeFTPTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+        super().tearDown()
+
+    def test_writes_image_at_root_and_cond_in_subfolder(self):
+        FakeFTP.scripts = {
+            "h1": {
+                "files": {
+                    "/IMAGES/d/S09-01AP.jpeg": b"IMG",
+                    "/IMAGES/d/.S09-01AP.jpeg/cond.txt": b"COND",
+                }
+            }
+        }
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p")
+            report = dl.download(
+                [
+                    HostSpec(
+                        "h1",
+                        files=[
+                            "/IMAGES/d/S09-01AP.jpeg",
+                            "/IMAGES/d/.S09-01AP.jpeg/cond.txt",
+                        ],
+                    )
+                ],
+                on_file=save_image_with_sidecar(self.tmp_path),
+            )
+
+        self.assertEqual(report.ok, 2)
+        self.assertEqual((self.tmp_path / "S09-01AP.jpeg").read_bytes(), b"IMG")
+        self.assertEqual(
+            (self.tmp_path / ".S09-01AP.jpeg" / "cond.txt").read_bytes(), b"COND"
+        )
 
 
 class KeepLastComponentsTests(unittest.TestCase):
