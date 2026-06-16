@@ -941,7 +941,29 @@ def _safe_relative(remote_path: str) -> Path:
     return Path(*parts) if parts else Path("_unnamed")
 
 
-def save_to_dir(dest_dir: str | Path, *, then: OnFile | None = None) -> OnFile:
+def _keep_last_components(rel: Path, keep_last: int) -> Path:
+    """Trim a relative path to its trailing ``keep_last`` components.
+
+    Drops the leading (parent) components and keeps the tail — ``keep_last=1``
+    reduces to the bare filename, ``keep_last=2`` keeps ``<parent>/<file>``.
+    When ``keep_last`` meets or exceeds the path's depth the whole path is kept
+    unchanged (nothing to drop). Used by ``save_to_dir`` to land files without
+    mirroring the remote FTP parent directories.
+
+        _keep_last_components(Path("IMAGES/20260615/sub/x.jpeg"), 2)  # -> sub/x.jpeg
+    """
+    parts = rel.parts
+    if keep_last >= len(parts):
+        return rel
+    return Path(*parts[len(parts) - keep_last:])
+
+
+def save_to_dir(
+    dest_dir: str | Path,
+    *,
+    keep_last: int | None = None,
+    then: OnFile | None = None,
+) -> OnFile:
     """Build an ``on_file`` callback that writes each file to local disk.
 
     Lands files at ``dest_dir/<host>/<remote path>``, creating parent dirs.
@@ -949,15 +971,25 @@ def save_to_dir(dest_dir: str | Path, *, then: OnFile | None = None) -> OnFile:
     callback runs (on the client PC in proxy mode). Because it runs per file,
     RAM stays bounded (streaming), unlike collecting then writing.
 
+    ``keep_last`` drops remote parent directories and keeps only the trailing N
+    path components, so you don't mirror the whole FTP tree locally:
+    ``keep_last=1`` flattens to just the filename, ``keep_last=2`` keeps
+    ``<parent>/<file>``. ``None`` (default) preserves the full remote path. The
+    ``<host>`` segment is always kept regardless.
+
     ``then`` chains a second callback after the write (e.g. parse + index), so
     you can archive to disk AND process in one pass.
 
         dl.download(specs, on_file=save_to_dir(r"C:\\eqp_downloads"))
+        dl.download(specs, on_file=save_to_dir(r"C:\\eqp_downloads", keep_last=2))
     """
     base = Path(dest_dir)
 
     def on_file(host: str, remote_path: str, data: bytes) -> None:
-        target = base / _ILLEGAL_COMPONENT.sub("_", host) / _safe_relative(remote_path)
+        rel = _safe_relative(remote_path)
+        if keep_last is not None:
+            rel = _keep_last_components(rel, keep_last)
+        target = base / _ILLEGAL_COMPONENT.sub("_", host) / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         if then is not None:

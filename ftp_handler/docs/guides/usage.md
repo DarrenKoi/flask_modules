@@ -69,6 +69,30 @@ from ftp_handler.direct_downloader import save_to_dir
 dl.download(specs, on_file=save_to_dir("/data/eqp"))   # 최대 RAM ~ concurrency x 파일 크기
 ```
 
+**로컬 저장 경로 고르기 (`keep_last`):** 기본 `save_to_dir`은 원격 트리를 그대로
+미러링한다 — `/data/eqp/<host>/<원격 경로 전체>`. 원격 부모 디렉터리가 깊거나
+(`/IMAGES/20260615/sub/...`) 날짜 폴더를 로컬에 옮기고 싶지 않을 때, `keep_last`로
+경로의 뒤쪽 N개 성분만 남긴다(`<host>` 단계는 항상 유지). `keep_last=1`이면 파일명만,
+`2`면 `<부모>/<파일>`만 남는다:
+
+```python
+# 원격: /IMAGES/20260615/sub/S09-01AP.jpeg
+dl.download(specs, on_file=save_to_dir("/data/eqp", keep_last=2))
+# 저장: /data/eqp/<host>/sub/S09-01AP.jpeg   (/IMAGES/20260615 제거)
+
+dl.download(specs, on_file=save_to_dir("/data/eqp", keep_last=1))
+# 저장: /data/eqp/<host>/S09-01AP.jpeg        (파일명만)
+```
+
+`keep_last`로 표현되지 않는 임의의 레이아웃(예: 사이드카 파일을 별도 폴더로 가르기)이
+필요하면 `on_file`을 직접 쓴다 — `(host, remote_path, data)`를 받아 원하는 곳에
+`write_bytes` 하면 되고, 다운로더는 로컬 경로를 전혀 건드리지 않는다. `then=`으로
+저장과 처리(parse+index)를 한 번에 엮을 수도 있다:
+
+```python
+dl.download(specs, on_file=save_to_dir("/data/eqp", keep_last=2, then=index_one))
+```
+
 **내려받기 전에 크기 재기 (`size_dirs`):** `list_dirs`가 "어떤 파일이 있나"를
 답한다면, `size_dirs`는 "그것들을 메모리에 담으면 몇 바이트인가"를 답한다. 가져오는
 대신 FTP `SIZE` 명령으로 각 파일 크기만 묻는다(바이트 전송 없음). `download`와 똑같이

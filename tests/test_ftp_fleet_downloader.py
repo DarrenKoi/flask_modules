@@ -24,6 +24,7 @@ from ftp_handler.direct_downloader.fleet_downloader import (
     UploadFile,
     UploadReport,
     UploadSpec,
+    _keep_last_components,
     _safe_relative,
     download_fleet,
     group_files_by_host,
@@ -467,6 +468,22 @@ class SafeRelativeTests(unittest.TestCase):
         self.assertEqual(_safe_relative("/"), Path("_unnamed"))
 
 
+class KeepLastComponentsTests(unittest.TestCase):
+    def test_keeps_trailing_components(self):
+        rel = Path("IMAGES/20260615/sub/x.jpeg")
+        self.assertEqual(_keep_last_components(rel, 2), Path("sub/x.jpeg"))
+
+    def test_keep_last_one_is_filename(self):
+        self.assertEqual(
+            _keep_last_components(Path("a/b/c.dat"), 1), Path("c.dat")
+        )
+
+    def test_keep_last_at_or_over_depth_returns_whole(self):
+        rel = Path("a/b.dat")
+        self.assertEqual(_keep_last_components(rel, 2), rel)
+        self.assertEqual(_keep_last_components(rel, 9), rel)
+
+
 class SaveToDirTests(_FakeFTPTestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -502,6 +519,23 @@ class SaveToDirTests(_FakeFTPTestCase):
         )
         # Streaming write — report retains no bytes.
         self.assertTrue(all(f.data == b"" for f in report.files))
+
+    def test_save_to_dir_keep_last_drops_parent_dirs(self):
+        FakeFTP.scripts = {
+            "10.0.0.1": {"files": {"/IMAGES/20260615/sub/S09-01AP.jpeg": b"J"}},
+        }
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p")
+            report = dl.download(
+                [HostSpec("10.0.0.1", files=["/IMAGES/20260615/sub/S09-01AP.jpeg"])],
+                on_file=save_to_dir(self.tmp_path, keep_last=2),
+            )
+
+        self.assertEqual(report.ok, 1)
+        # Only the trailing 2 components survive; /IMAGES/20260615 is dropped.
+        self.assertEqual(
+            (self.tmp_path / "10.0.0.1" / "sub" / "S09-01AP.jpeg").read_bytes(), b"J"
+        )
 
     def test_save_to_dir_then_chains(self):
         FakeFTP.scripts = {"h1": {"files": {"/a": b"A"}}}
