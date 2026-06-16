@@ -94,10 +94,22 @@ def example_swap_direct_for_proxy() -> None:
     print(report.grouped().keys())
 
 
-def _local_path(base: Path, host: str, remote_path: str) -> Path:
-    """원격 FTP 경로를 base/<host>/... 아래로 미러링한다(하위 폴더 구조 보존)."""
-    parts = [p for p in PurePosixPath(remote_path).parts if p not in ("/", "")]
-    return base.joinpath(host, *parts)
+def _local_path(base: Path, remote_path: str) -> Path:
+    """원격 경로를 평탄한 로컬 경로로 매핑한다 — 원격 트리(``/IMAGES/날짜/…``)는 버린다.
+
+    이미지는 ``base`` 바로 아래에 두고, cond.txt는 그 이미지명을 딴 하위 폴더 안에
+    넣는다. 모든 cond.txt가 이름이 같아 그대로 평탄화하면 서로 덮어쓰므로, 이미지별
+    폴더로 갈라 충돌을 막는다. cond.txt가 어느 이미지의 것인지는 원격 사이드카
+    폴더명(``.<이미지>.jpeg``)에 들어 있으니, 거기서 앞 점과 확장자만 떼어 폴더명으로 쓴다.
+
+        .../S09_M0047-01AP.jpeg            -> base/S09_M0047-01AP.jpeg
+        .../.S09_M0047-01AP.jpeg/cond.txt  -> base/S09_M0047-01AP/cond.txt
+    """
+    p = PurePosixPath(remote_path)
+    if p.name == "cond.txt":
+        image_stem = PurePosixPath(p.parent.name.lstrip(".")).stem
+        return base.joinpath(image_stem, "cond.txt")
+    return base / p.name
 
 
 def example_download_images_with_cond(
@@ -128,10 +140,19 @@ def example_download_images_with_cond(
         return str(p.with_name(f".{p.name}") / "cond.txt")
 
     # 1. 이미지 탐색(이름만, 가져오지 않음). 재현 가능한 순서를 위해 정렬한다.
+    #    fnmatch의 ``*``는 셸 글롭과 달리 앞 점(.)도 매칭하므로 ``*01AP.jpeg``는
+    #    실제 이미지 ``c.jpeg``뿐 아니라 사이드카 폴더 ``.c.jpeg``까지 함께 잡는다.
+    #    점으로 시작하는 항목(=사이드카 폴더)은 여기서 걸러야 cond 경로에 점이
+    #    겹치지(``..c.jpeg``) 않는다 — 실제 이미지명은 점으로 시작하지 않는다.
     listing = dl.list_dirs(
         specs_from_hosts([host], listings=[ListDir(parent, "*01AP.jpeg")])
     )
-    discovered = sorted((l.host, img) for l in listing.listings for img in l.paths)
+    discovered = sorted(
+        (l.host, img)
+        for l in listing.listings
+        for img in l.paths
+        if not PurePosixPath(img).name.startswith(".")
+    )
 
     # 2. 호스트당 한 spec: 이미지 + 그 cond.txt를 고정 경로로 묶는다.
     by_host: dict[str, list[str]] = {}
@@ -143,7 +164,7 @@ def example_download_images_with_cond(
     written: dict[tuple[str, str], Path] = {}
 
     def on_file(h: str, remote_path: str, data: bytes) -> None:
-        target = _local_path(base, h, remote_path)
+        target = _local_path(base, remote_path)   # 원격 트리 미러링 X — 평탄한 로컬 레이아웃
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         written[(h, remote_path)] = target   # list.append이 아니라 키 기록 → 스레드 안전
