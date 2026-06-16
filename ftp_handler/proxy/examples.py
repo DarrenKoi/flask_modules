@@ -166,10 +166,25 @@ def get_date_key_for_sorting(folder_name: str) -> str:
     """정렬 키 — 당신의 기존 함수로 교체하라(여기서는 자리표시자).
 
     날짜 기반 폴더명(예: ``"20260615"``)을 받아 정렬용 키를 돌려준다. 아래
-    ``example_download_latest_images_with_cond``가 이 키로 폴더를 내림차순 정렬해
-    가장 최신 폴더를 고른다.
+    ``pick_latest_folder``가 이 키로 폴더를 내림차순 정렬해 가장 최신 폴더를 고른다.
     """
     return folder_name
+
+
+def pick_latest_folder(folders: list[str]) -> str:
+    """날짜 기반 폴더 경로들 중 가장 최신 폴더 경로를 돌려준다.
+
+    당신의 기존 패턴 ``sorted(folders, key=get_date_key_for_sorting, reverse=True)[0]``
+    을 그대로 따른다 — 키로 내림차순 정렬한 뒤 첫 번째(=최신)를 고른다. ``list_dirs``는
+    이름이 아니라 전체 원격 경로(예: ``/IMAGES/20260615``)를 돌려주므로, 키에는 마지막
+    이름 성분만(``PurePosixPath(p).name``) 넘긴다 — 전체 경로/바 이름 어느 쪽을 받아도
+    동작한다. ``folders``가 비어 있으면 호출 전에 거른다(여기서는 ``IndexError``).
+    """
+    return sorted(
+        folders,
+        key=lambda p: get_date_key_for_sorting(PurePosixPath(p).name),
+        reverse=True,
+    )[0]
 
 
 def example_download_latest_images_with_cond(
@@ -179,9 +194,9 @@ def example_download_latest_images_with_cond(
 ) -> tuple[list[Path], list[Path | None]]:
     """``root`` 아래 최신 날짜 폴더를 고른 뒤 그 안의 이미지+cond.txt를 받는다.
 
-    이미지 폴더로 들어가기 전에, 날짜 기반 폴더들을 먼저 나열하고 기존 정렬 로직
-    ``sorted(folders, key=get_date_key_for_sorting, reverse=True)``으로 최신 폴더를
-    고른다. 그 폴더를 ``parent``로 삼아 ``example_download_images_with_cond``에
+    이미지 폴더로 들어가기 전에, 날짜 기반 폴더들을 먼저 나열하고 ``pick_latest_folder``
+    (기존 정렬 로직 ``sorted(folders, key=get_date_key_for_sorting, reverse=True)[0]``)로
+    최신 폴더를 고른다. 그 폴더를 ``parent``로 삼아 ``example_download_images_with_cond``에
     위임하므로, 이미지(``*01AP.jpeg``)와 사이드카 cond.txt 처리는 그대로 재사용된다.
 
     반환값은 ``example_download_images_with_cond``와 동일한 인덱스 정렬
@@ -197,11 +212,7 @@ def example_download_latest_images_with_cond(
         return [], []
 
     # 2. 기존 정렬 키로 내림차순 정렬해 최신 폴더를 고른다(폴더명 기준).
-    latest = sorted(
-        folders,
-        key=lambda p: get_date_key_for_sorting(PurePosixPath(p).name),
-        reverse=True,
-    )[0]
+    latest = pick_latest_folder(folders)
 
     # 3. 최신 폴더로 들어가 이미지+cond.txt를 받는다(위 함수 재사용).
     return example_download_images_with_cond(host, latest, dest)
