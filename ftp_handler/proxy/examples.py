@@ -19,6 +19,8 @@ from ftp_handler.proxy import (
     ListDir,
     UploadFile,
     UploadSpec,
+    image_sidecar_target,
+    save_image_with_sidecar,
     save_to_dir,
     specs_from_hosts,
     upload_specs_from_hosts,
@@ -94,24 +96,6 @@ def example_swap_direct_for_proxy() -> None:
     print(report.grouped().keys())
 
 
-def _local_path(base: Path, remote_path: str) -> Path:
-    """원격 경로를 평탄한 로컬 경로로 매핑한다 — 원격 트리(``/IMAGES/날짜/…``)는 버린다.
-
-    이미지는 ``base`` 바로 아래에 두고, cond.txt는 원격 사이드카 폴더명(``.<이미지>.jpeg``)
-    을 그대로 살린 하위 폴더 안에 넣는다. 모든 cond.txt가 이름이 같아 그대로 평탄화하면
-    서로 덮어쓰므로 이미지별 폴더로 갈라 충돌을 막되, 폴더명은 서버의 점 붙은 형태를
-    그대로 유지한다(점을 떼지 않는다). 점 붙은 폴더명은 점 없는 이미지 파일명과 달라
-    같은 디렉터리에서 충돌하지 않는다.
-
-        .../S09_M0047-01AP.jpeg            -> base/S09_M0047-01AP.jpeg
-        .../.S09_M0047-01AP.jpeg/cond.txt  -> base/.S09_M0047-01AP.jpeg/cond.txt
-    """
-    p = PurePosixPath(remote_path)
-    if p.name == "cond.txt":
-        return base.joinpath(p.parent.name, "cond.txt")   # 사이드카 폴더명 그대로(점 유지)
-    return base / p.name
-
-
 def example_download_images_with_cond(
     host: str = "10.0.0.1",
     parent: str = "/IMAGES",
@@ -122,15 +106,16 @@ def example_download_images_with_cond(
     고정 규칙: 각 이미지에는 "." + 이미지 파일명으로 된 하위 폴더가 있고 그 안에
     cond.txt가 있다(예: ``S09_M0047-01AP.jpeg`` → ``.S09_M0047-01AP.jpeg/cond.txt``).
     먼저 ``list_dirs``로 이미지 이름만 탐색하고(가져오지 않음), 각 이미지에 대해
-    cond.txt 경로를 규칙으로 만들어 둘을 함께 RETR한다. ``on_file``은 파일을 쓰는
-    동시에 그 로컬 경로를 (host, remote_path) 키로 기록하므로, 스레드 완료 순서와
-    무관하게 결과를 조회할 수 있다.
+    cond.txt 경로를 규칙으로 만들어 둘을 함께 RETR한다. 저장은 ``save_image_with_sidecar``
+    에 맡긴다 — 이미지는 ``dest`` 바로 아래, cond.txt는 원래의 사이드카 폴더를 살려
+    충돌 없이 떨군다(직접 ``on_file``을 짤 필요 없음).
 
     반환값은 인덱스가 정렬된 ``(image_paths, cond_paths)``다 — ``cond_paths[i]``는
-    ``image_paths[i]``의 cond.txt이며, 서버에 cond.txt가 없으면 ``None``이다. 두
-    리스트 모두 정렬된 탐색 순서를 따르므로 cond.txt 하나가 빠져도 정렬이 어긋나지
-    않는다. (서버에 없는 파일은 RETR이 550으로 실패해 ``on_file``이 호출되지 않으므로
-    반환 리스트에 들어가지 않는다.)
+    ``image_paths[i]``의 cond.txt이며, 서버에 cond.txt가 없으면 ``None``이다. 로컬
+    경로는 다운로드 후 ``image_sidecar_target``(저장에 쓰인 바로 그 매핑)으로 되계산하며,
+    실제로 받은 파일만 결과에 넣는다(``report.files``로 성공 여부 판정 → RETR 550으로
+    빠진 파일은 제외). 두 리스트 모두 탐색 순서를 따르므로 cond.txt 하나가 빠져도
+    정렬이 어긋나지 않는다.
     """
     base = Path(dest)
     dl = FtpFleetDownloader(user=USER, password=PASSWORD)   # 프록시 위치는 PROXY_URL 상수
@@ -160,26 +145,22 @@ def example_download_images_with_cond(
         by_host.setdefault(h, []).extend((img, cond_for(img)))
     specs = [HostSpec(host=h, files=files) for h, files in by_host.items()]
 
-    # 3. 파일을 쓰면서 로컬 경로를 (host, remote_path) 키로 기록한다(순서 무관).
-    written: dict[tuple[str, str], Path] = {}
+    # 3. 저장은 헬퍼에 맡긴다. 어떤 파일이 실제로 내려왔는지는 report.files로 안다.
+    report = dl.download(specs, on_file=save_image_with_sidecar(base))
+    ok = {(f.host, f.remote_path) for f in report.files}
 
-    def on_file(h: str, remote_path: str, data: bytes) -> None:
-        target = _local_path(base, remote_path)   # 원격 트리 미러링 X — 평탄한 로컬 레이아웃
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-        written[(h, remote_path)] = target   # list.append이 아니라 키 기록 → 스레드 안전
-
-    dl.download(specs, on_file=on_file)
-
-    # 4. 콜백 순서가 아니라 탐색 순서를 따라 인덱스가 정렬된 리스트를 만든다.
+    # 4. 탐색 순서대로, 받은 파일만 골라 인덱스가 정렬된 리스트를 만든다. 로컬 경로는
+    #    저장에 쓰인 것과 같은 매핑(image_sidecar_target)으로 되계산한다.
     image_paths: list[Path] = []
     cond_paths: list[Path | None] = []
     for h, img in discovered:
-        img_local = written.get((h, img))
-        if img_local is None:
+        if (h, img) not in ok:
             continue   # 이미지 자체가 없음 — 정렬 유지를 위해 짝 전체를 건너뛴다
-        image_paths.append(img_local)
-        cond_paths.append(written.get((h, cond_for(img))))   # cond 없으면 None
+        image_paths.append(image_sidecar_target(base, img))
+        cond_rp = cond_for(img)
+        cond_paths.append(
+            image_sidecar_target(base, cond_rp) if (h, cond_rp) in ok else None
+        )
     return image_paths, cond_paths
 
 
