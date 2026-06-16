@@ -100,7 +100,7 @@ def example_download_images_with_cond(
     host: str = "10.0.0.1",
     parent: str = "/IMAGES",
     dest: str | Path = r"C:\eqp_downloads",
-) -> tuple[list[Path], list[Path | None]]:
+) -> tuple[list[Path], list[Path]]:
     """이미지(``*01AP.jpeg``)와 그 사이드카 cond.txt를 짝지어 받아 로컬에 저장한다.
 
     고정 규칙: 각 이미지에는 "." + 이미지 파일명으로 된 하위 폴더가 있고 그 안에
@@ -110,12 +110,12 @@ def example_download_images_with_cond(
     에 맡긴다 — 이미지는 ``dest`` 바로 아래, cond.txt는 원래의 사이드카 폴더를 살려
     충돌 없이 떨군다(직접 ``on_file``을 짤 필요 없음).
 
-    반환값은 인덱스가 정렬된 ``(image_paths, cond_paths)``다 — ``cond_paths[i]``는
-    ``image_paths[i]``의 cond.txt이며, 서버에 cond.txt가 없으면 ``None``이다. 로컬
-    경로는 다운로드 후 ``image_sidecar_target``(저장에 쓰인 바로 그 매핑)으로 되계산하며,
-    실제로 받은 파일만 결과에 넣는다(``report.files``로 성공 여부 판정 → RETR 550으로
-    빠진 파일은 제외). 두 리스트 모두 탐색 순서를 따르므로 cond.txt 하나가 빠져도
-    정렬이 어긋나지 않는다.
+    반환값은 서로 독립된 두 리스트 ``(image_paths, cond_paths)``다 — 하나는 받은
+    이미지 경로들, 다른 하나는 받은 cond.txt 경로들이다(인덱스로 짝지어져 있지 않다).
+    로컬 경로는 다운로드 후 ``image_sidecar_target``(저장에 쓰인 바로 그 매핑)으로
+    되계산하며, 실제로 받은 파일만 담는다(``report.files``로 성공 여부 판정 → RETR
+    550으로 빠진 파일은 제외). 둘 다 탐색 순서를 따른다. 이미지와 cond는 파일명 스템이
+    같으니, 짝이 필요하면 이름으로 다시 맞출 수 있다.
     """
     base = Path(dest)
     dl = FtpFleetDownloader(user=USER, password=PASSWORD)   # 프록시 위치는 PROXY_URL 상수
@@ -149,18 +149,16 @@ def example_download_images_with_cond(
     report = dl.download(specs, on_file=save_image_with_sidecar(base))
     ok = {(f.host, f.remote_path) for f in report.files}
 
-    # 4. 탐색 순서대로, 받은 파일만 골라 인덱스가 정렬된 리스트를 만든다. 로컬 경로는
-    #    저장에 쓰인 것과 같은 매핑(image_sidecar_target)으로 되계산한다.
+    # 4. 받은 파일만 골라 이미지 / cond 두 개의 독립 리스트로 나눈다(탐색 순서 유지).
+    #    로컬 경로는 저장에 쓰인 것과 같은 매핑(image_sidecar_target)으로 되계산한다.
     image_paths: list[Path] = []
-    cond_paths: list[Path | None] = []
+    cond_paths: list[Path] = []
     for h, img in discovered:
-        if (h, img) not in ok:
-            continue   # 이미지 자체가 없음 — 정렬 유지를 위해 짝 전체를 건너뛴다
-        image_paths.append(image_sidecar_target(base, img))
+        if (h, img) in ok:
+            image_paths.append(image_sidecar_target(base, img))
         cond_rp = cond_for(img)
-        cond_paths.append(
-            image_sidecar_target(base, cond_rp) if (h, cond_rp) in ok else None
-        )
+        if (h, cond_rp) in ok:
+            cond_paths.append(image_sidecar_target(base, cond_rp))
     return image_paths, cond_paths
 
 
