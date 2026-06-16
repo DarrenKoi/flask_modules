@@ -26,6 +26,7 @@ from ftp_handler.direct_downloader.fleet_downloader import (
     UploadSpec,
     _keep_last_components,
     _safe_relative,
+    _strip_components,
     download_fleet,
     group_files_by_host,
     image_sidecar_target,
@@ -589,6 +590,24 @@ class KeepLastComponentsTests(unittest.TestCase):
         self.assertEqual(_keep_last_components(rel, 9), rel)
 
 
+class StripComponentsTests(unittest.TestCase):
+    def test_drops_leading_components_keeps_tail(self):
+        rel = Path("IMAGES/20260615/sub/x.jpeg")
+        self.assertEqual(_strip_components(rel, 2), Path("sub/x.jpeg"))
+
+    def test_keeps_varying_depth_below_prefix(self):
+        # The case keep_last can't do: same prefix gone, different tails kept.
+        self.assertEqual(_strip_components(Path("mnt/ftp/A/x.dat"), 2), Path("A/x.dat"))
+        self.assertEqual(
+            _strip_components(Path("mnt/ftp/A/B/y.dat"), 2), Path("A/B/y.dat")
+        )
+
+    def test_at_or_over_depth_keeps_filename_only(self):
+        rel = Path("a/b/c.dat")
+        self.assertEqual(_strip_components(rel, 3), Path("c.dat"))
+        self.assertEqual(_strip_components(rel, 9), Path("c.dat"))
+
+
 class SaveToDirTests(_FakeFTPTestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -640,6 +659,23 @@ class SaveToDirTests(_FakeFTPTestCase):
         # Only the trailing 2 components survive; /IMAGES/20260615 is dropped.
         self.assertEqual(
             (self.tmp_path / "10.0.0.1" / "sub" / "S09-01AP.jpeg").read_bytes(), b"J"
+        )
+
+    def test_save_to_dir_strip_components_drops_leading_dirs(self):
+        FakeFTP.scripts = {
+            "10.0.0.1": {"files": {"/mnt/ftp/A/sub/x.dat": b"X"}},
+        }
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p")
+            report = dl.download(
+                [HostSpec("10.0.0.1", files=["/mnt/ftp/A/sub/x.dat"])],
+                on_file=save_to_dir(self.tmp_path, strip_components=2),
+            )
+
+        self.assertEqual(report.ok, 1)
+        # /mnt/ftp dropped; A/sub/x.dat structure preserved below.
+        self.assertEqual(
+            (self.tmp_path / "10.0.0.1" / "A" / "sub" / "x.dat").read_bytes(), b"X"
         )
 
     def test_save_to_dir_then_chains(self):

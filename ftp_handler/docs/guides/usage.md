@@ -84,7 +84,23 @@ dl.download(specs, on_file=save_to_dir("/data/eqp", keep_last=1))
 # 저장: /data/eqp/<host>/S09-01AP.jpeg        (파일명만)
 ```
 
-`keep_last`로 표현되지 않는 임의의 레이아웃(예: 사이드카 파일을 별도 폴더로 가르기)이
+**앞 부분만 떼기 (`strip_components`):** `keep_last`가 "뒤에서 N개를 남긴다"라면,
+`strip_components`는 "앞에서 N개를 버린다"이다(tar의 `--strip-components`). 떼어낼
+공통 접두 경로의 깊이는 같지만 그 아래 구조 깊이가 파일마다 다를 때, 단일 `keep_last`로는
+안 되는 것을 해낸다 — 접두부만 일률적으로 지우고 나머지 구조는 그대로 보존한다:
+
+```python
+# 원격: /mnt/ftp/A/sub/x.dat  와  /mnt/ftp/A/B/y.dat (깊이가 다름)
+dl.download(specs, on_file=save_to_dir("/data/eqp", strip_components=2))
+# 저장: /data/eqp/<host>/A/sub/x.dat   및   /data/eqp/<host>/A/B/y.dat
+#       (/mnt/ftp 만 제거, 그 아래 서로 다른 구조는 유지)
+```
+
+`strip_components`와 `keep_last`를 함께 주면 앞쪽(`strip_components`)을 먼저, 그다음
+뒤쪽(`keep_last`)을 적용한다. 둘 다 `<host>` 단계는 항상 유지한다. 저장 경로는 같은
+인자로 `local_target`을 호출해 되찾는다.
+
+`keep_last`/`strip_components`로 표현되지 않는 임의의 레이아웃(예: 사이드카 파일을 별도 폴더로 가르기)이
 필요하면 `on_file`을 직접 쓴다 — `(host, remote_path, data)`를 받아 원하는 곳에
 `write_bytes` 하면 되고, 다운로더는 로컬 경로를 전혀 건드리지 않는다. `then=`으로
 저장과 처리(parse+index)를 한 번에 엮을 수도 있다:

@@ -958,26 +958,49 @@ def _keep_last_components(rel: Path, keep_last: int) -> Path:
     return Path(*parts[len(parts) - keep_last:])
 
 
+def _strip_components(rel: Path, strip: int) -> Path:
+    """Drop the leading ``strip`` path components, keeping the rest of the structure.
+
+    tar's ``--strip-components``: removes the first N parent parts while
+    preserving the remaining directory structure below them (the opposite end
+    from ``_keep_last_components``, which keeps the tail). When ``strip`` meets
+    or exceeds the depth only the filename remains — never an empty path.
+
+        _strip_components(Path("IMAGES/20260615/sub/x.jpeg"), 2)  # -> sub/x.jpeg
+    """
+    parts = rel.parts
+    if strip >= len(parts):
+        return Path(parts[-1])
+    return Path(*parts[strip:])
+
+
 def local_target(
     dest_dir: str | Path,
     host: str,
     remote_path: str,
     *,
     keep_last: int | None = None,
+    strip_components: int | None = None,
 ) -> Path:
     """Compute the exact local Path ``save_to_dir`` writes a file to.
 
     Pure and deterministic mirror of ``save_to_dir``'s mapping
-    (``dest_dir/<host>/<remote path>``, with the same ``keep_last`` trimming and
-    component sanitizing). Use it to recover local paths AFTER a download — the
-    report carries ``host`` + ``remote_path`` but not the local path, so map
-    over ``report.files`` with the same ``dest_dir``/``keep_last`` you passed:
+    (``dest_dir/<host>/<remote path>``, with the same trimming and component
+    sanitizing). Use it to recover local paths AFTER a download — the report
+    carries ``host`` + ``remote_path`` but not the local path, so map over
+    ``report.files`` with the same args you passed to ``save_to_dir``:
 
-        report = dl.download(specs, on_file=save_to_dir(dest, keep_last=2))
-        paths = [local_target(dest, f.host, f.remote_path, keep_last=2)
+        report = dl.download(specs, on_file=save_to_dir(dest, strip_components=2))
+        paths = [local_target(dest, f.host, f.remote_path, strip_components=2)
                  for f in report.files]
+
+    ``strip_components`` drops the first N parent parts (front), ``keep_last``
+    keeps the last N (back). When both are given, ``strip_components`` is applied
+    first, then ``keep_last``.
     """
     rel = _safe_relative(remote_path)
+    if strip_components is not None:
+        rel = _strip_components(rel, strip_components)
     if keep_last is not None:
         rel = _keep_last_components(rel, keep_last)
     return Path(dest_dir) / _ILLEGAL_COMPONENT.sub("_", host) / rel
@@ -987,6 +1010,7 @@ def save_to_dir(
     dest_dir: str | Path,
     *,
     keep_last: int | None = None,
+    strip_components: int | None = None,
     then: OnFile | None = None,
 ) -> OnFile:
     """Build an ``on_file`` callback that writes each file to local disk.
@@ -996,20 +1020,33 @@ def save_to_dir(
     callback runs (on the client PC in proxy mode). Because it runs per file,
     RAM stays bounded (streaming), unlike collecting then writing.
 
-    ``keep_last`` drops remote parent directories and keeps only the trailing N
-    path components, so you don't mirror the whole FTP tree locally:
-    ``keep_last=1`` flattens to just the filename, ``keep_last=2`` keeps
-    ``<parent>/<file>``. ``None`` (default) preserves the full remote path. The
-    ``<host>`` segment is always kept regardless.
+    Two ways to trim the remote path so you don't mirror the whole FTP tree
+    (the ``<host>`` segment is always kept regardless):
+
+      - ``keep_last`` keeps only the trailing N components (back): ``keep_last=1``
+        flattens to just the filename, ``keep_last=2`` keeps ``<parent>/<file>``.
+      - ``strip_components`` drops the first N parent parts (front), keeping the
+        rest of the structure — like tar's ``--strip-components``. Better when
+        the depth below the stripped prefix varies between files.
+
+    ``None`` (default) for both preserves the full remote path. If both are
+    given, ``strip_components`` is applied first, then ``keep_last``.
 
     ``then`` chains a second callback after the write (e.g. parse + index), so
     you can archive to disk AND process in one pass.
 
         dl.download(specs, on_file=save_to_dir(r"C:\\eqp_downloads"))
         dl.download(specs, on_file=save_to_dir(r"C:\\eqp_downloads", keep_last=2))
+        dl.download(specs, on_file=save_to_dir(r"C:\\eqp_downloads", strip_components=2))
     """
     def on_file(host: str, remote_path: str, data: bytes) -> None:
-        target = local_target(dest_dir, host, remote_path, keep_last=keep_last)
+        target = local_target(
+            dest_dir,
+            host,
+            remote_path,
+            keep_last=keep_last,
+            strip_components=strip_components,
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         if then is not None:
