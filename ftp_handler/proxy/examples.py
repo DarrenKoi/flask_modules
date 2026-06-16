@@ -97,18 +97,18 @@ def example_swap_direct_for_proxy() -> None:
 def _local_path(base: Path, remote_path: str) -> Path:
     """원격 경로를 평탄한 로컬 경로로 매핑한다 — 원격 트리(``/IMAGES/날짜/…``)는 버린다.
 
-    이미지는 ``base`` 바로 아래에 두고, cond.txt는 그 이미지명을 딴 하위 폴더 안에
-    넣는다. 모든 cond.txt가 이름이 같아 그대로 평탄화하면 서로 덮어쓰므로, 이미지별
-    폴더로 갈라 충돌을 막는다. cond.txt가 어느 이미지의 것인지는 원격 사이드카
-    폴더명(``.<이미지>.jpeg``)에 들어 있으니, 거기서 앞 점과 확장자만 떼어 폴더명으로 쓴다.
+    이미지는 ``base`` 바로 아래에 두고, cond.txt는 원격 사이드카 폴더명(``.<이미지>.jpeg``)
+    을 그대로 살린 하위 폴더 안에 넣는다. 모든 cond.txt가 이름이 같아 그대로 평탄화하면
+    서로 덮어쓰므로 이미지별 폴더로 갈라 충돌을 막되, 폴더명은 서버의 점 붙은 형태를
+    그대로 유지한다(점을 떼지 않는다). 점 붙은 폴더명은 점 없는 이미지 파일명과 달라
+    같은 디렉터리에서 충돌하지 않는다.
 
         .../S09_M0047-01AP.jpeg            -> base/S09_M0047-01AP.jpeg
-        .../.S09_M0047-01AP.jpeg/cond.txt  -> base/S09_M0047-01AP/cond.txt
+        .../.S09_M0047-01AP.jpeg/cond.txt  -> base/.S09_M0047-01AP.jpeg/cond.txt
     """
     p = PurePosixPath(remote_path)
     if p.name == "cond.txt":
-        image_stem = PurePosixPath(p.parent.name.lstrip(".")).stem
-        return base.joinpath(image_stem, "cond.txt")
+        return base.joinpath(p.parent.name, "cond.txt")   # 사이드카 폴더명 그대로(점 유지)
     return base / p.name
 
 
