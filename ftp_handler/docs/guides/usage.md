@@ -93,6 +93,23 @@ dl.download(specs, on_file=save_to_dir("/data/eqp", keep_last=1))
 dl.download(specs, on_file=save_to_dir("/data/eqp", keep_last=2, then=index_one))
 ```
 
+**저장된 로컬 경로 되찾기 (`local_target`):** `save_to_dir`은 경로를 돌려주지 않고
+`DownloadReport.files`도 `host`/`remote_path`만 담는다(스트리밍 모드에선 `data`도 비어
+있다). 저장 위치는 `(host, remote_path)`에서 결정론적으로 정해지므로, 다운로드를 넘긴
+것과 같은 `dest_dir`/`keep_last`로 `local_target`을 호출해 되계산하면 된다:
+
+```python
+from ftp_handler.direct_downloader import save_to_dir, local_target
+
+report = dl.download(specs, on_file=save_to_dir("/data/eqp", keep_last=2))
+paths = [
+    local_target("/data/eqp", f.host, f.remote_path, keep_last=2)
+    for f in report.files                      # 성공한 파일만 들어 있다
+]
+```
+
+`local_target`은 `save_to_dir`이 내부에서 쓰는 바로 그 매핑 함수라 경로가 항상 일치한다.
+
 **내려받기 전에 크기 재기 (`size_dirs`):** `list_dirs`가 "어떤 파일이 있나"를
 답한다면, `size_dirs`는 "그것들을 메모리에 담으면 몇 바이트인가"를 답한다. 가져오는
 대신 FTP `SIZE` 명령으로 각 파일 크기만 묻는다(바이트 전송 없음). `download`와 똑같이

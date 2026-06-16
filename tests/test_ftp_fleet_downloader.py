@@ -29,6 +29,7 @@ from ftp_handler.direct_downloader.fleet_downloader import (
     download_fleet,
     group_files_by_host,
     list_fleet,
+    local_target,
     put_bytes_to_minio,
     put_parquet_to_minio,
     put_pickle_to_minio,
@@ -466,6 +467,42 @@ class SafeRelativeTests(unittest.TestCase):
 
     def test_empty_falls_back(self):
         self.assertEqual(_safe_relative("/"), Path("_unnamed"))
+
+
+class LocalTargetTests(unittest.TestCase):
+    def test_mirrors_full_remote_path_under_host(self):
+        self.assertEqual(
+            local_target("/data/eqp", "10.0.0.1", "/MEAS/sub/x.dat"),
+            Path("/data/eqp/10.0.0.1/MEAS/sub/x.dat"),
+        )
+
+    def test_keep_last_matches_save_to_dir_trimming(self):
+        self.assertEqual(
+            local_target(
+                "/data/eqp", "h1", "/IMAGES/20260615/sub/S09.jpeg", keep_last=2
+            ),
+            Path("/data/eqp/h1/sub/S09.jpeg"),
+        )
+
+    def test_recovers_paths_from_report_files(self):
+        # The intended use: recompute local paths after a streaming download.
+        FakeFTP.scripts = {"h1": {"files": {"/A/b/c.dat": b"C"}}}
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            with patch(FTP_PATCH_TARGET, FakeFTP):
+                dl = FtpFleetDownloader(user="u", password="p")
+                report = dl.download(
+                    [HostSpec("h1", files=["/A/b/c.dat"])],
+                    on_file=save_to_dir(tmp.name, keep_last=1),
+                )
+            paths = [
+                local_target(tmp.name, f.host, f.remote_path, keep_last=1)
+                for f in report.files
+            ]
+            self.assertEqual(paths, [Path(tmp.name) / "h1" / "c.dat"])
+            self.assertTrue(paths[0].exists())  # the recomputed path really points at the file
+        finally:
+            tmp.cleanup()
 
 
 class KeepLastComponentsTests(unittest.TestCase):

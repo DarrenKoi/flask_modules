@@ -958,6 +958,31 @@ def _keep_last_components(rel: Path, keep_last: int) -> Path:
     return Path(*parts[len(parts) - keep_last:])
 
 
+def local_target(
+    dest_dir: str | Path,
+    host: str,
+    remote_path: str,
+    *,
+    keep_last: int | None = None,
+) -> Path:
+    """Compute the exact local Path ``save_to_dir`` writes a file to.
+
+    Pure and deterministic mirror of ``save_to_dir``'s mapping
+    (``dest_dir/<host>/<remote path>``, with the same ``keep_last`` trimming and
+    component sanitizing). Use it to recover local paths AFTER a download — the
+    report carries ``host`` + ``remote_path`` but not the local path, so map
+    over ``report.files`` with the same ``dest_dir``/``keep_last`` you passed:
+
+        report = dl.download(specs, on_file=save_to_dir(dest, keep_last=2))
+        paths = [local_target(dest, f.host, f.remote_path, keep_last=2)
+                 for f in report.files]
+    """
+    rel = _safe_relative(remote_path)
+    if keep_last is not None:
+        rel = _keep_last_components(rel, keep_last)
+    return Path(dest_dir) / _ILLEGAL_COMPONENT.sub("_", host) / rel
+
+
 def save_to_dir(
     dest_dir: str | Path,
     *,
@@ -983,13 +1008,8 @@ def save_to_dir(
         dl.download(specs, on_file=save_to_dir(r"C:\\eqp_downloads"))
         dl.download(specs, on_file=save_to_dir(r"C:\\eqp_downloads", keep_last=2))
     """
-    base = Path(dest_dir)
-
     def on_file(host: str, remote_path: str, data: bytes) -> None:
-        rel = _safe_relative(remote_path)
-        if keep_last is not None:
-            rel = _keep_last_components(rel, keep_last)
-        target = base / _ILLEGAL_COMPONENT.sub("_", host) / rel
+        target = local_target(dest_dir, host, remote_path, keep_last=keep_last)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         if then is not None:
