@@ -3,17 +3,65 @@
 import io
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, BinaryIO
+from zoneinfo import ZoneInfo
 
 from .base import MinioBase
+
+_KST = ZoneInfo("Asia/Seoul")
 
 
 def _delete_object_class() -> type[Any]:
     from minio.deleteobjects import DeleteObject
 
     return DeleteObject
+
+
+def _today_kst() -> date:
+    """Today's date in KST. Split out as a seam so tests can pin 'today'."""
+
+    return datetime.now(_KST).date()
+
+
+def _parse_segment(folder_path: str, width: int) -> int | None:
+    """Parse the leaf segment of a folder path as a ``width``-digit integer.
+
+    ``folder_path`` ends in ``/``; the leaf must be exactly ``width`` digits
+    (zero-padded) to parse. Returns ``None`` for any non-conforming segment so
+    the date walk can skip it.
+    """
+
+    leaf = folder_path.rstrip("/").rsplit("/", 1)[-1]
+    if len(leaf) != width or not leaf.isdigit():
+        return None
+    return int(leaf)
+
+
+@dataclass(slots=True)
+class DateFolder:
+    """A discovered ``YYYY/MM/DD`` folder under a retention anchor.
+
+    ``path`` is the full stored key prefix (default prefix included) ending in
+    ``/`` — e.g. ``"hitachi_sem/cdsem/one/2026/06/11/"`` — so it feeds straight
+    back into ``list`` / ``remove_objects``.
+    """
+
+    date: date
+    path: str
+
+
+@dataclass(slots=True)
+class DeleteOlderResult:
+    """Outcome of ``delete_older_than``, identical in shape for both modes.
+
+    ``folders`` is the selected set (what would be / was deleted). ``errors``
+    holds any ``remove_objects`` error entries — always empty on a dry run.
+    """
+
+    folders: list[DateFolder]
+    errors: list[Any]
 
 
 @dataclass(slots=True)
@@ -414,6 +462,115 @@ class MinioObject(MinioBase):
         if not targets:
             return []
         return list(self.client.remove_objects(bucket_name, targets))
+
+    def _child_folders(self, bucket_name: str, full_prefix: str) -> list[str]:
+        """Immediate child folders of ``full_prefix`` (common prefixes only).
+
+        A non-recursive listing returns one entry per child; folders come back
+        as common prefixes ending in ``/``. Leaf files (no trailing ``/``) are
+        ignored — the walk only descends folders.
+        """
+
+        listing = self.client.list_objects(
+            bucket_name=bucket_name,
+            prefix=full_prefix.rstrip("/") + "/",
+            recursive=False,
+        )
+        return [obj.object_name for obj in listing if obj.object_name.endswith("/")]
+
+    def list_date_folders(
+        self,
+        base: str,
+        *,
+        bucket: str | None = None,
+    ) -> list[DateFolder]:
+        """Discover ``YYYY/MM/DD`` folders directly under the ``base`` anchor.
+
+        ``base`` composes onto ``default_prefix`` like any other key and anchors
+        where the date folders begin; the three levels immediately under it are
+        treated as year / month / day. Discovery is a three-level *non-recursive*
+        walk over common prefixes only — no payload object is listed — so it is
+        cheap even when each day holds millions of objects.
+
+        Folder names that don't parse as a zero-padded year (4 digits), month,
+        and day (2 digits each) forming a valid calendar date are skipped, so a
+        stray ``latest/`` next to the date folders never crashes discovery.
+        Returns the folders sorted ascending by date.
+        """
+
+        bucket_name = self._resolve_bucket(bucket)
+        anchor = self._resolve_key(base)
+
+        folders: list[DateFolder] = []
+        for year_path in self._child_folders(bucket_name, anchor):
+            year = _parse_segment(year_path, 4)
+            if year is None:
+                continue
+            for month_path in self._child_folders(bucket_name, year_path):
+                month = _parse_segment(month_path, 2)
+                if month is None:
+                    continue
+                for day_path in self._child_folders(bucket_name, month_path):
+                    day = _parse_segment(day_path, 2)
+                    if day is None:
+                        continue
+                    try:
+                        parsed = date(year, month, day)
+                    except ValueError:
+                        continue
+                    folders.append(DateFolder(date=parsed, path=day_path))
+
+        folders.sort(key=lambda f: f.date)
+        return folders
+
+    def delete_older_than(
+        self,
+        days: int,
+        base: str,
+        *,
+        bucket: str | None = None,
+        dry_run: bool = False,
+    ) -> DeleteOlderResult:
+        """Delete date folders under ``base`` older than ``days`` days.
+
+        The cutoff is ``today_KST - days``: a folder dated strictly before the
+        cutoff is removed, so the last ``days`` days **including today** are
+        kept. Run on 2026-06-17 with ``days=30`` keeps ``2026-05-18`` onward and
+        deletes ``2026-05-17`` and earlier.
+
+        ``dry_run=True`` returns the selection (in ``folders``) and an empty
+        ``errors`` list without issuing any delete. Otherwise each selected
+        day-subtree is listed recursively — server-side narrowed to
+        ``anchor/YYYY/MM/DD/`` — and its objects are batched into a single
+        ``remove_objects`` call; ``errors`` carries any returned error entries.
+        """
+
+        cutoff = _today_kst() - timedelta(days=days)
+        selected = [
+            f
+            for f in self.list_date_folders(base, bucket=bucket)
+            if f.date < cutoff
+        ]
+        if dry_run or not selected:
+            return DeleteOlderResult(folders=selected, errors=[])
+
+        bucket_name = self._resolve_bucket(bucket)
+        delete_object = _delete_object_class()
+        targets = [
+            delete_object(obj.object_name)
+            for folder in selected
+            for obj in self.client.list_objects(
+                bucket_name=bucket_name,
+                prefix=folder.path,
+                recursive=True,
+            )
+        ]
+        errors = (
+            list(self.client.remove_objects(bucket_name, targets))
+            if targets
+            else []
+        )
+        return DeleteOlderResult(folders=selected, errors=errors)
 
     def presigned_get_url(
         self,

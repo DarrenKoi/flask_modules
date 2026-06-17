@@ -1,8 +1,9 @@
 import io
 import unittest
-from unittest.mock import Mock
+from datetime import date
+from unittest.mock import Mock, patch
 
-from minio_handler import MinioObject
+from minio_handler import DateFolder, DeleteOlderResult, MinioObject
 
 
 def _make_get_service(bodies: dict[str, bytes], *, fail: set[str] = frozenset()):
@@ -173,6 +174,184 @@ class MinioDeleteMatchingTests(unittest.TestCase):
         result = service.delete_matching(lambda k: True)
 
         self.assertEqual(result, ["boom"])
+
+
+class _FakeMinio:
+    """Emulate MinIO ``list_objects`` common-prefix rollup over a flat key set.
+
+    A non-recursive listing of ``prefix`` yields one entry per immediate child:
+    a folder shows up as a common prefix ending in ``/``; a leaf file shows up
+    as its full key. A recursive listing yields every leaf under ``prefix``.
+    """
+
+    def __init__(self, keys: list[str], *, remove_errors: list = None):
+        self.keys = sorted(keys)
+        self.removed: list[str] = []
+        self.remove_errors = list(remove_errors or [])
+        self.list_calls: list[dict] = []
+
+    def list_objects(
+        self, *, bucket_name, prefix="", recursive=False, start_after=None
+    ):
+        self.list_calls.append({"prefix": prefix, "recursive": recursive})
+        if recursive:
+            return [
+                Mock(object_name=k) for k in self.keys if k.startswith(prefix)
+            ]
+        out = []
+        seen = set()
+        for k in self.keys:
+            if not k.startswith(prefix):
+                continue
+            rest = k[len(prefix):]
+            if "/" in rest:
+                entry = prefix + rest.split("/", 1)[0] + "/"
+            else:
+                entry = k
+            if entry not in seen:
+                seen.add(entry)
+                out.append(Mock(object_name=entry))
+        return out
+
+    def remove_objects(self, bucket_name, targets):
+        targets = list(targets)
+        self.removed.extend(t.name for t in targets)
+        return list(self.remove_errors)
+
+
+def _make_date_service(keys: list[str], *, remove_errors: list = None):
+    client = _FakeMinio(keys, remove_errors=remove_errors)
+    service = MinioObject(client=client, bucket="bucket")
+    service.use_prefix(None)   # ignore any minio_config.py PREFIX
+    return service
+
+
+def _tree(*days: str) -> list[str]:
+    """Build payload keys under ``hitachi_sem/cdsem/one/<day>/data/x.parquet``."""
+
+    base = "hitachi_sem/cdsem/one"
+    return [f"{base}/{d}/data/x.parquet" for d in days]
+
+
+class MinioListDateFoldersTests(unittest.TestCase):
+    def test_walks_three_levels_and_parses_dates_sorted(self) -> None:
+        service = _make_date_service(
+            _tree("2026/06/11", "2026/05/17", "2026/06/02")
+        )
+
+        folders = service.list_date_folders("hitachi_sem/cdsem/one")
+
+        self.assertEqual(
+            [f.date for f in folders],
+            [date(2026, 5, 17), date(2026, 6, 2), date(2026, 6, 11)],
+        )
+        self.assertEqual(
+            folders[-1].path, "hitachi_sem/cdsem/one/2026/06/11/"
+        )
+        self.assertIsInstance(folders[0], DateFolder)
+
+    def test_listings_are_non_recursive(self) -> None:
+        service = _make_date_service(_tree("2026/06/11"))
+
+        service.list_date_folders("hitachi_sem/cdsem/one")
+
+        self.assertTrue(
+            all(not c["recursive"] for c in service.client.list_calls)
+        )
+
+    def test_skips_non_date_folders(self) -> None:
+        keys = _tree("2026/06/11") + [
+            "hitachi_sem/cdsem/one/latest/data/x.parquet",   # bad year
+            "hitachi_sem/cdsem/one/2026/ab/01/data/x.parquet",   # bad month
+            "hitachi_sem/cdsem/one/2026/06/9/data/x.parquet",    # not padded
+            "hitachi_sem/cdsem/one/2026/13/01/data/x.parquet",   # invalid month
+        ]
+        service = _make_date_service(keys)
+
+        folders = service.list_date_folders("hitachi_sem/cdsem/one")
+
+        self.assertEqual([f.date for f in folders], [date(2026, 6, 11)])
+
+    def test_anchor_composes_with_default_prefix(self) -> None:
+        client = _FakeMinio(
+            [f"kpo/{k}" for k in _tree("2026/06/11")]
+        )
+        service = MinioObject(client=client, bucket="bucket")
+        service.use_prefix("kpo")
+
+        folders = service.list_date_folders("hitachi_sem/cdsem/one")
+
+        self.assertEqual(
+            folders[0].path, "kpo/hitachi_sem/cdsem/one/2026/06/11/"
+        )
+
+
+class MinioDeleteOlderThanTests(unittest.TestCase):
+    def setUp(self) -> None:
+        patcher = patch(
+            "minio_handler.object._today_kst", return_value=date(2026, 6, 17)
+        )
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
+    def test_selects_only_folders_before_cutoff(self) -> None:
+        # cutoff = 2026-06-17 - 30 days = 2026-05-18; keep >= 2026-05-18.
+        service = _make_date_service(
+            _tree("2026/05/17", "2026/05/18", "2026/06/11")
+        )
+
+        result = service.delete_older_than(30, "hitachi_sem/cdsem/one")
+
+        self.assertIsInstance(result, DeleteOlderResult)
+        self.assertEqual([f.date for f in result.folders], [date(2026, 5, 17)])
+        self.assertEqual(
+            service.client.removed,
+            ["hitachi_sem/cdsem/one/2026/05/17/data/x.parquet"],
+        )
+
+    def test_dry_run_selects_but_deletes_nothing(self) -> None:
+        service = _make_date_service(_tree("2026/05/17", "2026/06/11"))
+
+        result = service.delete_older_than(
+            30, "hitachi_sem/cdsem/one", dry_run=True
+        )
+
+        self.assertEqual([f.date for f in result.folders], [date(2026, 5, 17)])
+        self.assertEqual(result.errors, [])
+        self.assertEqual(service.client.removed, [])
+
+    def test_deletes_each_day_subtree_server_side_narrowed(self) -> None:
+        service = _make_date_service(_tree("2026/05/01", "2026/05/02"))
+
+        service.delete_older_than(30, "hitachi_sem/cdsem/one")
+
+        recursive_prefixes = {
+            c["prefix"] for c in service.client.list_calls if c["recursive"]
+        }
+        self.assertEqual(
+            recursive_prefixes,
+            {
+                "hitachi_sem/cdsem/one/2026/05/01/",
+                "hitachi_sem/cdsem/one/2026/05/02/",
+            },
+        )
+
+    def test_keeps_everything_when_nothing_is_old(self) -> None:
+        service = _make_date_service(_tree("2026/06/11", "2026/06/17"))
+
+        result = service.delete_older_than(30, "hitachi_sem/cdsem/one")
+
+        self.assertEqual(result.folders, [])
+        self.assertEqual(service.client.removed, [])
+
+    def test_surfaces_remove_error_entries(self) -> None:
+        service = _make_date_service(
+            _tree("2026/05/01"), remove_errors=["boom"]
+        )
+
+        result = service.delete_older_than(30, "hitachi_sem/cdsem/one")
+
+        self.assertEqual(result.errors, ["boom"])
 
 
 if __name__ == "__main__":
