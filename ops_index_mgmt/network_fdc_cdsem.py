@@ -2,7 +2,7 @@
 
 import argparse
 import json
-from typing import Any
+from typing import Any, Iterable, Iterator, Mapping
 
 from ops_store import OSIndex, create_client
 
@@ -22,6 +22,9 @@ ROLLOVER_DOC_COUNT = 1000000
 RETENTION_AGE = "365d"  # 1 year
 POLICY_PRIORITY = 100
 
+# Fields whose combined value identifies one FDC record; joined to form _id.
+ID_FIELDS = ("fab_name", "eqp_id", "fdc_key", "timestamp")
+
 
 def index_pattern() -> str:
     return f"{INDEX_ALIAS}-*"
@@ -29,6 +32,77 @@ def index_pattern() -> str:
 
 def backing_index() -> str:
     return f"{INDEX_ALIAS}-000001"
+
+
+def make_doc_id(doc: Mapping[str, Any]) -> str:
+    """Return the composite `_id` for one FDC record.
+
+    Joins `fab_name`, `eqp_id`, `fdc_key`, and `timestamp` (in that order)
+    with `_`. These four fields together identify one record, so deriving
+    `_id` from them makes re-ingest idempotent: the same record always
+    lands on the same `_id`. With `op_type="create"` a re-run then surfaces
+    as a duplicate (HTTP 409); with `op_type="index"` it overwrites in
+    place. Values are `str()`-coerced so a non-string `timestamp` (epoch
+    int, datetime) still joins cleanly.
+
+    Raises `KeyError` if any of the four fields is missing — a record
+    without them cannot get a stable id and should not be silently indexed
+    under a malformed key. Filter with `has_id_fields` first if the batch
+    may contain incomplete records (`iter_bulk_actions` does this).
+    """
+
+    return "_".join(str(doc[field]) for field in ID_FIELDS)
+
+
+def has_id_fields(doc: Mapping[str, Any]) -> bool:
+    """Return True if `doc` has a usable value for every field in ID_FIELDS.
+
+    A field counts as present only if the key exists, the value is not
+    `None`, and — for strings — it is not blank/whitespace-only. Other
+    falsy values are kept: a `timestamp` of `0` is valid and `str()`-coerces
+    to `"0"`, so it must not be treated as missing. Records that fail this
+    check cannot get a stable composite `_id` and are skipped at ingest
+    rather than indexed under a malformed key.
+    """
+
+    for field in ID_FIELDS:
+        if field not in doc:
+            return False
+        value = doc[field]
+        if value is None:
+            return False
+        if isinstance(value, str) and not value.strip():
+            return False
+    return True
+
+
+def iter_bulk_actions(
+    docs: Iterable[Mapping[str, Any]],
+    *,
+    index: str,
+    op_type: str = "create",
+) -> Iterator[dict[str, Any]]:
+    """Yield raw bulk actions for `docs`, skipping any missing an id field.
+
+    Each yielded action carries the composite `_id` from `make_doc_id`, and
+    the record is stored in `_source` as-is — no `os_inserted` (or any other)
+    field is added. Records that fail `has_id_fields` are silently skipped.
+    `op_type="create"` surfaces duplicate ids on re-runs (dedup); `"index"`
+    overwrites by id (upsert).
+
+    Feed the result straight to `OSDoc.bulk`; a composite `_id` rules out
+    `OSDoc.bulk_index`, which only copies a single field into `_id`.
+    """
+
+    for doc in docs:
+        if not has_id_fields(doc):
+            continue
+        yield {
+            "_op_type": op_type,
+            "_index": index,
+            "_id": make_doc_id(doc),
+            "_source": dict(doc),
+        }
 
 
 def build_mappings() -> dict[str, Any]:
@@ -307,11 +381,10 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# Reference: ingesting a dataframe into network_fdc_cdsem
+# Reference: ingesting a list of record dicts into network_fdc_cdsem
 # ---------------------------------------------------------------------------
 # Not executed by this script. Copy/adapt at the office once the index exists.
 #
-# import pandas as pd
 # from ops_store import OSDoc, create_client
 #
 # client = create_client(
@@ -321,29 +394,14 @@ if __name__ == "__main__":
 # )
 # doc_service = OSDoc(client=client)
 #
-# # 1. Auto-typed date columns: any *_tm / *_dt column needs to be real
-# #    datetime before bulk_index_dataframe serializes it to ISO. Strings
-# #    that pandas left as object dtype would round-trip as text.
-# for col in fdc_df.columns:
-#     if col.endswith(("_tm", "_dt")):
-#         fdc_df[col] = pd.to_datetime(fdc_df[col], errors="coerce")
-#
-# # 2. Drop rows with empty/NaN doc_id, then drop in-batch duplicates.
-# #    Use nullable "string" dtype so NaN stays NA (plain astype(str) turns
-# #    NaN into the literal "nan" and would slip past the filter).
-# before = len(fdc_df)
-# fdc_df["doc_id"] = fdc_df["doc_id"].astype("string").str.strip()
-# fdc_df = fdc_df[fdc_df["doc_id"].notna() & (fdc_df["doc_id"] != "")]
-# fdc_df = fdc_df.drop_duplicates(subset="doc_id", keep="first")
-# print(f"filtered {before - len(fdc_df)} rows (empty or duplicate doc_id)")
-#
-# # 3. Bulk index. op_type="create" surfaces duplicate doc_id on re-runs;
-# #    switch to "index" only if you want upsert-by-doc_id semantics.
-# success_count, errors = doc_service.bulk_index_dataframe(
-#     fdc_df,
-#     index="network_fdc_cdsem",
-#     id_field="doc_id",
-#     op_type="create",
+# # `records` is your list[dict] — each dict carries fab_name, eqp_id,
+# # fdc_key, timestamp (the composite _id) plus the rest of the payload.
+# # iter_bulk_actions builds _id = fab_name_eqp_id_fdc_key_timestamp, skips
+# # any record missing one of those four, and stores _source as-is (no
+# # os_inserted is added). op_type="create" surfaces duplicate ids on
+# # re-runs (dedup); switch to "index" for upsert-by-id semantics.
+# success_count, errors = doc_service.bulk(
+#     iter_bulk_actions(records, index=INDEX_ALIAS, op_type="create"),
 # )
 # print(f"indexed: {success_count}, errors: {len(errors)}")
 # for err in errors[:5]:

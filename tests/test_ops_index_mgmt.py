@@ -3,6 +3,7 @@ from unittest.mock import Mock, call, patch
 
 from ops_index_mgmt import beam_reso_cdsem as beam_reso
 from ops_index_mgmt import hitachi_sem_msr_info as mgmt
+from ops_index_mgmt import network_fdc_cdsem as fdc
 
 
 class SemMsrInfoIndexMgmtTests(unittest.TestCase):
@@ -297,6 +298,112 @@ class BeamResoCdsemTests(unittest.TestCase):
             policy["states"][0]["transitions"][0]["conditions"],
             {"min_index_age": "1095d"},
         )
+
+
+class NetworkFdcCdsemTests(unittest.TestCase):
+    def test_make_doc_id_joins_the_four_id_fields_in_order(self) -> None:
+        doc = {
+            "fab_name": "M16",
+            "eqp_id": "CDSEM01",
+            "fdc_key": "focus",
+            "timestamp": "2026-06-17T10:00:00+09:00",
+            "value": 42,
+        }
+        self.assertEqual(
+            fdc.make_doc_id(doc),
+            "M16_CDSEM01_focus_2026-06-17T10:00:00+09:00",
+        )
+
+    def test_make_doc_id_coerces_non_string_values(self) -> None:
+        doc = {
+            "fab_name": "M16",
+            "eqp_id": "CDSEM01",
+            "fdc_key": 7,
+            "timestamp": 1700000000,
+        }
+        self.assertEqual(fdc.make_doc_id(doc), "M16_CDSEM01_7_1700000000")
+
+    def test_make_doc_id_raises_when_an_id_field_is_missing(self) -> None:
+        with self.assertRaises(KeyError):
+            fdc.make_doc_id({"fab_name": "M16", "eqp_id": "CDSEM01"})
+
+    def test_has_id_fields_accepts_complete_doc_including_zero_values(self) -> None:
+        self.assertTrue(
+            fdc.has_id_fields(
+                {
+                    "fab_name": "M16",
+                    "eqp_id": "CDSEM01",
+                    "fdc_key": 0,
+                    "timestamp": 0,
+                }
+            )
+        )
+
+    def test_has_id_fields_rejects_missing_none_and_blank(self) -> None:
+        base = {
+            "fab_name": "M16",
+            "eqp_id": "CDSEM01",
+            "fdc_key": "focus",
+            "timestamp": "t",
+        }
+        self.assertFalse(
+            fdc.has_id_fields({k: v for k, v in base.items() if k != "timestamp"})
+        )
+        self.assertFalse(fdc.has_id_fields({**base, "eqp_id": None}))
+        self.assertFalse(fdc.has_id_fields({**base, "fab_name": "   "}))
+
+    def test_iter_bulk_actions_skips_docs_missing_an_id_field(self) -> None:
+        docs = [
+            {
+                "fab_name": "M16",
+                "eqp_id": "e1",
+                "fdc_key": "k1",
+                "timestamp": "t1",
+                "v": 1,
+            },
+            {"fab_name": "M16", "eqp_id": "e2", "fdc_key": "k2"},  # no timestamp -> skip
+            {
+                "fab_name": "M16",
+                "eqp_id": "e3",
+                "fdc_key": "k3",
+                "timestamp": "t3",
+                "v": 3,
+            },
+        ]
+
+        actions = list(fdc.iter_bulk_actions(docs, index="network_fdc_cdsem"))
+
+        self.assertEqual(
+            [a["_id"] for a in actions],
+            ["M16_e1_k1_t1", "M16_e3_k3_t3"],
+        )
+        first = actions[0]
+        self.assertEqual(first["_op_type"], "create")
+        self.assertEqual(first["_index"], "network_fdc_cdsem")
+        self.assertEqual(first["_source"]["v"], 1)
+        self.assertNotIn("os_inserted", first["_source"])
+
+    def test_iter_bulk_actions_source_is_a_copy_not_the_input_dict(self) -> None:
+        doc = {
+            "fab_name": "M16",
+            "eqp_id": "e1",
+            "fdc_key": "k1",
+            "timestamp": "t1",
+        }
+        action = next(iter(fdc.iter_bulk_actions([doc], index="network_fdc_cdsem")))
+        action["_source"]["mutated"] = True
+        self.assertNotIn("mutated", doc)
+
+    def test_iter_bulk_actions_honors_op_type_override(self) -> None:
+        docs = [
+            {"fab_name": "M16", "eqp_id": "e", "fdc_key": "k", "timestamp": "t"}
+        ]
+
+        actions = list(
+            fdc.iter_bulk_actions(docs, index="network_fdc_cdsem", op_type="index")
+        )
+
+        self.assertEqual(actions[0]["_op_type"], "index")
 
 
 if __name__ == "__main__":
