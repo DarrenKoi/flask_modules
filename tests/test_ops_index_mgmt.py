@@ -4,6 +4,7 @@ from unittest.mock import Mock, call, patch
 from ops_index_mgmt import beam_reso_cdsem as beam_reso
 from ops_index_mgmt import hitachi_sem_msr_info as mgmt
 from ops_index_mgmt import network_fdc_cdsem as fdc
+from ops_index_mgmt import sharpness_monitor_cdsem as sharp
 
 
 class SemMsrInfoIndexMgmtTests(unittest.TestCase):
@@ -404,6 +405,74 @@ class NetworkFdcCdsemTests(unittest.TestCase):
         )
 
         self.assertEqual(actions[0]["_op_type"], "index")
+
+
+class SharpnessMonitorCdsemTests(unittest.TestCase):
+    def test_mapping_disables_the_three_store_only_objects(self) -> None:
+        props = sharp.build_mappings()["properties"]
+
+        for field in ("beam_condition", "noise", "reso_eb"):
+            self.assertEqual(props[field], {"type": "object", "enabled": False})
+        self.assertEqual(props["os_inserted"], {"type": "date"})
+
+    def test_mapping_auto_types_suffix_dates(self) -> None:
+        templates = sharp.build_mappings()["dynamic_templates"]
+
+        names = [next(iter(t)) for t in templates]
+        self.assertEqual(names, ["tm_suffix_as_date", "dt_suffix_as_date"])
+
+    def test_index_settings_use_requested_cluster_shape(self) -> None:
+        settings = sharp.build_index_settings()
+
+        self.assertEqual(settings["number_of_shards"], 2)
+        self.assertEqual(settings["number_of_replicas"], 1)
+        self.assertEqual(
+            settings["plugins.index_state_management.rollover_alias"],
+            "sharpness_monitor_cdsem",
+        )
+
+    def test_ism_policy_matches_network_fdc_retention_rule(self) -> None:
+        policy = sharp.build_ism_policy_body()["policy"]
+
+        self.assertEqual(
+            policy["ism_template"][0]["index_patterns"],
+            ["sharpness_monitor_cdsem-*"],
+        )
+        self.assertEqual(
+            policy["states"][0]["actions"],
+            [{"rollover": {"min_doc_count": 1000000}}],
+        )
+        self.assertEqual(
+            policy["states"][0]["transitions"][0]["conditions"],
+            {"min_index_age": "365d"},
+        )
+        self.assertEqual(policy["states"][1]["actions"], [{"delete": {}}])
+
+    def test_put_management_resources_use_expected_paths(self) -> None:
+        client = Mock()
+
+        sharp.put_ism_policy(client)
+        sharp.put_index_template(client)
+
+        client.transport.perform_request.assert_has_calls(
+            [
+                call(
+                    "PUT",
+                    "/_plugins/_ism/policies/sharpness_monitor_cdsem_retention_policy",
+                    body=sharp.build_ism_policy_body(),
+                ),
+                call(
+                    "PUT",
+                    "/_index_template/sharpness_monitor_cdsem_template",
+                    body=sharp.build_index_template_body(),
+                ),
+            ]
+        )
+
+    def test_create_client_requires_password_variable(self) -> None:
+        with patch.object(sharp, "OPENSEARCH_PASSWORD", ""):
+            with self.assertRaises(RuntimeError):
+                sharp.create_skewnono_client()
 
 
 if __name__ == "__main__":
