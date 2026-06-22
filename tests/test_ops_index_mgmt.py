@@ -483,6 +483,27 @@ class SharpnessMonitorCdsemTests(unittest.TestCase):
 
         self.assertEqual(actions[0]["_op_type"], "index")
 
+    def test_ordered_degree_pairs_sorts_numerically_skips_date_casts_values(
+        self,
+    ) -> None:
+        block = {
+            "112.5": "0.001108",
+            "Date": "2026-05-23T18:35:49",
+            "0.0": "0.005689",
+            "22.5": "0.004886",
+        }
+
+        degrees, values = sharp.ordered_degree_pairs(block)
+
+        # numeric sort, not lexical (else "112.5" would precede "22.5")
+        self.assertEqual(degrees, [0.0, 22.5, 112.5])
+        # values stay index-aligned with degrees, Date dropped
+        self.assertEqual(values, [0.005689, 0.004886, 0.001108])
+
+    def test_ordered_degree_pairs_raises_on_non_numeric_value(self) -> None:
+        with self.assertRaises(ValueError):
+            sharp.ordered_degree_pairs({"0.0": ""})
+
     def test_mapping_auto_types_suffix_dates(self) -> None:
         templates = sharp.build_mappings()["dynamic_templates"]
 

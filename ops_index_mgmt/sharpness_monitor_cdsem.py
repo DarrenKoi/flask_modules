@@ -120,6 +120,35 @@ def iter_bulk_actions(
         }
 
 
+def ordered_degree_pairs(block: Mapping[str, Any]) -> tuple[list[float], list[float]]:
+    """Return `(degrees, values)` as parallel float lists sorted by degree.
+
+    A degree block (`reso_detector`, `noise`, `reso_eb`) is a dict mixing a
+    `Date` entry with degree-labelled measurements (`"0.0"`, `"112.5"`, ...),
+    each value a stringified float. The block is stored `enabled: false`, so
+    its `_source` key order is whatever was sent — and JSON objects are
+    unordered anyway, so it must not be trusted. This rebuilds a deterministic
+    ascending-by-degree view ready to plot: degrees are sorted numerically
+    (`float(key)`, not lexically — else `"112.5"` would sort before `"22.5"`),
+    and `values` stays index-aligned with `degrees`.
+
+    Any key that does not parse as a float (e.g. `Date`) is skipped, so the
+    whole block can be passed in as-is. Values are `float()`-coerced; a blank
+    or non-numeric value raises `ValueError` rather than silently dropping a
+    measurement point.
+    """
+
+    pairs: list[tuple[float, float]] = []
+    for key, value in block.items():
+        try:
+            degree = float(key)
+        except (TypeError, ValueError):
+            continue
+        pairs.append((degree, float(value)))
+    pairs.sort(key=lambda pair: pair[0])
+    return [degree for degree, _ in pairs], [value for _, value in pairs]
+
+
 def index_pattern() -> str:
     return f"{INDEX_ALIAS}-*"
 
