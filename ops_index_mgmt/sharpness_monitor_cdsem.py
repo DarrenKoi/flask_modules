@@ -505,3 +505,30 @@ if __name__ == "__main__":
 # print(f"indexed: {success_count}, errors: {len(errors)}")
 # for err in errors[:5]:
 #     print(err)
+#
+#
+# ---------------------------------------------------------------------------
+# Reference: reading back one IP's latest sweep into plottable curves
+# ---------------------------------------------------------------------------
+# from ops_store import OSSearch
+#
+# search = OSSearch(client=client, default_index=INDEX_ALIAS)
+#
+# # Most recent document for one equipment IP. `latest` sorts by the date
+# # field desc; the query narrows to a single host (ip is a keyword field).
+# result = search.latest(
+#     "timestamp",
+#     query={"term": {"ip": "10.1.2.3"}},
+# )
+# hit = result["hits"]["hits"][0]
+# source = hit["_source"]
+#
+# # The four disabled objects come back whole. Rebuild a deterministic
+# # ascending-by-degree view per curve — never trust the stored key order.
+# for block_name in ("reso_detector", "noise", "reso_eb"):
+#     degrees, values = ordered_degree_pairs(source[block_name])
+#     print(block_name, degrees, values)
+#     # e.g. feed straight to a plot: ax.plot(degrees, values, label=block_name)
+#
+# # summ_beam stays a normal object, so its metrics are queryable/aggregatable
+# # directly (range_search, aggregate, ...) — no ordered_degree_pairs needed.
