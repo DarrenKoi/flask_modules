@@ -408,12 +408,80 @@ class NetworkFdcCdsemTests(unittest.TestCase):
 
 
 class SharpnessMonitorCdsemTests(unittest.TestCase):
-    def test_mapping_disables_the_three_store_only_objects(self) -> None:
+    def test_mapping_disables_the_four_store_only_objects(self) -> None:
         props = sharp.build_mappings()["properties"]
 
-        for field in ("beam_condition", "noise", "reso_eb"):
+        for field in ("beam_condition", "reso_detector", "noise", "reso_eb"):
             self.assertEqual(props[field], {"type": "object", "enabled": False})
         self.assertEqual(props["os_inserted"], {"type": "date"})
+
+    def test_mapping_keeps_summ_beam_indexed_and_maps_id_fields(self) -> None:
+        props = sharp.build_mappings()["properties"]
+
+        self.assertNotIn("summ_beam", props)  # falls through to dynamic mapping
+        self.assertEqual(props["ip"], {"type": "keyword"})
+        self.assertEqual(props["timestamp"], {"type": "date"})
+
+    def test_make_doc_id_joins_ip_and_timestamp(self) -> None:
+        doc = {
+            "ip": "10.1.2.3",
+            "timestamp": "2026-05-23T18:35:49+09:00",
+            "noise": {"0.0": "0.003434"},
+        }
+
+        self.assertEqual(
+            sharp.make_doc_id(doc),
+            "10.1.2.3_2026-05-23T18:35:49+09:00",
+        )
+
+    def test_make_doc_id_raises_when_an_id_field_is_missing(self) -> None:
+        with self.assertRaises(KeyError):
+            sharp.make_doc_id({"ip": "10.1.2.3"})
+
+    def test_has_id_fields_rejects_missing_none_and_blank(self) -> None:
+        base = {"ip": "10.1.2.3", "timestamp": "t"}
+
+        self.assertTrue(sharp.has_id_fields(base))
+        self.assertFalse(sharp.has_id_fields({"ip": "10.1.2.3"}))
+        self.assertFalse(sharp.has_id_fields({**base, "ip": None}))
+        self.assertFalse(sharp.has_id_fields({**base, "timestamp": "   "}))
+
+    def test_iter_bulk_actions_stamps_os_inserted_and_skips_incomplete(self) -> None:
+        docs = [
+            {"ip": "ip1", "timestamp": "t1", "noise": {"0.0": "0.003434"}},
+            {"ip": "ip2"},  # missing timestamp -> skip
+        ]
+
+        actions = list(
+            sharp.iter_bulk_actions(
+                docs,
+                index="sharpness_monitor_cdsem",
+                os_inserted="2026-05-23T18:40:00+09:00",
+            )
+        )
+
+        self.assertEqual([a["_id"] for a in actions], ["ip1_t1"])
+        first = actions[0]
+        self.assertEqual(first["_op_type"], "create")
+        self.assertEqual(first["_index"], "sharpness_monitor_cdsem")
+        self.assertEqual(first["_source"]["noise"], {"0.0": "0.003434"})
+        self.assertEqual(
+            first["_source"]["os_inserted"], "2026-05-23T18:40:00+09:00"
+        )
+
+    def test_iter_bulk_actions_honors_op_type_override(self) -> None:
+        docs = [{"ip": "ip", "timestamp": "t"}]
+
+        actions = list(
+            sharp.iter_bulk_actions(
+                docs,
+                index="sharpness_monitor_cdsem",
+                os_inserted="2026-05-23T18:40:00+09:00",
+                op_type="index",
+            )
+        )
+
+        self.assertEqual(actions[0]["_op_type"], "index")
 
     def test_mapping_auto_types_suffix_dates(self) -> None:
         templates = sharp.build_mappings()["dynamic_templates"]

@@ -1,13 +1,17 @@
 """Create the sharpness_monitor_cdsem rollover index, template, alias, and ISM policy.
 
-Single CD-SEM sharpness-monitoring index. `beam_condition`, `noise`, and
-`reso_eb` are wide reference objects mapped `enabled: false` — stored whole in
-`_source`, never parsed/indexed. Lifecycle copies the network_fdc_cdsem rule:
+Single CD-SEM sharpness-monitoring index. One document per equipment IP per
+collection event (`_id = ip_timestamp`). Of the five per-IP measurement dicts,
+four — `beam_condition`, `reso_detector`, `noise`, `reso_eb` — are wide
+reference objects mapped `enabled: false` (stored whole in `_source`, never
+parsed/indexed); `summ_beam` is left a normal object so its summary metrics
+stay queryable/aggregatable. Lifecycle copies the network_fdc_cdsem rule:
 1000000-doc rollover safety net, 1-year retention.
 """
 
 import argparse
 import json
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Any
 
 from ops_store import OSIndex, create_client
@@ -31,8 +35,89 @@ POLICY_PRIORITY = 100
 
 # Dict-valued reference fields kept in _source but never parsed/indexed —
 # fetched whole, not queried. Mapped enabled:false so their sub-keys cost
-# nothing against index.mapping.total_fields.limit.
-STORE_ONLY_OBJECT_FIELDS = ("beam_condition", "noise", "reso_eb")
+# nothing against index.mapping.total_fields.limit, no matter that the keys
+# are numeric-looking degree labels ("0.0", "112.5") and the values are
+# stringified floats ("0.003434") — enabled:false stores the dict verbatim
+# and never type-checks any of it. `summ_beam` is deliberately NOT here: it
+# stays a normal object so its summary metrics remain queryable/aggregatable.
+# `beam_condition` is treated as display-only; promote it out of this tuple if
+# you ever need to filter/aggregate on a beam characteristic.
+STORE_ONLY_OBJECT_FIELDS = ("beam_condition", "reso_detector", "noise", "reso_eb")
+
+# Fields whose combined value identifies one collection event; joined to form
+# _id. One document per equipment IP per timestamp.
+ID_FIELDS = ("ip", "timestamp")
+
+
+def make_doc_id(doc: Mapping[str, Any]) -> str:
+    """Return the composite `_id` for one sharpness-monitor document.
+
+    Joins `ip` and `timestamp` (in that order) with `_`. These two fields
+    together identify one collection event, so deriving `_id` from them makes
+    re-ingest idempotent: the same event always lands on the same `_id`. With
+    `op_type="create"` a re-run then surfaces as a duplicate; with
+    `op_type="index"` it overwrites in place. Values are `str()`-coerced so a
+    non-string `timestamp` (epoch int, datetime) still joins cleanly.
+
+    Raises `KeyError` if either field is missing — a document without them
+    cannot get a stable id and should not be silently indexed under a
+    malformed key. Filter with `has_id_fields` first if the batch may contain
+    incomplete documents (`iter_bulk_actions` does this).
+    """
+
+    return "_".join(str(doc[field]) for field in ID_FIELDS)
+
+
+def has_id_fields(doc: Mapping[str, Any]) -> bool:
+    """Return True if `doc` has a usable value for every field in ID_FIELDS.
+
+    A field counts as present only if the key exists, the value is not
+    `None`, and — for strings — it is not blank/whitespace-only. Other falsy
+    values are kept: a `timestamp` of `0` is valid and `str()`-coerces to
+    `"0"`, so it must not be treated as missing. Documents that fail this
+    check cannot get a stable composite `_id` and are skipped at ingest
+    rather than indexed under a malformed key.
+    """
+
+    for field in ID_FIELDS:
+        if field not in doc:
+            return False
+        value = doc[field]
+        if value is None:
+            return False
+        if isinstance(value, str) and not value.strip():
+            return False
+    return True
+
+
+def iter_bulk_actions(
+    docs: Iterable[Mapping[str, Any]],
+    *,
+    index: str,
+    os_inserted: str,
+    op_type: str = "create",
+) -> Iterator[dict[str, Any]]:
+    """Yield raw bulk actions for `docs`, skipping any missing an id field.
+
+    Each yielded action carries the composite `_id` from `make_doc_id` and
+    the shared `os_inserted` stamp (KST, tz-aware — the caller computes one
+    value for the whole batch) added to `_source`. Documents that fail
+    `has_id_fields` are silently skipped. `op_type="create"` surfaces
+    duplicate ids on re-runs (dedup); `"index"` overwrites by id (upsert).
+
+    Feed the result straight to `OSDoc.bulk`; a composite `_id` rules out
+    `OSDoc.bulk_index`, which only copies a single field into `_id`.
+    """
+
+    for doc in docs:
+        if not has_id_fields(doc):
+            continue
+        yield {
+            "_op_type": op_type,
+            "_index": index,
+            "_id": make_doc_id(doc),
+            "_source": {**doc, "os_inserted": os_inserted},
+        }
 
 
 def index_pattern() -> str:
@@ -59,18 +144,28 @@ def build_mappings() -> dict[str, Any]:
                       not end in `_tm`/`_dt`, so it is mapped explicitly
                       here rather than via the dynamic templates.
     - store-only objects:
-                      `beam_condition`, `noise`, `reso_eb` are dicts fetched
-                      whole to plot, never filtered/aggregated. Mapped
-                      `object` with `enabled: false`, so the entire dict is
-                      stored verbatim in `_source` and returned on fetch but
-                      never parsed: its sub-keys are never mapped, so they
-                      cost nothing against `index.mapping.total_fields.limit`
-                      (default 1000) no matter how many or which keys appear.
-                      To query one sub-key later, promote it to a real
-                      top-level field and reindex.
+                      `beam_condition`, `reso_detector`, `noise`, `reso_eb`
+                      are dicts fetched whole to plot, never
+                      filtered/aggregated. Mapped `object` with
+                      `enabled: false`, so the entire dict is stored verbatim
+                      in `_source` and returned on fetch but never parsed: its
+                      sub-keys are never mapped, so they cost nothing against
+                      `index.mapping.total_fields.limit` (default 1000) no
+                      matter how many or which keys appear — and it does not
+                      matter that the keys are numeric-looking degree labels
+                      ("0.0", "112.5") or that the values are stringified
+                      floats ("0.003434"), since nothing in a disabled object
+                      is type-checked. To query one sub-key later, promote it
+                      to a real top-level field and reindex.
+    - `summ_beam`   : deliberately left to default dynamic mapping (a normal
+                      object) so its bounded set of summary metrics stays
+                      queryable/aggregatable. Cast its numerics on ingest so
+                      they map as numbers, not `keyword`.
     """
 
     properties: dict[str, Any] = {
+        "ip": {"type": "keyword"},
+        "timestamp": {"type": "date"},
         "os_inserted": {"type": "date"},
     }
     for field in STORE_ONLY_OBJECT_FIELDS:
@@ -330,3 +425,54 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# ---------------------------------------------------------------------------
+# Reference: fanning the IP-keyed dict out into documents and ingesting them
+# ---------------------------------------------------------------------------
+# Not executed by this script. Copy/adapt at the office once the index exists.
+#
+# from datetime import datetime
+# from zoneinfo import ZoneInfo
+#
+# from ops_store import OSDoc, create_client
+#
+# # `payload` is the nested dict: {ip: {beam_condition, reso_detector, noise,
+# # reso_eb, summ_beam}}. Each inner dict shares the same "Date". Fan it out
+# # to one flat doc per IP, lifting ip + the shared Date to the top level so
+# # they can be the composite _id and a real `date` field.
+# def fan_out(payload):
+#     for ip, blocks in payload.items():
+#         # Every block carries the same Date; read it once.
+#         shared_date = blocks["summ_beam"]["Date"]
+#         yield {
+#             "ip": ip,
+#             "timestamp": shared_date,
+#             "beam_condition": blocks["beam_condition"],
+#             "reso_detector": blocks["reso_detector"],
+#             "noise": blocks["noise"],
+#             "reso_eb": blocks["reso_eb"],
+#             "summ_beam": blocks["summ_beam"],
+#         }
+#
+# client = create_client(
+#     host=OPENSEARCH_HOST,
+#     user=OPENSEARCH_USER,
+#     password=OPENSEARCH_PASSWORD,
+# )
+# doc_service = OSDoc(client=client)
+#
+# # One os_inserted stamp for the whole batch (KST, tz-aware).
+# os_inserted = datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
+#
+# success_count, errors = doc_service.bulk(
+#     iter_bulk_actions(
+#         fan_out(payload),
+#         index=INDEX_ALIAS,
+#         os_inserted=os_inserted,
+#         op_type="create",  # "index" to upsert-by-id instead of dedup
+#     ),
+# )
+# print(f"indexed: {success_count}, errors: {len(errors)}")
+# for err in errors[:5]:
+#     print(err)
