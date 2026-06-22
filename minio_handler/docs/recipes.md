@@ -399,48 +399,28 @@ upload_url = mo.presigned_put_url("uploads/raw.bin", expires=timedelta(minutes=1
 > wrapper에서도 lifecycle 메서드는 제거했습니다. retention은 Airflow DAG
 > 또는 cron으로 직접 돌리는 cleanup job으로 처리합니다.
 
-### N일 지난 객체 삭제
+### N일 지난 date 폴더 삭제 (`delete_older_than`)
+
+`YYYY/MM/DD` 폴더로 적재하는 데이터는 손으로 짠 purge 루프가 필요 없습니다.
+`MinioObject`에 1급 메서드 `delete_older_than(days, base, *, dry_run=False)`이
+있습니다. `base` 아래의 date 폴더를 cheap한 non-recursive walk로 찾고 (날짜로
+파싱되지 않는 폴더는 건너뜀), `today_KST - days` 컷오프보다 **앞선** 날짜의
+폴더만 골라 하루치씩 `remove_objects`로 일괄 삭제합니다. 최근 `days`일은
+(오늘 포함) 보존됩니다.
 
 ```python
-from datetime import datetime, timedelta, timezone
-
-def purge_older_than(mo: MinioObject, prefix: str, days: int) -> int:
-    """prefix 아래에서 last_modified 기준 N일 지난 객체를 모두 삭제.
-
-    삭제 건수를 돌려줍니다. delete_many가 prefix를 다시 합성하지 않도록
-    short key로 변환해서 넘깁니다.
-    """
-
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    base = (mo.default_prefix or "") + ("/" if mo.default_prefix else "")
-
-    targets: list[str] = []
-    for obj in mo.list(prefix):
-        if obj.last_modified >= cutoff:
-            continue
-        # object_name은 default_prefix가 이미 붙은 full key
-        targets.append(obj.object_name.removeprefix(base))
-
-    if not targets:
-        return 0
-
-    errors = mo.delete_many(targets)
-    for err in errors:
-        print("failed:", err)
-    return len(targets) - len(errors)
+mo.delete_older_than(7,   "scratch")    # scratch/YYYY/MM/DD 중 7일 지난 폴더
+mo.delete_older_than(30,  "logs")       # logs/ 아래 30일 지난 폴더
+mo.delete_older_than(365, "archive")    # archive/ 아래 1년 지난 폴더
 ```
 
-호출 예:
-
-```python
-purge_older_than(mo, "scratch/",  days=7)    # scratch/ 아래 7일 지난 것
-purge_older_than(mo, "logs/",     days=30)   # logs/ 아래 30일 지난 것
-purge_older_than(mo, "archive/",  days=365)  # archive/ 아래 1년 지난 것
-```
+컷오프 기준은 객체의 `last_modified`가 아니라 **폴더 경로의 날짜**입니다.
+date 폴더 구조가 아닌 평평한 prefix를 last_modified로 거르고 싶다면 위의
+`delete_matching`을 쓰세요.
 
 ### Airflow DAG에서
 
-이미 있는 `airflow_mgmt`의 `minio_purge` DAG가 이 패턴입니다. 새 prefix가
+이미 있는 `airflow_mgmt`의 `minio_purge` DAG가 이 패턴입니다. 새 base가
 필요하면 거기 task 하나를 추가하는 식으로 운영하세요.
 
 ```python
@@ -458,7 +438,8 @@ def scratch_purge():
     def purge():
         from minio_handler import MinioObject
         mo = MinioObject()
-        return purge_older_than(mo, "scratch/", days=7)
+        result = mo.delete_older_than(7, "scratch")
+        return [f.path for f in result.folders]
 
     purge()
 
@@ -474,17 +455,18 @@ S3에는 디렉터리가 없으므로 "빈 디렉터리 삭제"라는 동작 자
 
 ### 통계만 보고 싶을 때
 
-cleanup을 실제로 돌리기 전에 영향 범위를 미리 보는 dry-run 패턴입니다.
+실제로 지우기 전에 영향 범위를 미리 보려면 `delete_older_than`을
+`dry_run=True`로 부르세요. 삭제는 하지 않고 선택될 폴더 목록만 돌려줍니다.
+폴더 전체를 그냥 훑어보고 싶으면 `list_date_folders`를 쓰면 됩니다.
 
 ```python
-def report_purge_candidates(mo, prefix, days):
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    n, total = 0, 0
-    for obj in mo.list(prefix):
-        if obj.last_modified < cutoff:
-            n += 1
-            total += obj.size
-    print(f"would delete {n} objects, {total / 1_048_576:.1f} MiB")
+result = mo.delete_older_than(30, "logs", dry_run=True)
+for folder in result.folders:
+    print("would delete", folder.path)
+
+# 또는 전체 date 폴더 목록만:
+for folder in mo.list_date_folders("logs"):
+    print(folder.date, folder.path)
 ```
 
 ## 관련 문서

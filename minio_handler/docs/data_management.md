@@ -193,8 +193,8 @@ mo.delete("active/report.pdf")
 ```
 
 `2067928/trash/`는 cleanup DAG에 30일 retention으로 등록해 두면 자동 정리
-(사내 환경에서는 lifecycle 권한이 없으므로 `recipes.md`의 `purge_older_than`
-패턴으로 처리합니다).
+(사내 환경에서는 lifecycle 권한이 없으므로 `MinioObject.delete_older_than`
+메서드로 처리합니다. `recipes.md`의 "정기 cleanup" 절 참고).
 
 방법 2: **tag로 표시**
 
