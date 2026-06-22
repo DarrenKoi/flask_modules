@@ -504,6 +504,87 @@ class SharpnessMonitorCdsemTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sharp.ordered_degree_pairs({"0.0": ""})
 
+    def test_fan_out_lifts_ip_and_shared_date_to_top_level(self) -> None:
+        payload = {
+            "10.1.2.3": {
+                "beam_condition": {"Date": "2026-05-23T18:35:49", "mode": "lowkv"},
+                "reso_detector": {"Date": "2026-05-23T18:35:49", "0.0": "0.0056"},
+                "noise": {"Date": "2026-05-23T18:35:49", "0.0": "0.0034"},
+                "reso_eb": {"Date": "2026-05-23T18:35:49", "0.0": "0.0048"},
+                "summ_beam": {"Date": "2026-05-23T18:35:49", "score": 0.9},
+            }
+        }
+
+        docs = list(sharp.fan_out(payload))
+
+        self.assertEqual(len(docs), 1)
+        doc = docs[0]
+        self.assertEqual(doc["ip"], "10.1.2.3")
+        self.assertEqual(doc["timestamp"], "2026-05-23T18:35:49")
+        self.assertEqual(doc["noise"], {"Date": "2026-05-23T18:35:49", "0.0": "0.0034"})
+        self.assertEqual(doc["summ_beam"]["score"], 0.9)
+
+    def test_store_payload_fans_out_stamps_and_bulk_indexes(self) -> None:
+        payload = {
+            "10.1.2.3": {
+                "beam_condition": {"Date": "2026-05-23T18:35:49"},
+                "reso_detector": {"Date": "2026-05-23T18:35:49", "0.0": "0.0056"},
+                "noise": {"Date": "2026-05-23T18:35:49", "0.0": "0.0034"},
+                "reso_eb": {"Date": "2026-05-23T18:35:49", "0.0": "0.0048"},
+                "summ_beam": {"Date": "2026-05-23T18:35:49", "score": 0.9},
+            }
+        }
+
+        captured: dict[str, object] = {}
+
+        def fake_bulk(actions, **kwargs):
+            captured["actions"] = list(actions)
+            captured["kwargs"] = kwargs
+            return len(captured["actions"]), []
+
+        doc_service = Mock()
+        doc_service.bulk.side_effect = fake_bulk
+        client = Mock()
+
+        with patch.object(sharp, "OSDoc", return_value=doc_service) as osdoc_cls:
+            indexed, errors = sharp.store_payload(payload, client=client)
+
+        osdoc_cls.assert_called_once_with(client=client, index="sharpness_monitor_cdsem")
+        self.assertEqual((indexed, errors), (1, []))
+
+        action = captured["actions"][0]
+        self.assertEqual(action["_id"], "10.1.2.3_2026-05-23T18:35:49")
+        self.assertEqual(action["_op_type"], "create")
+        self.assertEqual(action["_index"], "sharpness_monitor_cdsem")
+        self.assertIn("os_inserted", action["_source"])  # one stamp injected
+        self.assertEqual(action["_source"]["ip"], "10.1.2.3")
+        self.assertEqual(action["_source"]["reso_eb"], {"0.0": "0.0048", "Date": "2026-05-23T18:35:49"})
+
+    def test_store_payload_passes_op_type_through(self) -> None:
+        payload = {
+            "ip1": {
+                "beam_condition": {"Date": "t"},
+                "reso_detector": {"Date": "t"},
+                "noise": {"Date": "t"},
+                "reso_eb": {"Date": "t"},
+                "summ_beam": {"Date": "t"},
+            }
+        }
+
+        captured: dict[str, object] = {}
+
+        def fake_bulk(actions, **kwargs):
+            captured["actions"] = list(actions)
+            return len(captured["actions"]), []
+
+        doc_service = Mock()
+        doc_service.bulk.side_effect = fake_bulk
+
+        with patch.object(sharp, "OSDoc", return_value=doc_service):
+            sharp.store_payload(payload, client=Mock(), op_type="index")
+
+        self.assertEqual(captured["actions"][0]["_op_type"], "index")
+
     def test_mapping_auto_types_suffix_dates(self) -> None:
         templates = sharp.build_mappings()["dynamic_templates"]
 

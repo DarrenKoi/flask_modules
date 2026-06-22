@@ -12,9 +12,11 @@ stay queryable/aggregatable. Lifecycle copies the network_fdc_cdsem rule:
 import argparse
 import json
 from collections.abc import Iterable, Iterator, Mapping
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from ops_store import OSIndex, create_client
+from ops_store import OSDoc, OSIndex, create_client
 
 OPENSEARCH_HOST = "skewnono-db1-os.osp01.skhynix.com"
 OPENSEARCH_USER = "skewnono001"
@@ -147,6 +149,72 @@ def ordered_degree_pairs(block: Mapping[str, Any]) -> tuple[list[float], list[fl
         pairs.append((degree, float(value)))
     pairs.sort(key=lambda pair: pair[0])
     return [degree for degree, _ in pairs], [value for _, value in pairs]
+
+
+def fan_out(payload: Mapping[str, Mapping[str, Any]]) -> Iterator[dict[str, Any]]:
+    """Turn the IP-keyed payload into one flat document per equipment IP.
+
+    `payload` is `{ip: {beam_condition, reso_detector, noise, reso_eb,
+    summ_beam}}`, where every inner block carries the same `Date`. Each IP
+    becomes one document with `ip` and that shared `Date` (read once, from
+    `summ_beam`) lifted to the top level so they can serve as the composite
+    `_id` and a real `date` field; the five measurement blocks are passed
+    through verbatim.
+
+    Raises `KeyError` if an IP is missing `summ_beam` or its `Date`, or any of
+    the five blocks — an incomplete sweep should surface here, not land as a
+    half-written document.
+    """
+
+    for ip, blocks in payload.items():
+        yield {
+            "ip": ip,
+            "timestamp": blocks["summ_beam"]["Date"],
+            "beam_condition": blocks["beam_condition"],
+            "reso_detector": blocks["reso_detector"],
+            "noise": blocks["noise"],
+            "reso_eb": blocks["reso_eb"],
+            "summ_beam": blocks["summ_beam"],
+        }
+
+
+def store_payload(
+    payload: Mapping[str, Mapping[str, Any]],
+    client: Any | None = None,
+    *,
+    op_type: str = "create",
+) -> tuple[int, list[Any]]:
+    """Fan one IP-keyed sharpness payload out and bulk-store it.
+
+    Builds a client from the module connection variables if none is passed,
+    fans `payload` into one document per IP (`fan_out`), and bulk-indexes them
+    with a single `os_inserted` stamp for the whole batch (KST, tz-aware —
+    "last touched in OS"). Returns `OSDoc.bulk`'s `(indexed, errors)`.
+
+    `op_type="create"` makes re-ingest idempotent: duplicate composite ids
+    come back as 409 entries in `errors` (not exceptions — `bulk` defaults to
+    `raise_on_error=False`), so `errors` is the already-present set, not a
+    failure. `op_type="index"` overwrites by id instead, re-stamping
+    `os_inserted`. `refresh` is left off so the index's `refresh_interval`
+    governs visibility rather than forcing a refresh per batch.
+    """
+
+    actual_client = client or create_client(
+        host=OPENSEARCH_HOST,
+        user=OPENSEARCH_USER,
+        password=OPENSEARCH_PASSWORD,
+    )
+    doc_service = OSDoc(client=actual_client, index=INDEX_ALIAS)
+    os_inserted = datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
+
+    return doc_service.bulk(
+        iter_bulk_actions(
+            fan_out(payload),
+            index=INDEX_ALIAS,
+            os_inserted=os_inserted,
+            op_type=op_type,
+        ),
+    )
 
 
 def index_pattern() -> str:
@@ -457,53 +525,17 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# Reference: fanning the IP-keyed dict out into documents and ingesting them
+# Reference: ingesting one IP-keyed sweep
 # ---------------------------------------------------------------------------
 # Not executed by this script. Copy/adapt at the office once the index exists.
 #
-# from datetime import datetime
-# from zoneinfo import ZoneInfo
-#
-# from ops_store import OSDoc, create_client
-#
 # # `payload` is the nested dict: {ip: {beam_condition, reso_detector, noise,
-# # reso_eb, summ_beam}}. Each inner dict shares the same "Date". Fan it out
-# # to one flat doc per IP, lifting ip + the shared Date to the top level so
-# # they can be the composite _id and a real `date` field.
-# def fan_out(payload):
-#     for ip, blocks in payload.items():
-#         # Every block carries the same Date; read it once.
-#         shared_date = blocks["summ_beam"]["Date"]
-#         yield {
-#             "ip": ip,
-#             "timestamp": shared_date,
-#             "beam_condition": blocks["beam_condition"],
-#             "reso_detector": blocks["reso_detector"],
-#             "noise": blocks["noise"],
-#             "reso_eb": blocks["reso_eb"],
-#             "summ_beam": blocks["summ_beam"],
-#         }
-#
-# client = create_client(
-#     host=OPENSEARCH_HOST,
-#     user=OPENSEARCH_USER,
-#     password=OPENSEARCH_PASSWORD,
-# )
-# doc_service = OSDoc(client=client)
-#
-# # One os_inserted stamp for the whole batch (KST, tz-aware).
-# os_inserted = datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
-#
-# success_count, errors = doc_service.bulk(
-#     iter_bulk_actions(
-#         fan_out(payload),
-#         index=INDEX_ALIAS,
-#         os_inserted=os_inserted,
-#         op_type="create",  # "index" to upsert-by-id instead of dedup
-#     ),
-# )
-# print(f"indexed: {success_count}, errors: {len(errors)}")
-# for err in errors[:5]:
+# # reso_eb, summ_beam}}. store_payload fans it out (one doc per IP), stamps a
+# # single os_inserted for the batch, and bulk-indexes. Pass a client to reuse
+# # one; omit it to build from the module connection variables.
+# indexed, errors = store_payload(payload)  # op_type="index" to upsert instead
+# print(f"indexed: {indexed}, errors: {len(errors)}")
+# for err in errors[:5]:   # with op_type="create", 409s here = already present
 #     print(err)
 #
 #
@@ -512,7 +544,7 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 # from ops_store import OSSearch
 #
-# search = OSSearch(client=client, default_index=INDEX_ALIAS)
+# search = OSSearch(client=create_skewnono_client(), default_index=INDEX_ALIAS)
 #
 # # Most recent document for one equipment IP. `latest` sorts by the date
 # # field desc; the query narrows to a single host (ip is a keyword field).
