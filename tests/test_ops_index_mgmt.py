@@ -3,6 +3,7 @@ from unittest.mock import Mock, call, patch
 
 from ops_index_mgmt import beam_reso_cdsem as beam_reso
 from ops_index_mgmt import hitachi_sem_msr_info as mgmt
+from ops_index_mgmt import member_info as member
 from ops_index_mgmt import network_fdc_cdsem as fdc
 from ops_index_mgmt import sharpness_monitor_cdsem as sharp
 
@@ -643,6 +644,155 @@ class SharpnessMonitorCdsemTests(unittest.TestCase):
         with patch.object(sharp, "OPENSEARCH_PASSWORD", ""):
             with self.assertRaises(RuntimeError):
                 sharp.create_skewnono_client()
+
+
+class MemberInfoTests(unittest.TestCase):
+    def test_resp_cont_is_nori_text_with_keyword_subfield(self) -> None:
+        props = member.build_mappings()["properties"]
+        resp = props["RESP_CONT"]
+        self.assertEqual(resp["type"], "text")
+        self.assertEqual(resp["analyzer"], "nori")
+        self.assertEqual(resp["copy_to"], "search_all")
+        self.assertEqual(resp["fields"]["keyword"]["type"], "keyword")
+        self.assertEqual(resp["fields"]["keyword"]["ignore_above"], 8192)
+
+    def test_search_all_is_nori_text_and_named_without_leading_underscore(
+        self,
+    ) -> None:
+        props = member.build_mappings()["properties"]
+        self.assertIn("search_all", props)  # leading "_" is reserved by OpenSearch
+        self.assertEqual(props["search_all"], {"type": "text", "analyzer": "nori"})
+
+    def test_human_readable_fields_are_keyword_and_copy_into_search_all(self) -> None:
+        props = member.build_mappings()["properties"]
+        for field in member.SEARCHABLE_KEYWORD_FIELDS:
+            self.assertEqual(props[field]["type"], "keyword")
+            self.assertEqual(props[field]["copy_to"], "search_all")
+
+    def test_identity_fields_are_plain_keyword_not_searchable(self) -> None:
+        props = member.build_mappings()["properties"]
+        for field in member.KEYWORD_FIELDS:
+            self.assertEqual(props[field], {"type": "keyword"})
+
+    def test_os_inserted_is_an_explicit_date_field(self) -> None:
+        props = member.build_mappings()["properties"]
+        self.assertEqual(props["os_inserted"], {"type": "date"})
+
+    def test_dynamic_templates_date_suffixes_and_keyword_default(self) -> None:
+        templates = member.build_mappings()["dynamic_templates"]
+        names = [next(iter(t)) for t in templates]
+        self.assertEqual(
+            names, ["tm_suffix_as_date", "dt_suffix_as_date", "strings_as_keyword"]
+        )
+        # unmatched strings default to keyword (member rows are codes/labels)
+        default = templates[-1]["strings_as_keyword"]
+        self.assertEqual(default["mapping"], {"type": "keyword"})
+
+    def test_has_emp_no_rejects_missing_none_and_blank(self) -> None:
+        self.assertTrue(member.has_emp_no({"EMP_NO": "12345"}))
+        self.assertTrue(member.has_emp_no({"EMP_NO": 12345}))
+        self.assertFalse(member.has_emp_no({"NAME_KOR": "김영대"}))
+        self.assertFalse(member.has_emp_no({"EMP_NO": None}))
+        self.assertFalse(member.has_emp_no({"EMP_NO": "  "}))
+
+    def test_iter_member_actions_keys_on_emp_no_stamps_and_skips(self) -> None:
+        rows = [
+            {"EMP_NO": 12345, "NAME_KOR": "김영대", "RESP_CONT": "결함 검사 담당"},
+            {"NAME_KOR": "no emp no"},  # skipped
+        ]
+
+        actions = list(
+            member.iter_member_actions(
+                rows, os_inserted="2026-06-23T10:00:00+09:00"
+            )
+        )
+
+        self.assertEqual([a["_id"] for a in actions], ["12345"])  # coerced to str
+        first = actions[0]
+        self.assertEqual(first["_op_type"], "index")  # upsert: roster refresh
+        self.assertEqual(first["_index"], "member_info")
+        self.assertEqual(first["_source"]["NAME_KOR"], "김영대")
+        self.assertEqual(
+            first["_source"]["os_inserted"], "2026-06-23T10:00:00+09:00"
+        )
+
+    def test_iter_member_actions_honors_op_type_override(self) -> None:
+        rows = [{"EMP_NO": "1"}]
+        actions = list(
+            member.iter_member_actions(
+                rows, os_inserted="2026-06-23T10:00:00+09:00", op_type="create"
+            )
+        )
+        self.assertEqual(actions[0]["_op_type"], "create")
+
+    def test_iter_member_actions_source_is_a_copy_not_the_input_dict(self) -> None:
+        row = {"EMP_NO": "1", "NAME_KOR": "김영대"}
+        action = next(
+            iter(member.iter_member_actions([row], os_inserted="t"))
+        )
+        action["_source"]["NAME_KOR"] = "changed"
+        self.assertEqual(row["NAME_KOR"], "김영대")  # input untouched
+
+    def test_ingest_members_stamps_once_and_bulk_upserts(self) -> None:
+        rows = [
+            {"EMP_NO": "1", "RESP_CONT": "검사"},
+            {"EMP_NO": "2", "RESP_CONT": "분석"},
+            {"NAME_KOR": "skip"},  # no EMP_NO -> skipped
+        ]
+
+        captured: dict[str, object] = {}
+
+        def fake_bulk(actions, **kwargs):
+            captured["actions"] = list(actions)
+            captured["kwargs"] = kwargs
+            return len(captured["actions"]), []
+
+        doc_service = Mock()
+        doc_service.bulk.side_effect = fake_bulk
+
+        indexed, errors = member.ingest_members(doc_service, rows)
+
+        self.assertEqual((indexed, errors), (2, []))
+        actions = captured["actions"]
+        self.assertEqual([a["_id"] for a in actions], ["1", "2"])
+        # one stamp shared across the whole batch
+        stamps = {a["_source"]["os_inserted"] for a in actions}
+        self.assertEqual(len(stamps), 1)
+        # refresh left off by default so the index cadence applies
+        self.assertFalse(captured["kwargs"]["refresh"])
+
+    def test_ingest_members_passes_refresh_through(self) -> None:
+        doc_service = Mock()
+        doc_service.bulk.return_value = (1, [])
+        member.ingest_members(doc_service, [{"EMP_NO": "1"}], refresh=True)
+        self.assertTrue(doc_service.bulk.call_args.kwargs["refresh"])
+
+    def test_ensure_member_info_index_skips_when_already_present(self) -> None:
+        with patch.object(member, "OSIndex") as osindex_cls:
+            index_service = osindex_cls.return_value
+            index_service.exists.return_value = True
+            result = member.ensure_member_info_index(Mock())
+
+        self.assertEqual(result, {"created": False, "index": "member_info"})
+        index_service.create.assert_not_called()
+
+    def test_ensure_member_info_index_creates_when_missing(self) -> None:
+        with patch.object(member, "OSIndex") as osindex_cls:
+            index_service = osindex_cls.return_value
+            index_service.exists.return_value = False
+            index_service.create.return_value = {"acknowledged": True}
+            result = member.ensure_member_info_index(Mock())
+
+        self.assertTrue(result["created"])
+        self.assertEqual(result["index"], "member_info")
+        _, kwargs = index_service.create.call_args
+        self.assertEqual(kwargs["index"], "member_info")
+        self.assertIn("RESP_CONT", kwargs["mappings"]["properties"])
+
+    def test_create_client_requires_password_variable(self) -> None:
+        with patch.object(member, "OPENSEARCH_PASSWORD", ""):
+            with self.assertRaises(RuntimeError):
+                member.create_skewnono_client()
 
 
 if __name__ == "__main__":
