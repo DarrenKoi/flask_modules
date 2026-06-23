@@ -804,6 +804,85 @@ class MemberInfoTests(unittest.TestCase):
         member.ingest_members(doc_service, [{"EMP_NO": "1"}], refresh=True)
         self.assertTrue(doc_service.bulk.call_args.kwargs["refresh"])
 
+    def test_current_kst_stamp_is_iso_with_kst_offset(self) -> None:
+        self.assertTrue(member.current_kst_stamp().endswith("+09:00"))
+
+    def test_ingest_members_reuses_supplied_stamp(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_bulk(actions, **kwargs):
+            captured["actions"] = list(actions)
+            return len(captured["actions"]), []
+
+        doc_service = Mock()
+        doc_service.bulk.side_effect = fake_bulk
+
+        member.ingest_members(
+            doc_service, [{"EMP_NO": "1"}], os_inserted="2026-06-23T00:00:00+09:00"
+        )
+
+        stamp = captured["actions"][0]["_source"]["os_inserted"]
+        self.assertEqual(stamp, "2026-06-23T00:00:00+09:00")
+
+    def test_prune_stale_members_deletes_strictly_below_boundary(self) -> None:
+        client = Mock()
+        client.delete_by_query.return_value = {"deleted": 2, "total": 2}
+
+        result = member.prune_stale_members(
+            client, before="2026-06-23T00:00:00+09:00"
+        )
+
+        self.assertEqual(result, {"deleted": 2, "total": 2})
+        _, kwargs = client.delete_by_query.call_args
+        self.assertEqual(kwargs["index"], "member_info")
+        self.assertEqual(
+            kwargs["body"],
+            {"query": {"range": {"os_inserted": {"lt": "2026-06-23T00:00:00+09:00"}}}},
+        )
+
+    def test_refresh_member_directory_upserts_then_prunes_with_shared_stamp(
+        self,
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_bulk(actions, **kwargs):
+            captured["actions"] = list(actions)
+            captured["bulk_kwargs"] = kwargs
+            return len(captured["actions"]), []
+
+        doc_service = Mock()
+        doc_service.bulk.side_effect = fake_bulk
+        doc_service.client.delete_by_query.return_value = {"deleted": 1}
+
+        result = member.refresh_member_directory(
+            doc_service, [{"EMP_NO": "1"}, {"EMP_NO": "2"}]
+        )
+
+        # the prune boundary is the exact stamp the upsert wrote
+        ingest_stamp = captured["actions"][0]["_source"]["os_inserted"]
+        _, prune_kwargs = doc_service.client.delete_by_query.call_args
+        prune_before = prune_kwargs["body"]["query"]["range"]["os_inserted"]["lt"]
+        self.assertEqual(ingest_stamp, prune_before)
+        self.assertEqual(result["stamp"], ingest_stamp)
+
+        # upserts are refreshed before the prune so re-stamped docs are visible
+        self.assertTrue(captured["bulk_kwargs"]["refresh"])
+        self.assertTrue(prune_kwargs["refresh"])
+
+        self.assertEqual(result["indexed"], 2)
+        self.assertEqual(result["pruned"], {"deleted": 1})
+
+    def test_refresh_member_directory_skips_prune_when_disabled(self) -> None:
+        doc_service = Mock()
+        doc_service.bulk.return_value = (1, [])
+
+        result = member.refresh_member_directory(
+            doc_service, [{"EMP_NO": "1"}], prune=False
+        )
+
+        doc_service.client.delete_by_query.assert_not_called()
+        self.assertIsNone(result["pruned"])
+
     def test_ensure_member_info_index_skips_when_already_present(self) -> None:
         with patch.object(member, "OSIndex") as osindex_cls:
             index_service = osindex_cls.return_value

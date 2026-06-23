@@ -202,12 +202,24 @@ def iter_member_actions(
         }
 
 
+def current_kst_stamp() -> str:
+    """Return the current KST timestamp as an ISO string (the os_inserted value).
+
+    One run computes a single stamp and shares it between `ingest_members` and
+    `prune_stale_members` so the prune boundary lines up exactly with the upsert
+    stamp.
+    """
+
+    return datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
+
+
 def ingest_members(
     doc_service: OSDoc,
     members: Iterable[Mapping[str, Any]],
     *,
     refresh: bool = False,
     normalize: bool = True,
+    os_inserted: str | None = None,
 ) -> tuple[int, list[Any]]:
     """Bulk-upsert roster rows into member_info, keyed on EMP_NO.
 
@@ -223,13 +235,77 @@ def ingest_members(
 
         doc = OSDoc(client=client, index="member_info")
         indexed, errors = ingest_members(doc, df.to_dict("records"))
+
+    Pass `os_inserted` to reuse a stamp from `current_kst_stamp` when a later
+    `prune_stale_members` needs the same boundary (or just call
+    `refresh_member_directory`, which wires both together).
     """
 
-    os_inserted = datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
+    stamp = os_inserted or current_kst_stamp()
     return doc_service.bulk(
-        iter_member_actions(members, os_inserted=os_inserted, normalize=normalize),
+        iter_member_actions(members, os_inserted=stamp, normalize=normalize),
         refresh=refresh,
     )
+
+
+def prune_stale_members(
+    client: Any,
+    *,
+    before: str,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    """Delete member docs not refreshed at/after `before` (people who left).
+
+    `ingest_members` re-stamps every still-present person with the run's KST
+    `os_inserted`. Anyone carrying a strictly older `os_inserted` was absent from
+    this run's roster -- i.e. they left -- so a `delete_by_query` on
+    `os_inserted < before` removes exactly them. Pass the SAME stamp the ingest
+    used as `before`: just-upserted docs carry `os_inserted == before`, which the
+    strict `lt` range excludes, so they survive.
+
+    Make the upserts visible before calling this (ingest with `refresh=True`, or
+    use `refresh_member_directory`); otherwise the query can still match a
+    re-stamped person's pre-refresh `os_inserted` and delete someone still on the
+    roster. Returns the raw `delete_by_query` response (`deleted`, `total`, ...).
+    """
+
+    body = {"query": {"range": {"os_inserted": {"lt": before}}}}
+    return client.delete_by_query(index=INDEX_NAME, body=body, refresh=refresh)
+
+
+def refresh_member_directory(
+    doc_service: OSDoc,
+    members: Iterable[Mapping[str, Any]],
+    *,
+    prune: bool = True,
+    normalize: bool = True,
+) -> dict[str, Any]:
+    """Run one full roster refresh: upsert everyone present, prune everyone gone.
+
+    The scheduled job's single entry point. Computes one KST stamp, upserts all
+    rows with it (`ingest_members`), then -- when `prune` -- deletes docs older
+    than that exact stamp (`prune_stale_members`), which are the members no
+    longer on the roster. The upsert runs with `refresh=True` so the re-stamped
+    docs are searchable before the prune; combined with the shared stamp, that is
+    what keeps still-present people from being deleted.
+
+    Returns `{"stamp", "indexed", "errors", "pruned"}` (`pruned` is None when
+    `prune=False`, else the `delete_by_query` response).
+    """
+
+    stamp = current_kst_stamp()
+    indexed, errors = ingest_members(
+        doc_service, members, os_inserted=stamp, normalize=normalize, refresh=True
+    )
+    pruned = None
+    if prune:
+        pruned = prune_stale_members(doc_service.client, before=stamp, refresh=True)
+    return {
+        "stamp": stamp,
+        "indexed": indexed,
+        "errors": errors,
+        "pruned": pruned,
+    }
 
 
 def create_skewnono_client() -> Any:
