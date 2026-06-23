@@ -19,6 +19,20 @@ Search design:
     name + department + part + job + job-description. (No leading underscore:
     OpenSearch reserves `_`-prefixed names for metadata fields.)
 
+Querying:
+  - Search the analyzed fields with `match` / `multi_match` (e.g. on
+    `search_all` or `RESP_CONT`). RESP_CONT is free text people write in their
+    own way -- newlines, "-", "*", quotes, slashes, parens, emoji. Storage is
+    unaffected (JSON escapes every character; `_source` round-trips byte-for-
+    byte), and a `match` query runs the user's input through nori too, so that
+    punctuation is just tokenized away -- never an operator, never a parse error.
+  - Do NOT feed raw user input to `query_string` / `simple_query_string`: those
+    reserve `+ - = && || > < ! ( ) { } [ ] ^ " ~ * ? : \\ /`, so a stray "-" or
+    "*" becomes an operator (or throws). Keep the search box on `match`.
+  - `RESP_CONT.keyword` holds the whole description as one term (capped at
+    `ignore_above`); it is for aggregation/sorting, not free-text search -- the
+    real search goes through the analyzed `text` / `search_all` path.
+
 This module only *builds the index*. Roster ingest, prune, and the scheduled
 refresh live in `member_info_ingest.py`, which imports INDEX_NAME / ID_FIELD
 from here so the index definition stays the single source of truth.
