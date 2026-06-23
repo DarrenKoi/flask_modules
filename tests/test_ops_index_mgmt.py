@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import Mock, call, patch
 
 from ops_index_mgmt import beam_reso_cdsem as beam_reso
@@ -840,9 +840,7 @@ class MemberInfoTests(unittest.TestCase):
             {"query": {"range": {"os_inserted": {"lt": "2026-06-23T00:00:00+09:00"}}}},
         )
 
-    def test_refresh_member_directory_upserts_then_prunes_with_shared_stamp(
-        self,
-    ) -> None:
+    def test_refresh_member_directory_upserts_then_prunes_within_grace(self) -> None:
         captured: dict[str, object] = {}
 
         def fake_bulk(actions, **kwargs):
@@ -855,15 +853,17 @@ class MemberInfoTests(unittest.TestCase):
         doc_service.client.delete_by_query.return_value = {"deleted": 1}
 
         result = member.refresh_member_directory(
-            doc_service, [{"EMP_NO": "1"}, {"EMP_NO": "2"}]
+            doc_service,
+            [{"EMP_NO": "1"}, {"EMP_NO": "2"}],
+            stale_after=timedelta(days=7),
         )
 
-        # the prune boundary is the exact stamp the upsert wrote
+        # prune cutoff is now - grace, strictly older than the upsert stamp, so a
+        # just-refreshed (or transiently re-stamped) member is never pruned.
         ingest_stamp = captured["actions"][0]["_source"]["os_inserted"]
         _, prune_kwargs = doc_service.client.delete_by_query.call_args
         prune_before = prune_kwargs["body"]["query"]["range"]["os_inserted"]["lt"]
-        self.assertEqual(ingest_stamp, prune_before)
-        self.assertEqual(result["stamp"], ingest_stamp)
+        self.assertLess(prune_before, ingest_stamp)  # same KST offset → lexical ok
 
         # upserts are refreshed before the prune so re-stamped docs are visible
         self.assertTrue(captured["bulk_kwargs"]["refresh"])
@@ -871,17 +871,33 @@ class MemberInfoTests(unittest.TestCase):
 
         self.assertEqual(result["indexed"], 2)
         self.assertEqual(result["pruned"], {"deleted": 1})
+        self.assertIsNone(result["skipped"])
 
-    def test_refresh_member_directory_skips_prune_when_disabled(self) -> None:
+    def test_refresh_member_directory_skips_prune_by_default(self) -> None:
         doc_service = Mock()
         doc_service.bulk.return_value = (1, [])
 
-        result = member.refresh_member_directory(
-            doc_service, [{"EMP_NO": "1"}], prune=False
-        )
+        result = member.refresh_member_directory(doc_service, [{"EMP_NO": "1"}])
 
         doc_service.client.delete_by_query.assert_not_called()
         self.assertIsNone(result["pruned"])
+
+    def test_refresh_member_directory_skips_run_below_min_rows(self) -> None:
+        doc_service = Mock()
+
+        result = member.refresh_member_directory(
+            doc_service,
+            [{"EMP_NO": "1"}],
+            stale_after=timedelta(days=7),
+            min_rows=2,
+        )
+
+        # a truncated fetch touches nothing: no upsert, no prune
+        doc_service.bulk.assert_not_called()
+        doc_service.client.delete_by_query.assert_not_called()
+        self.assertIsNone(result["stamp"])
+        self.assertEqual(result["indexed"], 0)
+        self.assertIn("min_rows=2", result["skipped"])
 
     def test_ensure_member_info_index_skips_when_already_present(self) -> None:
         with patch.object(member, "OSIndex") as osindex_cls:

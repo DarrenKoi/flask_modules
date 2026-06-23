@@ -26,7 +26,7 @@ KST `os_inserted` per batch ("last refreshed in OS").
 import argparse
 import json
 from collections.abc import Iterable, Iterator, Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -277,34 +277,62 @@ def refresh_member_directory(
     doc_service: OSDoc,
     members: Iterable[Mapping[str, Any]],
     *,
-    prune: bool = True,
+    stale_after: timedelta | None = None,
+    min_rows: int = 1,
     normalize: bool = True,
 ) -> dict[str, Any]:
-    """Run one full roster refresh: upsert everyone present, prune everyone gone.
+    """Run one roster refresh, resilient to a flaky HTTP source.
 
-    The scheduled job's single entry point. Computes one KST stamp, upserts all
-    rows with it (`ingest_members`), then -- when `prune` -- deletes docs older
-    than that exact stamp (`prune_stale_members`), which are the members no
-    longer on the roster. The upsert runs with `refresh=True` so the re-stamped
-    docs are searchable before the prune; combined with the shared stamp, that is
-    what keeps still-present people from being deleted.
+    The scheduled job's single entry point, built so a dropped/partial HTTP
+    response is harmless:
 
-    Returns `{"stamp", "indexed", "errors", "pruned"}` (`pruned` is None when
-    `prune=False`, else the `delete_by_query` response).
+    - Upsert is self-healing. A member missing from one fetch keeps their
+      previous `os_inserted` and stays searchable; the next successful run
+      re-stamps them. No member is lost by being missed once.
+
+    - Pruning uses a grace window, not a single run. `stale_after` (a timedelta)
+      deletes only members whose `os_inserted` is older than `now - stale_after`,
+      so a transient miss never deletes anyone -- they are re-stamped well within
+      the window. Leave `stale_after=None` (default) to skip pruning entirely;
+      pass e.g. `timedelta(days=7)` once you trust the source over that span.
+
+    - `min_rows` guards against a truncated fetch: if fewer than `min_rows` rows
+      arrive, the whole run is skipped (no upsert, no prune) so one bad HTTP
+      response cannot blank or decimate the directory. Set it near your real
+      roster size (e.g. 90% of it).
+
+    The upsert runs with `refresh=True` so the re-stamped docs are searchable
+    before the prune query reads `os_inserted`. Returns
+    `{"stamp", "indexed", "errors", "pruned", "skipped"}`; on a guarded skip,
+    `stamp` is None and `skipped` explains why.
     """
+
+    rows = list(members)
+    if len(rows) < min_rows:
+        return {
+            "stamp": None,
+            "indexed": 0,
+            "errors": [],
+            "pruned": None,
+            "skipped": f"fetched {len(rows)} rows, below min_rows={min_rows}",
+        }
 
     stamp = current_kst_stamp()
     indexed, errors = ingest_members(
-        doc_service, members, os_inserted=stamp, normalize=normalize, refresh=True
+        doc_service, rows, os_inserted=stamp, normalize=normalize, refresh=True
     )
+
     pruned = None
-    if prune:
-        pruned = prune_stale_members(doc_service.client, before=stamp, refresh=True)
+    if stale_after is not None:
+        cutoff = (datetime.now(ZoneInfo("Asia/Seoul")) - stale_after).isoformat()
+        pruned = prune_stale_members(doc_service.client, before=cutoff, refresh=True)
+
     return {
         "stamp": stamp,
         "indexed": indexed,
         "errors": errors,
         "pruned": pruned,
+        "skipped": None,
     }
 
 
