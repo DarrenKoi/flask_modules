@@ -5,6 +5,7 @@ from unittest.mock import Mock, call, patch
 from ops_index_mgmt import beam_reso_cdsem as beam_reso
 from ops_index_mgmt import hitachi_sem_msr_info as mgmt
 from ops_index_mgmt import member_info as member
+from ops_index_mgmt import member_info_ingest as member_ingest
 from ops_index_mgmt import network_fdc_cdsem as fdc
 from ops_index_mgmt import sharpness_monitor_cdsem as sharp
 
@@ -647,7 +648,7 @@ class SharpnessMonitorCdsemTests(unittest.TestCase):
                 sharp.create_skewnono_client()
 
 
-class MemberInfoTests(unittest.TestCase):
+class MemberInfoIndexTests(unittest.TestCase):
     def test_resp_cont_is_nori_text_with_keyword_subfield(self) -> None:
         props = member.build_mappings()["properties"]
         resp = props["RESP_CONT"]
@@ -689,216 +690,6 @@ class MemberInfoTests(unittest.TestCase):
         default = templates[-1]["strings_as_keyword"]
         self.assertEqual(default["mapping"], {"type": "keyword"})
 
-    def test_has_emp_no_rejects_missing_none_and_blank(self) -> None:
-        self.assertTrue(member.has_emp_no({"EMP_NO": "12345"}))
-        self.assertTrue(member.has_emp_no({"EMP_NO": 12345}))
-        self.assertFalse(member.has_emp_no({"NAME_KOR": "김영대"}))
-        self.assertFalse(member.has_emp_no({"EMP_NO": None}))
-        self.assertFalse(member.has_emp_no({"EMP_NO": "  "}))
-
-    def test_iter_member_actions_keys_on_emp_no_stamps_and_skips(self) -> None:
-        rows = [
-            {"EMP_NO": 12345, "NAME_KOR": "김영대", "RESP_CONT": "결함 검사 담당"},
-            {"NAME_KOR": "no emp no"},  # skipped
-        ]
-
-        actions = list(
-            member.iter_member_actions(
-                rows, os_inserted="2026-06-23T10:00:00+09:00"
-            )
-        )
-
-        self.assertEqual([a["_id"] for a in actions], ["12345"])  # coerced to str
-        first = actions[0]
-        self.assertEqual(first["_op_type"], "index")  # upsert: roster refresh
-        self.assertEqual(first["_index"], "member_info")
-        self.assertEqual(first["_source"]["NAME_KOR"], "김영대")
-        self.assertEqual(
-            first["_source"]["os_inserted"], "2026-06-23T10:00:00+09:00"
-        )
-
-    def test_iter_member_actions_normalizes_nan_and_datetime_by_default(self) -> None:
-        rows = [
-            {
-                "EMP_NO": "1",
-                "RESP_CONT": float("nan"),  # NaN -> None (invalid JSON otherwise)
-                "join_dt": datetime(2026, 6, 23, 9, 0, 0),  # -> ISO string
-            }
-        ]
-
-        action = next(iter(member.iter_member_actions(rows, os_inserted="t")))
-
-        self.assertIsNone(action["_source"]["RESP_CONT"])
-        self.assertEqual(action["_source"]["join_dt"], "2026-06-23T09:00:00")
-
-    def test_iter_member_actions_skips_nan_emp_no(self) -> None:
-        # str(nan) == "nan" would slip past has_emp_no; normalizing first turns
-        # the NaN into None so the row is correctly skipped.
-        rows = [{"EMP_NO": float("nan"), "NAME_KOR": "김영대"}]
-        self.assertEqual(
-            list(member.iter_member_actions(rows, os_inserted="t")), []
-        )
-
-    def test_iter_member_actions_normalize_false_keeps_raw_values(self) -> None:
-        when = datetime(2026, 6, 23, 9, 0, 0)
-        rows = [{"EMP_NO": "1", "join_dt": when}]
-
-        action = next(
-            iter(
-                member.iter_member_actions(
-                    rows, os_inserted="t", normalize=False
-                )
-            )
-        )
-
-        self.assertIs(action["_source"]["join_dt"], when)
-
-    def test_iter_member_actions_honors_op_type_override(self) -> None:
-        rows = [{"EMP_NO": "1"}]
-        actions = list(
-            member.iter_member_actions(
-                rows, os_inserted="2026-06-23T10:00:00+09:00", op_type="create"
-            )
-        )
-        self.assertEqual(actions[0]["_op_type"], "create")
-
-    def test_iter_member_actions_source_is_a_copy_not_the_input_dict(self) -> None:
-        row = {"EMP_NO": "1", "NAME_KOR": "김영대"}
-        action = next(
-            iter(member.iter_member_actions([row], os_inserted="t"))
-        )
-        action["_source"]["NAME_KOR"] = "changed"
-        self.assertEqual(row["NAME_KOR"], "김영대")  # input untouched
-
-    def test_ingest_members_stamps_once_and_bulk_upserts(self) -> None:
-        rows = [
-            {"EMP_NO": "1", "RESP_CONT": "검사"},
-            {"EMP_NO": "2", "RESP_CONT": "분석"},
-            {"NAME_KOR": "skip"},  # no EMP_NO -> skipped
-        ]
-
-        captured: dict[str, object] = {}
-
-        def fake_bulk(actions, **kwargs):
-            captured["actions"] = list(actions)
-            captured["kwargs"] = kwargs
-            return len(captured["actions"]), []
-
-        doc_service = Mock()
-        doc_service.bulk.side_effect = fake_bulk
-
-        indexed, errors = member.ingest_members(doc_service, rows)
-
-        self.assertEqual((indexed, errors), (2, []))
-        actions = captured["actions"]
-        self.assertEqual([a["_id"] for a in actions], ["1", "2"])
-        # one stamp shared across the whole batch
-        stamps = {a["_source"]["os_inserted"] for a in actions}
-        self.assertEqual(len(stamps), 1)
-        # refresh left off by default so the index cadence applies
-        self.assertFalse(captured["kwargs"]["refresh"])
-
-    def test_ingest_members_passes_refresh_through(self) -> None:
-        doc_service = Mock()
-        doc_service.bulk.return_value = (1, [])
-        member.ingest_members(doc_service, [{"EMP_NO": "1"}], refresh=True)
-        self.assertTrue(doc_service.bulk.call_args.kwargs["refresh"])
-
-    def test_current_kst_stamp_is_iso_with_kst_offset(self) -> None:
-        self.assertTrue(member.current_kst_stamp().endswith("+09:00"))
-
-    def test_ingest_members_reuses_supplied_stamp(self) -> None:
-        captured: dict[str, object] = {}
-
-        def fake_bulk(actions, **kwargs):
-            captured["actions"] = list(actions)
-            return len(captured["actions"]), []
-
-        doc_service = Mock()
-        doc_service.bulk.side_effect = fake_bulk
-
-        member.ingest_members(
-            doc_service, [{"EMP_NO": "1"}], os_inserted="2026-06-23T00:00:00+09:00"
-        )
-
-        stamp = captured["actions"][0]["_source"]["os_inserted"]
-        self.assertEqual(stamp, "2026-06-23T00:00:00+09:00")
-
-    def test_prune_stale_members_deletes_strictly_below_boundary(self) -> None:
-        client = Mock()
-        client.delete_by_query.return_value = {"deleted": 2, "total": 2}
-
-        result = member.prune_stale_members(
-            client, before="2026-06-23T00:00:00+09:00"
-        )
-
-        self.assertEqual(result, {"deleted": 2, "total": 2})
-        _, kwargs = client.delete_by_query.call_args
-        self.assertEqual(kwargs["index"], "member_info")
-        self.assertEqual(
-            kwargs["body"],
-            {"query": {"range": {"os_inserted": {"lt": "2026-06-23T00:00:00+09:00"}}}},
-        )
-
-    def test_refresh_member_directory_upserts_then_prunes_within_grace(self) -> None:
-        captured: dict[str, object] = {}
-
-        def fake_bulk(actions, **kwargs):
-            captured["actions"] = list(actions)
-            captured["bulk_kwargs"] = kwargs
-            return len(captured["actions"]), []
-
-        doc_service = Mock()
-        doc_service.bulk.side_effect = fake_bulk
-        doc_service.client.delete_by_query.return_value = {"deleted": 1}
-
-        result = member.refresh_member_directory(
-            doc_service,
-            [{"EMP_NO": "1"}, {"EMP_NO": "2"}],
-            stale_after=timedelta(days=7),
-        )
-
-        # prune cutoff is now - grace, strictly older than the upsert stamp, so a
-        # just-refreshed (or transiently re-stamped) member is never pruned.
-        ingest_stamp = captured["actions"][0]["_source"]["os_inserted"]
-        _, prune_kwargs = doc_service.client.delete_by_query.call_args
-        prune_before = prune_kwargs["body"]["query"]["range"]["os_inserted"]["lt"]
-        self.assertLess(prune_before, ingest_stamp)  # same KST offset → lexical ok
-
-        # upserts are refreshed before the prune so re-stamped docs are visible
-        self.assertTrue(captured["bulk_kwargs"]["refresh"])
-        self.assertTrue(prune_kwargs["refresh"])
-
-        self.assertEqual(result["indexed"], 2)
-        self.assertEqual(result["pruned"], {"deleted": 1})
-        self.assertIsNone(result["skipped"])
-
-    def test_refresh_member_directory_skips_prune_by_default(self) -> None:
-        doc_service = Mock()
-        doc_service.bulk.return_value = (1, [])
-
-        result = member.refresh_member_directory(doc_service, [{"EMP_NO": "1"}])
-
-        doc_service.client.delete_by_query.assert_not_called()
-        self.assertIsNone(result["pruned"])
-
-    def test_refresh_member_directory_skips_run_below_min_rows(self) -> None:
-        doc_service = Mock()
-
-        result = member.refresh_member_directory(
-            doc_service,
-            [{"EMP_NO": "1"}],
-            stale_after=timedelta(days=7),
-            min_rows=2,
-        )
-
-        # a truncated fetch touches nothing: no upsert, no prune
-        doc_service.bulk.assert_not_called()
-        doc_service.client.delete_by_query.assert_not_called()
-        self.assertIsNone(result["stamp"])
-        self.assertEqual(result["indexed"], 0)
-        self.assertIn("min_rows=2", result["skipped"])
-
     def test_ensure_member_info_index_skips_when_already_present(self) -> None:
         with patch.object(member, "OSIndex") as osindex_cls:
             index_service = osindex_cls.return_value
@@ -925,6 +716,218 @@ class MemberInfoTests(unittest.TestCase):
         with patch.object(member, "OPENSEARCH_PASSWORD", ""):
             with self.assertRaises(RuntimeError):
                 member.create_skewnono_client()
+
+
+class MemberInfoIngestTests(unittest.TestCase):
+    def test_has_emp_no_rejects_missing_none_and_blank(self) -> None:
+        self.assertTrue(member_ingest.has_emp_no({"EMP_NO": "12345"}))
+        self.assertTrue(member_ingest.has_emp_no({"EMP_NO": 12345}))
+        self.assertFalse(member_ingest.has_emp_no({"NAME_KOR": "김영대"}))
+        self.assertFalse(member_ingest.has_emp_no({"EMP_NO": None}))
+        self.assertFalse(member_ingest.has_emp_no({"EMP_NO": "  "}))
+
+    def test_iter_member_actions_keys_on_emp_no_stamps_and_skips(self) -> None:
+        rows = [
+            {"EMP_NO": 12345, "NAME_KOR": "김영대", "RESP_CONT": "결함 검사 담당"},
+            {"NAME_KOR": "no emp no"},  # skipped
+        ]
+
+        actions = list(
+            member_ingest.iter_member_actions(
+                rows, os_inserted="2026-06-23T10:00:00+09:00"
+            )
+        )
+
+        self.assertEqual([a["_id"] for a in actions], ["12345"])  # coerced to str
+        first = actions[0]
+        self.assertEqual(first["_op_type"], "index")  # upsert: roster refresh
+        self.assertEqual(first["_index"], "member_info")
+        self.assertEqual(first["_source"]["NAME_KOR"], "김영대")
+        self.assertEqual(
+            first["_source"]["os_inserted"], "2026-06-23T10:00:00+09:00"
+        )
+
+    def test_iter_member_actions_normalizes_nan_and_datetime_by_default(self) -> None:
+        rows = [
+            {
+                "EMP_NO": "1",
+                "RESP_CONT": float("nan"),  # NaN -> None (invalid JSON otherwise)
+                "join_dt": datetime(2026, 6, 23, 9, 0, 0),  # -> ISO string
+            }
+        ]
+
+        action = next(iter(member_ingest.iter_member_actions(rows, os_inserted="t")))
+
+        self.assertIsNone(action["_source"]["RESP_CONT"])
+        self.assertEqual(action["_source"]["join_dt"], "2026-06-23T09:00:00")
+
+    def test_iter_member_actions_skips_nan_emp_no(self) -> None:
+        # str(nan) == "nan" would slip past has_emp_no; normalizing first turns
+        # the NaN into None so the row is correctly skipped.
+        rows = [{"EMP_NO": float("nan"), "NAME_KOR": "김영대"}]
+        self.assertEqual(
+            list(member_ingest.iter_member_actions(rows, os_inserted="t")), []
+        )
+
+    def test_iter_member_actions_normalize_false_keeps_raw_values(self) -> None:
+        when = datetime(2026, 6, 23, 9, 0, 0)
+        rows = [{"EMP_NO": "1", "join_dt": when}]
+
+        action = next(
+            iter(
+                member_ingest.iter_member_actions(
+                    rows, os_inserted="t", normalize=False
+                )
+            )
+        )
+
+        self.assertIs(action["_source"]["join_dt"], when)
+
+    def test_iter_member_actions_honors_op_type_override(self) -> None:
+        rows = [{"EMP_NO": "1"}]
+        actions = list(
+            member_ingest.iter_member_actions(
+                rows, os_inserted="2026-06-23T10:00:00+09:00", op_type="create"
+            )
+        )
+        self.assertEqual(actions[0]["_op_type"], "create")
+
+    def test_iter_member_actions_source_is_a_copy_not_the_input_dict(self) -> None:
+        row = {"EMP_NO": "1", "NAME_KOR": "김영대"}
+        action = next(
+            iter(member_ingest.iter_member_actions([row], os_inserted="t"))
+        )
+        action["_source"]["NAME_KOR"] = "changed"
+        self.assertEqual(row["NAME_KOR"], "김영대")  # input untouched
+
+    def test_ingest_members_stamps_once_and_bulk_upserts(self) -> None:
+        rows = [
+            {"EMP_NO": "1", "RESP_CONT": "검사"},
+            {"EMP_NO": "2", "RESP_CONT": "분석"},
+            {"NAME_KOR": "skip"},  # no EMP_NO -> skipped
+        ]
+
+        captured: dict[str, object] = {}
+
+        def fake_bulk(actions, **kwargs):
+            captured["actions"] = list(actions)
+            captured["kwargs"] = kwargs
+            return len(captured["actions"]), []
+
+        doc_service = Mock()
+        doc_service.bulk.side_effect = fake_bulk
+
+        indexed, errors = member_ingest.ingest_members(doc_service, rows)
+
+        self.assertEqual((indexed, errors), (2, []))
+        actions = captured["actions"]
+        self.assertEqual([a["_id"] for a in actions], ["1", "2"])
+        # one stamp shared across the whole batch
+        stamps = {a["_source"]["os_inserted"] for a in actions}
+        self.assertEqual(len(stamps), 1)
+        # refresh left off by default so the index cadence applies
+        self.assertFalse(captured["kwargs"]["refresh"])
+
+    def test_ingest_members_passes_refresh_through(self) -> None:
+        doc_service = Mock()
+        doc_service.bulk.return_value = (1, [])
+        member_ingest.ingest_members(doc_service, [{"EMP_NO": "1"}], refresh=True)
+        self.assertTrue(doc_service.bulk.call_args.kwargs["refresh"])
+
+    def test_current_kst_stamp_is_iso_with_kst_offset(self) -> None:
+        self.assertTrue(member_ingest.current_kst_stamp().endswith("+09:00"))
+
+    def test_ingest_members_reuses_supplied_stamp(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_bulk(actions, **kwargs):
+            captured["actions"] = list(actions)
+            return len(captured["actions"]), []
+
+        doc_service = Mock()
+        doc_service.bulk.side_effect = fake_bulk
+
+        member_ingest.ingest_members(
+            doc_service, [{"EMP_NO": "1"}], os_inserted="2026-06-23T00:00:00+09:00"
+        )
+
+        stamp = captured["actions"][0]["_source"]["os_inserted"]
+        self.assertEqual(stamp, "2026-06-23T00:00:00+09:00")
+
+    def test_prune_stale_members_deletes_strictly_below_boundary(self) -> None:
+        client = Mock()
+        client.delete_by_query.return_value = {"deleted": 2, "total": 2}
+
+        result = member_ingest.prune_stale_members(
+            client, before="2026-06-23T00:00:00+09:00"
+        )
+
+        self.assertEqual(result, {"deleted": 2, "total": 2})
+        _, kwargs = client.delete_by_query.call_args
+        self.assertEqual(kwargs["index"], "member_info")
+        self.assertEqual(
+            kwargs["body"],
+            {"query": {"range": {"os_inserted": {"lt": "2026-06-23T00:00:00+09:00"}}}},
+        )
+
+    def test_refresh_member_directory_upserts_then_prunes_within_grace(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_bulk(actions, **kwargs):
+            captured["actions"] = list(actions)
+            captured["bulk_kwargs"] = kwargs
+            return len(captured["actions"]), []
+
+        doc_service = Mock()
+        doc_service.bulk.side_effect = fake_bulk
+        doc_service.client.delete_by_query.return_value = {"deleted": 1}
+
+        result = member_ingest.refresh_member_directory(
+            doc_service,
+            [{"EMP_NO": "1"}, {"EMP_NO": "2"}],
+            stale_after=timedelta(days=7),
+        )
+
+        # prune cutoff is now - grace, strictly older than the upsert stamp, so a
+        # just-refreshed (or transiently re-stamped) member is never pruned.
+        ingest_stamp = captured["actions"][0]["_source"]["os_inserted"]
+        _, prune_kwargs = doc_service.client.delete_by_query.call_args
+        prune_before = prune_kwargs["body"]["query"]["range"]["os_inserted"]["lt"]
+        self.assertLess(prune_before, ingest_stamp)  # same KST offset → lexical ok
+
+        # upserts are refreshed before the prune so re-stamped docs are visible
+        self.assertTrue(captured["bulk_kwargs"]["refresh"])
+        self.assertTrue(prune_kwargs["refresh"])
+
+        self.assertEqual(result["indexed"], 2)
+        self.assertEqual(result["pruned"], {"deleted": 1})
+        self.assertIsNone(result["skipped"])
+
+    def test_refresh_member_directory_skips_prune_by_default(self) -> None:
+        doc_service = Mock()
+        doc_service.bulk.return_value = (1, [])
+
+        result = member_ingest.refresh_member_directory(doc_service, [{"EMP_NO": "1"}])
+
+        doc_service.client.delete_by_query.assert_not_called()
+        self.assertIsNone(result["pruned"])
+
+    def test_refresh_member_directory_skips_run_below_min_rows(self) -> None:
+        doc_service = Mock()
+
+        result = member_ingest.refresh_member_directory(
+            doc_service,
+            [{"EMP_NO": "1"}],
+            stale_after=timedelta(days=7),
+            min_rows=2,
+        )
+
+        # a truncated fetch touches nothing: no upsert, no prune
+        doc_service.bulk.assert_not_called()
+        doc_service.client.delete_by_query.assert_not_called()
+        self.assertIsNone(result["stamp"])
+        self.assertEqual(result["indexed"], 0)
+        self.assertIn("min_rows=2", result["skipped"])
 
 
 if __name__ == "__main__":
