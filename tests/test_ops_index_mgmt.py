@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime
 from unittest.mock import Mock, call, patch
 
 from ops_index_mgmt import beam_reso_cdsem as beam_reso
@@ -715,6 +716,42 @@ class MemberInfoTests(unittest.TestCase):
         self.assertEqual(
             first["_source"]["os_inserted"], "2026-06-23T10:00:00+09:00"
         )
+
+    def test_iter_member_actions_normalizes_nan_and_datetime_by_default(self) -> None:
+        rows = [
+            {
+                "EMP_NO": "1",
+                "RESP_CONT": float("nan"),  # NaN -> None (invalid JSON otherwise)
+                "join_dt": datetime(2026, 6, 23, 9, 0, 0),  # -> ISO string
+            }
+        ]
+
+        action = next(iter(member.iter_member_actions(rows, os_inserted="t")))
+
+        self.assertIsNone(action["_source"]["RESP_CONT"])
+        self.assertEqual(action["_source"]["join_dt"], "2026-06-23T09:00:00")
+
+    def test_iter_member_actions_skips_nan_emp_no(self) -> None:
+        # str(nan) == "nan" would slip past has_emp_no; normalizing first turns
+        # the NaN into None so the row is correctly skipped.
+        rows = [{"EMP_NO": float("nan"), "NAME_KOR": "김영대"}]
+        self.assertEqual(
+            list(member.iter_member_actions(rows, os_inserted="t")), []
+        )
+
+    def test_iter_member_actions_normalize_false_keeps_raw_values(self) -> None:
+        when = datetime(2026, 6, 23, 9, 0, 0)
+        rows = [{"EMP_NO": "1", "join_dt": when}]
+
+        action = next(
+            iter(
+                member.iter_member_actions(
+                    rows, os_inserted="t", normalize=False
+                )
+            )
+        )
+
+        self.assertIs(action["_source"]["join_dt"], when)
 
     def test_iter_member_actions_honors_op_type_override(self) -> None:
         rows = [{"EMP_NO": "1"}]

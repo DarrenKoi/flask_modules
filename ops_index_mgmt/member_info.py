@@ -30,7 +30,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from ops_store import OSDoc, OSIndex, create_client
+from ops_store import OSDoc, OSIndex, create_client, normalize_document
 
 OPENSEARCH_HOST = "skewnono-db1-os.osp01.skhynix.com"
 OPENSEARCH_USER = "skewnono001"
@@ -167,6 +167,7 @@ def iter_member_actions(
     *,
     os_inserted: str,
     op_type: str = "index",
+    normalize: bool = True,
 ) -> Iterator[dict[str, Any]]:
     """Yield raw bulk actions for roster rows, keyed on EMP_NO.
 
@@ -176,19 +177,28 @@ def iter_member_actions(
     (KST, tz-aware — the caller computes one value for the whole batch) is added
     to `_source`.
 
+    `normalize` defaults to True because the roster arrives as DataFrame rows
+    (`df.to_dict("records")`): it runs `normalize_document` to coerce `NaN`/`NaT`
+    to None, numpy scalars to native types, and Timestamps to ISO strings — all
+    of which are otherwise invalid JSON that breaks the bulk insert. It runs
+    *before* the EMP_NO check, so a missing EMP_NO that came in as `NaN`
+    (whose `str()` is the non-blank "nan") is correctly skipped. Pass
+    `normalize=False` only when the rows are already JSON-clean.
+
     `op_type` defaults to `"index"` (upsert: overwrite by EMP_NO — the
     roster-refresh semantics); pass `"create"` to instead surface already-present
     EMP_NOs as 409s. Feed the result straight to `OSDoc.bulk`.
     """
 
     for member in members:
-        if not has_emp_no(member):
+        source = normalize_document(member) if normalize else dict(member)
+        if not has_emp_no(source):
             continue
         yield {
             "_op_type": op_type,
             "_index": INDEX_NAME,
-            "_id": str(member[ID_FIELD]),
-            "_source": {**member, "os_inserted": os_inserted},
+            "_id": str(source[ID_FIELD]),
+            "_source": {**source, "os_inserted": os_inserted},
         }
 
 
@@ -197,6 +207,7 @@ def ingest_members(
     members: Iterable[Mapping[str, Any]],
     *,
     refresh: bool = False,
+    normalize: bool = True,
 ) -> tuple[int, list[Any]]:
     """Bulk-upsert roster rows into member_info, keyed on EMP_NO.
 
@@ -205,11 +216,18 @@ def ingest_members(
     `(indexed, errors)`. `refresh` is left off by default so the index's own
     refresh cadence applies; pass `refresh=True` for a small one-off load you
     want searchable immediately.
+
+    `normalize` defaults to True for the DataFrame source (`df.to_dict("records")`):
+    it makes `NaN`/`NaT`/numpy/Timestamp cells JSON-safe before they reach the
+    bulk API. The whole scheduled extract→update step is therefore one call:
+
+        doc = OSDoc(client=client, index="member_info")
+        indexed, errors = ingest_members(doc, df.to_dict("records"))
     """
 
     os_inserted = datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
     return doc_service.bulk(
-        iter_member_actions(members, os_inserted=os_inserted),
+        iter_member_actions(members, os_inserted=os_inserted, normalize=normalize),
         refresh=refresh,
     )
 
