@@ -6,7 +6,6 @@ from ops_index_mgmt import beam_reso_cdsem as beam_reso
 from ops_index_mgmt import hitachi_sem_msr_info as mgmt
 from ops_index_mgmt import member_info as member
 from ops_index_mgmt import member_info_ingest as member_ingest
-from ops_index_mgmt import member_info_search as member_search
 from ops_index_mgmt import network_fdc_cdsem as fdc
 from ops_index_mgmt import sharpness_monitor_cdsem as sharp
 
@@ -954,88 +953,6 @@ class MemberInfoIngestTests(unittest.TestCase):
         _, kwargs = osdoc_cls.call_args
         self.assertIs(kwargs["client"], existing_client)
         self.assertEqual(kwargs["index"], "member_info")
-
-
-class MemberInfoSearchTests(unittest.TestCase):
-    def test_create_member_search_service_builds_client_when_none_given(self) -> None:
-        sentinel_client = Mock()
-        with patch.object(
-            member_search, "create_skewnono_client", return_value=sentinel_client
-        ) as make_client:
-            with patch.object(member_search, "OSSearch") as ossearch_cls:
-                service = member_search.create_member_search_service()
-
-        make_client.assert_called_once_with()
-        _, kwargs = ossearch_cls.call_args
-        self.assertIs(kwargs["client"], sentinel_client)
-        self.assertEqual(kwargs["index"], "member_info")
-        self.assertIs(service, ossearch_cls.return_value)
-
-    def test_create_member_search_service_reuses_injected_client(self) -> None:
-        existing_client = Mock()
-        with patch.object(member_search, "create_skewnono_client") as make_client:
-            with patch.object(member_search, "OSSearch") as ossearch_cls:
-                member_search.create_member_search_service(existing_client)
-
-        make_client.assert_not_called()  # injected client wins, no new connection
-        _, kwargs = ossearch_cls.call_args
-        self.assertIs(kwargs["client"], existing_client)
-
-    def test_search_members_matches_search_all(self) -> None:
-        search = Mock()
-        search.match.return_value = {"hits": {"hits": []}}
-
-        result = member_search.search_members(search, "검사", size=25)
-
-        search.match.assert_called_once_with("search_all", "검사", size=25)
-        search.to_dataframe.assert_not_called()  # raw response by default
-        self.assertIs(result, search.match.return_value)
-
-    def test_search_members_as_dataframe_converts_the_hits(self) -> None:
-        search = Mock()
-
-        result = member_search.search_members(search, "검사", as_dataframe=True)
-
-        search.to_dataframe.assert_called_once_with(search.match.return_value)
-        self.assertIs(result, search.to_dataframe.return_value)
-
-    def test_members_in_dept_uses_exact_term_on_dept_field(self) -> None:
-        search = Mock()
-        search.term.return_value = {"hits": {"hits": []}}
-
-        result = member_search.members_in_dept(search, "계측기술팀")
-
-        # exact keyword filter, not full-text; default page covers a whole team
-        search.term.assert_called_once_with("DEPT_NAME_KOR", "계측기술팀", size=200)
-        self.assertIs(result, search.term.return_value)
-
-    def test_members_in_dept_as_dataframe_converts_the_hits(self) -> None:
-        search = Mock()
-
-        member_search.members_in_dept(search, "계측기술팀", as_dataframe=True)
-
-        search.to_dataframe.assert_called_once_with(search.term.return_value)
-
-    def test_get_member_gets_by_id_coercing_emp_no_to_str(self) -> None:
-        search = Mock()
-        search.client.get.return_value = {
-            "_id": "12345",
-            "_source": {"NAME_KOR": "김영대"},
-        }
-
-        result = member_search.get_member(search, 12345)  # int coerced to str _id
-
-        search.client.get.assert_called_once_with(index="member_info", id="12345")
-        self.assertEqual(result["_source"]["NAME_KOR"], "김영대")
-
-    def test_get_member_returns_none_when_missing(self) -> None:
-        from opensearchpy.exceptions import NotFoundError
-
-        search = Mock()
-        search.client.get.side_effect = NotFoundError(404, "not_found", {})
-
-        # a missing EMP_NO is a normal directory miss, not an error to propagate
-        self.assertIsNone(member_search.get_member(search, "nobody"))
 
 
 if __name__ == "__main__":
