@@ -9,6 +9,12 @@ dicts (`df.to_dict("records")`) for ingest. The scheduled job's single entry
 point is `refresh_member_directory`, which upserts everyone present and prunes
 those who have been gone past a grace window -- built so a dropped/partial HTTP
 fetch is harmless (see its docstring).
+
+To run the ingest standalone, `create_member_doc_service()` builds the OSDoc
+itself (its client comes from `create_skewnono_client` in `member_info.py`,
+which wraps ops_store's `create_client`), so no separate wiring is needed:
+
+    refresh_member_directory(create_member_doc_service(), df.to_dict("records"))
 """
 
 from collections.abc import Iterable, Iterator, Mapping
@@ -18,7 +24,29 @@ from zoneinfo import ZoneInfo
 
 from ops_store import OSDoc, normalize_document
 
-from ops_index_mgmt.member_info import ID_FIELD, INDEX_NAME
+from ops_index_mgmt.member_info import (
+    ID_FIELD,
+    INDEX_NAME,
+    create_skewnono_client,
+)
+
+
+def create_member_doc_service(client: Any | None = None) -> OSDoc:
+    """Return an OSDoc bound to the member_info index, ready to ingest.
+
+    This is what lets the module run on its own: with no `client`, it builds one
+    via `create_skewnono_client` (defined in `member_info.py`, which wraps
+    ops_store's `create_client` with the skewnono cluster credentials), so a
+    scheduled job or a standalone script can do the whole refresh in one line --
+
+        refresh_member_directory(create_member_doc_service(), df.to_dict("records"))
+
+    without wiring up the OpenSearch client itself. Pass an existing `client` to
+    reuse a connection (e.g. when sharing one across indices, or in tests).
+    """
+
+    actual_client = client or create_skewnono_client()
+    return OSDoc(client=actual_client, index=INDEX_NAME)
 
 
 def has_emp_no(member: Mapping[str, Any]) -> bool:

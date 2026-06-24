@@ -929,6 +929,31 @@ class MemberInfoIngestTests(unittest.TestCase):
         self.assertEqual(result["indexed"], 0)
         self.assertIn("min_rows=2", result["skipped"])
 
+    def test_create_member_doc_service_builds_client_when_none_given(self) -> None:
+        sentinel_client = Mock()
+        with patch.object(
+            member_ingest, "create_skewnono_client", return_value=sentinel_client
+        ) as make_client:
+            with patch.object(member_ingest, "OSDoc") as osdoc_cls:
+                doc = member_ingest.create_member_doc_service()
+
+        make_client.assert_called_once_with()
+        _, kwargs = osdoc_cls.call_args
+        self.assertIs(kwargs["client"], sentinel_client)
+        self.assertEqual(kwargs["index"], "member_info")
+        self.assertIs(doc, osdoc_cls.return_value)
+
+    def test_create_member_doc_service_reuses_injected_client(self) -> None:
+        existing_client = Mock()
+        with patch.object(member_ingest, "create_skewnono_client") as make_client:
+            with patch.object(member_ingest, "OSDoc") as osdoc_cls:
+                member_ingest.create_member_doc_service(existing_client)
+
+        make_client.assert_not_called()  # injected client wins, no new connection
+        _, kwargs = osdoc_cls.call_args
+        self.assertIs(kwargs["client"], existing_client)
+        self.assertEqual(kwargs["index"], "member_info")
+
 
 if __name__ == "__main__":
     unittest.main()
