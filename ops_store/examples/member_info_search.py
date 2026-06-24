@@ -18,6 +18,14 @@ member_info 인덱스(ops_index_mgmt/member_info.py 가 생성)는 몇 가지 �
     phrase=True 를 쓰세요.
   - members_in_dept : DEPT_NAME_KOR(정확히 일치하는 keyword)로 한 부서를 통째로 보는
     필터입니다. 전문(full-text) 검색이 아니라 정확 일치예요.
+  - filter_members : 통합 검색(text)과 정확일치 facet 들을 한 질의로 조합합니다. 부서·파트·
+    근무 캠퍼스(CENTRIC)·근무 위치(PLACE_OF_WORK)·근무 형태(WGRP_NAM)·직원 레벨(RESV014)
+    중 아는 것만 골라 끼우면 모두 AND 로 좁혀집니다. "청주 캠퍼스의 계측기술팀 교대근무자"
+    처럼 조건을 겹쳐 좁힐 때 쓰세요. text 는 비워도 됩니다(facet 만으로 순수 필터). 이 facet
+    필드들은 인덱스에 명시 매핑이 없어 keyword(정확일치)라 search_all 에는 안 들어가지만,
+    검색 결과의 _source 안에서 전화번호(OFFICE_TEL_NO/MOBILE_TEL_NO)와 함께 그대로 읽어
+    context 로 쓸 수 있습니다. members_at_campus / members_by_work_group / members_by_level
+    은 자주 쓰는 한 facet 만 거는 단축 진입점입니다.
   - get_member : EMP_NO 로 한 명을 가져옵니다. EMP_NO 가 문서의 _id 라서 검색이 아니라
     단일 GET 이고, 없는 사번이면 None 을 돌려줍니다.
 
@@ -43,6 +51,18 @@ OPENSEARCH_PASSWORD = ""  # 비밀번호를 채운 뒤 실행하세요.
 INDEX_NAME = "member_info"
 SEARCH_ALL_FIELD = "search_all"  # 읽기 좋은 필드들이 모두 모이는 통합 nori 필드
 DEPT_FIELD = "DEPT_NAME_KOR"     # 부서 검색이 정확 일치로 거는 keyword 필드
+
+# 아래는 member_info 인덱스에 명시 매핑이 없어 dynamic template 로 전부 keyword(정확
+# 일치)가 되는 facet 필드들입니다. search_all(nori 전문검색)에는 안 들어가므로 자유 입력
+# 으로는 못 찾고 term 필터로만 좁힙니다. 대신 검색 결과의 _source 안에서 그대로 읽어
+# context 로 쓸 수 있어요(전화번호처럼 검색 대상은 아니지만 보여 줄 값들이 여기 모입니다).
+PART_FIELD = "PART_NAME_KO"          # 파트 이름
+CAMPUS_FIELD = "CENTRIC"             # 근무 캠퍼스 위치
+WORK_PLACE_FIELD = "PLACE_OF_WORK"   # 근무 위치
+WORK_GROUP_FIELD = "WGRP_NAM"        # 근무 형태 (유연근무 / 교대 근무)
+LEVEL_FIELD = "RESV014"              # 직원 레벨
+OFFICE_TEL_FIELD = "OFFICE_TEL_NO"   # 사무실 전화 (검색용 아님, context 표시용)
+MOBILE_TEL_FIELD = "MOBILE_TEL_NO"   # 휴대전화 (검색용 아님, context 표시용)
 
 
 def create_member_search_service(client: Any | None = None) -> OSSearch:
@@ -71,6 +91,20 @@ def split_search_terms(text: str) -> list[str]:
     붙어서 생기는 빈 조각은 버립니다.
     """
     return [term for term in text.replace(",", " ").split() if term]
+
+
+def _text_clauses(text: str, *, phrase: bool = False) -> list[dict[str, Any]]:
+    """search_all 한 필드에 대한 '단어별' match(또는 match_phrase) 절 목록을 만듭니다.
+
+    search_members 와 filter_members 가 공유하는 내부 헬퍼예요. text 를 공백·쉼표로 나눠
+    각 단어를 하나의 절로 만듭니다. phrase=True 면 match 대신 match_phrase 를 써서
+    "CG6300" 같은 장비 코드의 토큰(cg + 6300)이 흩어지지 않고 붙어서 매칭되게 합니다.
+    """
+    query_type = "match_phrase" if phrase else "match"
+    return [
+        {query_type: {SEARCH_ALL_FIELD: term}}
+        for term in split_search_terms(text)
+    ]
 
 
 def search_members(
@@ -106,11 +140,7 @@ def search_members(
     반환값은 OpenSearch 원본 응답입니다(각 hit 의 `_source` 안에 사번 정보가 들어 있어요).
     as_dataframe=True 면 hit 들을 평평한 pandas DataFrame 으로 받습니다.
     """
-    query_type = "match_phrase" if phrase else "match"
-    clauses = [
-        {query_type: {SEARCH_ALL_FIELD: term}}
-        for term in split_search_terms(text)
-    ]
+    clauses = _text_clauses(text, phrase=phrase)
     if match_all:
         result = search.bool(must=clauses, size=size)  # 모든 단어 필요(AND)
     else:
@@ -138,6 +168,118 @@ def members_in_dept(
     if as_dataframe:
         return search.to_dataframe(result)
     return result
+
+
+def filter_members(
+    search: OSSearch,
+    *,
+    text: str | None = None,
+    dept: str | None = None,
+    part: str | None = None,
+    campus: str | None = None,
+    work_place: str | None = None,
+    work_group: str | None = None,
+    level: str | None = None,
+    match_all: bool = True,
+    phrase: bool = False,
+    size: int = 50,
+    as_dataframe: bool = False,
+) -> Any:
+    """통합 검색(text)과 정확일치 facet 들을 한 질의로 조합해 좁힙니다.
+
+    RAG context 를 만들 때 가장 유연한 진입점이에요. 자유 입력 한 칸(text, search_all 에
+    대한 구글식 검색)에 더해, 정확히 아는 조건들 — 부서(dept)·파트(part)·근무 캠퍼스
+    (campus=CENTRIC)·근무 위치(work_place=PLACE_OF_WORK)·근무 형태(work_group=WGRP_NAM)·
+    직원 레벨(level=RESV014) — 을 골라 끼울 수 있습니다. 준 facet 들은 모두 정확 일치(term)
+    이고 서로 AND 로 묶이며, term 은 점수에 영향을 주지 않는 filter 라서 빠르고 캐시됩니다.
+
+        filter_members(search, text="검사", campus="청주")               # 청주 캠퍼스의 '검사' 관련자
+        filter_members(search, dept="계측기술팀", work_group="교대 근무")   # 그 팀의 교대근무자
+        filter_members(search, level="G3", part="THK파트")               # text 없이 facet 만으로
+
+    매개변수 안내
+      - text 를 비우면(None) facet 만으로 거르는 순수 필터가 됩니다(점수 없이 정확 일치).
+      - text 가 있으면 match_all=True(기본)는 모든 단어 필요(AND), match_all=False 는 한
+        단어만 맞아도 됨(OR). phrase=True 면 단어들을 match_phrase 로 정확 매칭합니다.
+      - facet 값은 keyword 라 글자 그대로 정확히 넣어야 합니다(부분 일치는 text 를 쓰세요).
+
+    반환값은 OpenSearch 원본 응답이며, as_dataframe=True 면 평평한 DataFrame 으로 받습니다.
+    """
+    facets = {
+        DEPT_FIELD: dept,
+        PART_FIELD: part,
+        CAMPUS_FIELD: campus,
+        WORK_PLACE_FIELD: work_place,
+        WORK_GROUP_FIELD: work_group,
+        LEVEL_FIELD: level,
+    }
+    filter_clauses = [
+        {"term": {field: value}}
+        for field, value in facets.items()
+        if value is not None
+    ]
+
+    must_clauses: list[dict[str, Any]] | None = None
+    if text:
+        text_clauses = _text_clauses(text, phrase=phrase)
+        if match_all:
+            must_clauses = text_clauses  # 모든 단어 필요(AND)
+        else:
+            # OR 검색은 nested bool(should 만 든)로 감싸서 must 에 넣는다. should 절을 filter
+            # 와 같은 층에 두면 minimum_should_match 가 1→0 으로 풀려 '하나 이상 맞아야 함'이
+            # 사라지고 facet 만으로 전부 통과해 버리는 게 OpenSearch 의 함정이다. nested bool
+            # 안에는 filter 가 없어 기본 minimum_should_match 1 이 그대로 유지된다.
+            must_clauses = [{"bool": {"should": text_clauses}}]
+
+    result = search.bool(must=must_clauses, filter=filter_clauses or None, size=size)
+    if as_dataframe:
+        return search.to_dataframe(result)
+    return result
+
+
+def members_at_campus(
+    search: OSSearch,
+    campus: str,
+    *,
+    size: int = 200,
+    as_dataframe: bool = False,
+) -> Any:
+    """한 근무 캠퍼스(CENTRIC) 전원을 나열합니다 — 정확 일치 필터입니다.
+
+    filter_members(campus=...) 의 읽기 좋은 이름의 단축 진입점이에요. size 기본값은 한
+    캠퍼스 인원이 한 페이지에 들어오도록 200 으로 두었습니다.
+    """
+    return filter_members(search, campus=campus, size=size, as_dataframe=as_dataframe)
+
+
+def members_by_work_group(
+    search: OSSearch,
+    work_group: str,
+    *,
+    size: int = 200,
+    as_dataframe: bool = False,
+) -> Any:
+    """근무 형태(WGRP_NAM, 예: "교대 근무"/"유연근무")로 거릅니다 — 정확 일치 필터입니다.
+
+    filter_members(work_group=...) 의 단축 진입점이에요. 부서 안에서 교대근무자만 보고
+    싶을 때처럼 다른 조건과 함께 좁히려면 filter_members 를 직접 쓰세요.
+    """
+    return filter_members(search, work_group=work_group, size=size, as_dataframe=as_dataframe)
+
+
+def members_by_level(
+    search: OSSearch,
+    level: str,
+    *,
+    size: int = 200,
+    as_dataframe: bool = False,
+) -> Any:
+    """직원 레벨(RESV014)로 거릅니다 — 정확 일치 필터입니다.
+
+    filter_members(level=...) 의 단축 진입점이에요. RESV014 는 keyword 라 레벨 코드를 글자
+    그대로 정확히 넣어야 합니다.
+    """
+    return filter_members(search, level=level, size=size, as_dataframe=as_dataframe)
 
 
 def get_member(search: OSSearch, emp_no: Any) -> dict[str, Any] | None:
@@ -207,6 +349,28 @@ def example_browse_a_department() -> None:
     print("인원 수:", result["hits"]["total"]["value"])
     for hit in result["hits"]["hits"]:
         print(hit["_source"].get("NAME_KOR"))
+
+
+def example_filter_text_and_campus() -> None:
+    """통합 검색 + 정확일치 facet 조합: 청주 캠퍼스의 '검사' 관련자.
+
+    text 는 search_all 을 nori 로 훑고, campus 는 CENTRIC 에 정확 일치 필터를 겁니다.
+    전화번호처럼 검색 대상은 아니어도 _source 안에 그대로 들어 있어 함께 출력할 수 있어요.
+    """
+    search = create_member_search_service()
+    result = filter_members(search, text="검사", campus="청주", size=20)
+    for hit in result["hits"]["hits"]:
+        src = hit["_source"]
+        print(src.get("NAME_KOR"), src.get("CENTRIC"), src.get("MOBILE_TEL_NO"))
+
+
+def example_filter_facets_only() -> None:
+    """text 없이 facet 만으로: 한 팀의 교대근무자 명단(점수 없는 순수 정확 일치 필터)."""
+    search = create_member_search_service()
+    result = filter_members(search, dept="계측기술팀", work_group="교대 근무", size=50)
+    for hit in result["hits"]["hits"]:
+        src = hit["_source"]
+        print(src.get("NAME_KOR"), src.get("WGRP_NAM"), src.get("PLACE_OF_WORK"))
 
 
 def example_lookup_by_emp_no() -> None:
