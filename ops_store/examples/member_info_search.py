@@ -10,8 +10,12 @@ The member_info index (built by ops_index_mgmt/member_info.py) is shaped for a
 few specific queries, and these helpers bake in the right field for each so a
 caller never mismatches nori-analyzed text against an exact keyword:
 
-  - `search_members` runs a `match` on `search_all` -- the combined nori field
-    name, department, part, job, and RESP_CONT all copy into. The one-box search.
+  - `search_members` is a Google-style one-box search over `search_all` -- the
+    combined nori field name, department, part, job, and RESP_CONT all copy into.
+    The query is split into terms on spaces AND commas, so "VeritySEM, 청주",
+    "CG6300, GT2000", and "THK Recipe 작성" all work. By default every term must
+    match (AND -- each word narrows, like Google); pass `match_all=False` for
+    "any of these" (OR).
   - `members_in_dept` runs a `term` on the exact `DEPT_NAME_KOR` keyword -- a
     browse/filter, not full-text.
   - `get_member` fetches by EMP_NO, which is the document `_id`, so it is a
@@ -58,22 +62,48 @@ def create_member_search_service(client: Any | None = None) -> OSSearch:
     return OSSearch(client=actual_client, index=INDEX_NAME)
 
 
+def split_search_terms(text: str) -> list[str]:
+    """Split a Google-style query into terms on commas and whitespace.
+
+    Comma and space are interchangeable separators -- "VeritySEM, 청주",
+    "VeritySEM 청주", and "VeritySEM,청주" all yield ``["VeritySEM", "청주"]``.
+    Empty pieces (from doubled or trailing separators) are dropped.
+    """
+    return [term for term in text.replace(",", " ").split() if term]
+
+
 def search_members(
     search: OSSearch,
     text: str,
     *,
     size: int = 10,
+    match_all: bool = True,
     as_dataframe: bool = False,
 ) -> Any:
-    """One-box directory search: `match` ``text`` against ``search_all``.
+    """Google-style one-box directory search over ``search_all``.
 
-    The main entry point. `search_all` is the nori field name, department, part,
-    job, and RESP_CONT all copy into, so a single query spans all of them -- and
-    because both sides run through nori, "검사" also matches "검사를"/"장비 검사".
-    Returns the raw OpenSearch response (member fields under each hit's
-    `_source`); pass `as_dataframe=True` for a flat pandas DataFrame of the hits.
+    `text` is split into terms on spaces and commas (`split_search_terms`), and
+    each term becomes a `match` clause on `search_all` -- the nori field name,
+    department, part, job, and RESP_CONT all copy into, so one query spans them
+    all, and because both sides run through nori, "검사" also matches
+    "검사를"/"장비 검사". Examples that work:
+
+        search_members(search, "VeritySEM, 청주")   # tool AND site
+        search_members(search, "THK Recipe 작성")    # all three required
+        search_members(search, "CG6300, GT2000", match_all=False)  # either tool
+
+    `match_all=True` (default) requires every term (`bool.must` -- each word
+    narrows the result, like Google). `match_all=False` requires only one
+    (`bool.should`, OpenSearch's implicit minimum_should_match=1 -- broad "any
+    of these", ranked by how many hit). Returns the raw OpenSearch response
+    (member fields under each hit's `_source`); pass `as_dataframe=True` for a
+    flat pandas DataFrame of the hits.
     """
-    result = search.match(SEARCH_ALL_FIELD, text, size=size)
+    clauses = [{"match": {SEARCH_ALL_FIELD: term}} for term in split_search_terms(text)]
+    if match_all:
+        result = search.bool(must=clauses, size=size)
+    else:
+        result = search.bool(should=clauses, size=size)
     if as_dataframe:
         return search.to_dataframe(result)
     return result
@@ -114,18 +144,36 @@ def get_member(search: OSSearch, emp_no: Any) -> dict[str, Any] | None:
 
 
 def example_one_box_search() -> None:
-    """The main case: one search box over name + org + job + job-description."""
+    """The main case: one Google-style box, space- or comma-separated terms.
+
+    Every term must match (AND), so "VeritySEM, 청주" finds people tied to that
+    tool *and* that site -- adding words narrows, like Google.
+    """
     search = create_member_search_service()
-    result = search_members(search, "검사", size=20)
+    for text in ("VeritySEM, 청주", "THK Recipe 작성"):
+        result = search_members(search, text, size=20)
+        print(f"\n=== {text} ===")
+        for hit in result["hits"]["hits"]:
+            src = hit["_source"]
+            print(hit["_score"], src.get("NAME_KOR"), src.get("DEPT_NAME_KOR"))
+
+
+def example_any_of_these_terms() -> None:
+    """Broad search: match ANY term, not all (OR).
+
+    "CG6300, GT2000" with match_all=False finds anyone tied to *either* tool,
+    ranked higher when they hit both.
+    """
+    search = create_member_search_service()
+    result = search_members(search, "CG6300, GT2000", match_all=False, size=20)
     for hit in result["hits"]["hits"]:
-        src = hit["_source"]
-        print(hit["_score"], src.get("NAME_KOR"), src.get("DEPT_NAME_KOR"))
+        print(hit["_score"], hit["_source"].get("NAME_KOR"))
 
 
 def example_one_box_search_as_dataframe() -> None:
     """Same one-box search, but get a flat pandas DataFrame of the hits."""
     search = create_member_search_service()
-    df = search_members(search, "결함 분석", size=50, as_dataframe=True)
+    df = search_members(search, "결함 분석 청주", size=50, as_dataframe=True)
     print(df[["NAME_KOR", "DEPT_NAME_KOR", "JOB_NAME_KOR"]])
 
 
