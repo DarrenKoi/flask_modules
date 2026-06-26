@@ -1,3 +1,4 @@
+import importlib.util
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import Mock, call, patch
@@ -8,6 +9,8 @@ from ops_index_mgmt import member_info as member
 from ops_index_mgmt import member_info_ingest as member_ingest
 from ops_index_mgmt import network_fdc_cdsem as fdc
 from ops_index_mgmt import sharpness_monitor_cdsem as sharp
+
+_HAS_PANDAS = importlib.util.find_spec("pandas") is not None
 
 
 class SemMsrInfoIndexMgmtTests(unittest.TestCase):
@@ -486,6 +489,27 @@ class SharpnessMonitorCdsemTests(unittest.TestCase):
 
         self.assertEqual(actions[0]["_op_type"], "index")
 
+    def test_iter_bulk_actions_normalizes_source_before_building_id(self) -> None:
+        docs = [
+            {
+                "ip": "ip",
+                "timestamp": datetime(2026, 5, 23, 18, 35, 49),
+                "summ_beam": {"score": float("nan")},
+            }
+        ]
+
+        action = next(
+            sharp.iter_bulk_actions(
+                docs,
+                index="sharpness_monitor_cdsem",
+                os_inserted="2026-05-23T18:40:00+09:00",
+            )
+        )
+
+        self.assertEqual(action["_id"], "ip_2026-05-23T18:35:49")
+        self.assertEqual(action["_source"]["timestamp"], "2026-05-23T18:35:49")
+        self.assertIsNone(action["_source"]["summ_beam"]["score"])
+
     def test_ordered_degree_pairs_sorts_numerically_skips_date_casts_values(
         self,
     ) -> None:
@@ -507,7 +531,7 @@ class SharpnessMonitorCdsemTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sharp.ordered_degree_pairs({"0.0": ""})
 
-    def test_fan_out_lifts_ip_and_shared_date_to_top_level(self) -> None:
+    def test_fan_out_lifts_ip_and_date_to_top_level(self) -> None:
         payload = {
             "10.1.2.3": {
                 "beam_condition": {"Date": "2026-05-23T18:35:49", "mode": "lowkv"},
@@ -524,8 +548,53 @@ class SharpnessMonitorCdsemTests(unittest.TestCase):
         doc = docs[0]
         self.assertEqual(doc["ip"], "10.1.2.3")
         self.assertEqual(doc["timestamp"], "2026-05-23T18:35:49")
-        self.assertEqual(doc["noise"], {"Date": "2026-05-23T18:35:49", "0.0": "0.0034"})
+        self.assertEqual(doc["noise"], {"0.0": "0.0034"})
+        self.assertNotIn("Date", doc["beam_condition"])
         self.assertEqual(doc["summ_beam"]["score"], 0.9)
+
+    def test_fan_out_emits_one_document_per_summ_beam_date(self) -> None:
+        class Frame:
+            def __init__(self, records: list[dict[str, object]]) -> None:
+                self.records = records
+
+            def to_dict(self, *, orient: str) -> list[dict[str, object]]:
+                if orient != "records":
+                    raise AssertionError(orient)
+                return self.records
+
+        payload = {
+            "10.1.2.3": {
+                "beam_condition": Frame([
+                    {"Date": "2026-05-23T18:35:49", "mode": "lowkv"},
+                    {"Date": "2026-05-23T18:36:49", "mode": "highkv"},
+                ]),
+                "reso_detector": Frame([
+                    {"Date": "2026-05-23T18:35:49", "0.0": "0.0056"},
+                    {"Date": "2026-05-23T18:36:49", "0.0": "0.0057"},
+                ]),
+                "noise": Frame([
+                    {"Date": "2026-05-23T18:35:49", "0.0": "0.0034"},
+                    {"Date": "2026-05-23T18:36:49", "0.0": "0.0035"},
+                ]),
+                "reso_eb": Frame([
+                    {"Date": "2026-05-23T18:35:49", "0.0": "0.0048"},
+                    {"Date": "2026-05-23T18:36:49", "0.0": "0.0049"},
+                ]),
+                "summ_beam": Frame([
+                    {"Date": "2026-05-23T18:35:49", "score": 0.9},
+                    {"Date": "2026-05-23T18:36:49", "score": 0.8},
+                ]),
+            }
+        }
+
+        docs = list(sharp.fan_out(payload))
+
+        self.assertEqual(
+            [doc["timestamp"] for doc in docs],
+            ["2026-05-23T18:35:49", "2026-05-23T18:36:49"],
+        )
+        self.assertEqual(docs[1]["beam_condition"]["mode"], "highkv")
+        self.assertEqual(docs[1]["summ_beam"]["score"], 0.8)
 
     def test_store_payload_fans_out_stamps_and_bulk_indexes(self) -> None:
         payload = {
@@ -561,7 +630,50 @@ class SharpnessMonitorCdsemTests(unittest.TestCase):
         self.assertEqual(action["_index"], "sharpness_monitor_cdsem")
         self.assertIn("os_inserted", action["_source"])  # one stamp injected
         self.assertEqual(action["_source"]["ip"], "10.1.2.3")
-        self.assertEqual(action["_source"]["reso_eb"], {"0.0": "0.0048", "Date": "2026-05-23T18:35:49"})
+        self.assertEqual(action["_source"]["reso_eb"], {"0.0": "0.0048"})
+
+    @unittest.skipUnless(_HAS_PANDAS, "pandas not installed")
+    def test_store_payload_accepts_dataframe_blocks(self) -> None:
+        import pandas as pd
+
+        payload = {
+            "10.1.2.3": {
+                "beam_condition": pd.DataFrame(
+                    [{"Date": pd.Timestamp("2026-05-23 18:35:49"), "mode": "lowkv"}]
+                ),
+                "reso_detector": pd.DataFrame(
+                    [{"Date": pd.Timestamp("2026-05-23 18:35:49"), 0.0: 0.0056}]
+                ),
+                "noise": pd.DataFrame(
+                    [{"Date": pd.Timestamp("2026-05-23 18:35:49"), 0.0: 0.0034}]
+                ),
+                "reso_eb": pd.DataFrame(
+                    [{"Date": pd.Timestamp("2026-05-23 18:35:49"), 0.0: 0.0048}]
+                ),
+                "summ_beam": pd.DataFrame(
+                    [{"Date": pd.Timestamp("2026-05-23 18:35:49"), "score": 0.9}]
+                ),
+            }
+        }
+
+        captured: dict[str, object] = {}
+
+        def fake_bulk(actions, **kwargs):
+            captured["actions"] = list(actions)
+            return len(captured["actions"]), []
+
+        doc_service = Mock()
+        doc_service.bulk.side_effect = fake_bulk
+
+        with patch.object(sharp, "OSDoc", return_value=doc_service):
+            indexed, errors = sharp.store_payload(payload, client=Mock())
+
+        self.assertEqual((indexed, errors), (1, []))
+        action = captured["actions"][0]
+        self.assertEqual(action["_id"], "10.1.2.3_2026-05-23T18:35:49")
+        self.assertEqual(action["_source"]["timestamp"], "2026-05-23T18:35:49")
+        self.assertEqual(action["_source"]["noise"], {"0.0": 0.0034})
+        self.assertEqual(action["_source"]["summ_beam"], {"score": 0.9})
 
     def test_store_payload_passes_op_type_through(self) -> None:
         payload = {

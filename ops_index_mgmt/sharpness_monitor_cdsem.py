@@ -1,9 +1,13 @@
 """Create the sharpness_monitor_cdsem rollover index, template, alias, and ISM policy.
 
 Single CD-SEM sharpness-monitoring index. One document per equipment IP per
-collection event (`_id = ip_timestamp`). Of the five per-IP measurement dicts,
-four — `beam_condition`, `reso_detector`, `noise`, `reso_eb` — are wide
-reference objects mapped `enabled: false` (stored whole in `_source`, never
+collection event (`_id = ip_timestamp`). The ingest payload is IP-keyed:
+`{ip: {beam_condition, reso_detector, noise, reso_eb, summ_beam}}`; each inner
+value may be a one-or-more-row pandas DataFrame or a single row dict. `Date` is
+lifted out of each row into the top-level `timestamp` field and removed from
+the nested measurement blocks. Of the five per-IP measurement blocks, four —
+`beam_condition`, `reso_detector`, `noise`, `reso_eb` — are wide reference
+objects mapped `enabled: false` (stored whole in `_source`, never
 parsed/indexed); `summ_beam` is left a normal object so its summary metrics
 stay queryable/aggregatable. Lifecycle copies the network_fdc_cdsem rule:
 1000000-doc rollover safety net, 1-year retention.
@@ -16,7 +20,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from ops_store import OSDoc, OSIndex, create_client
+from ops_store import OSDoc, OSIndex, create_client, normalize_document
 
 OPENSEARCH_HOST = "skewnono-db1-os.osp01.skhynix.com"
 OPENSEARCH_USER = "skewnono001"
@@ -45,6 +49,8 @@ POLICY_PRIORITY = 100
 # `beam_condition` is treated as display-only; promote it out of this tuple if
 # you ever need to filter/aggregate on a beam characteristic.
 STORE_ONLY_OBJECT_FIELDS = ("beam_condition", "reso_detector", "noise", "reso_eb")
+MEASUREMENT_BLOCK_FIELDS = (*STORE_ONLY_OBJECT_FIELDS, "summ_beam")
+DATE_FIELD = "Date"
 
 # Fields whose combined value identifies one collection event; joined to form
 # _id. One document per equipment IP per timestamp.
@@ -103,32 +109,37 @@ def iter_bulk_actions(
 
     Each yielded action carries the composite `_id` from `make_doc_id` and
     the shared `os_inserted` stamp (KST, tz-aware — the caller computes one
-    value for the whole batch) added to `_source`. Documents that fail
-    `has_id_fields` are silently skipped. `op_type="create"` surfaces
-    duplicate ids on re-runs (dedup); `"index"` overwrites by id (upsert).
+    value for the whole batch) added to `_source`. The `_source` is normalized
+    before `_id` generation so pandas/numpy scalars, datetimes, NaT, and
+    nested mapping keys are JSON-safe even though this uses raw bulk actions.
+    Documents that fail `has_id_fields` after normalization are silently
+    skipped. `op_type="create"` surfaces duplicate ids on re-runs (dedup);
+    `"index"` overwrites by id (upsert).
 
     Feed the result straight to `OSDoc.bulk`; a composite `_id` rules out
     `OSDoc.bulk_index`, which only copies a single field into `_id`.
     """
 
     for doc in docs:
-        if not has_id_fields(doc):
+        source = normalize_document({**doc, "os_inserted": os_inserted})
+        if not has_id_fields(source):
             continue
         yield {
             "_op_type": op_type,
             "_index": index,
-            "_id": make_doc_id(doc),
-            "_source": {**doc, "os_inserted": os_inserted},
+            "_id": make_doc_id(source),
+            "_source": source,
         }
 
 
 def ordered_degree_pairs(block: Mapping[str, Any]) -> tuple[list[float], list[float]]:
     """Return `(degrees, values)` as parallel float lists sorted by degree.
 
-    A degree block (`reso_detector`, `noise`, `reso_eb`) is a dict mixing a
-    `Date` entry with degree-labelled measurements (`"0.0"`, `"112.5"`, ...),
-    each value a stringified float. The block is stored `enabled: false`, so
-    its `_source` key order is whatever was sent — and JSON objects are
+    A degree block (`reso_detector`, `noise`, `reso_eb`) is a dict with
+    degree-labelled measurements (`"0.0"`, `"112.5"`, ...), each value a
+    stringified float. Older caller-shaped blocks may still include `Date`.
+    The block is stored `enabled: false`, so its `_source` key order is
+    whatever was sent — and JSON objects are
     unordered anyway, so it must not be trusted. This rebuilds a deterministic
     ascending-by-degree view ready to plot: degrees are sorted numerically
     (`float(key)`, not lexically — else `"112.5"` would sort before `"22.5"`),
@@ -151,31 +162,65 @@ def ordered_degree_pairs(block: Mapping[str, Any]) -> tuple[list[float], list[fl
     return [degree for degree, _ in pairs], [value for _, value in pairs]
 
 
+def _iter_block_records(block: Any) -> Iterator[Mapping[str, Any]]:
+    """Yield row dicts from one measurement block.
+
+    Office payloads carry each block as a pandas DataFrame. The older examples
+    used a single mapping. Duck typing keeps pandas optional at import time and
+    lets both forms feed the same fan-out path.
+    """
+
+    if isinstance(block, Mapping):
+        yield block
+        return
+
+    for record in block.to_dict(orient="records"):
+        yield record
+
+
+def _records_by_date(block: Any) -> dict[Any, dict[str, Any]]:
+    """Return one block's rows keyed by normalized `Date`, with `Date` removed."""
+
+    records: dict[Any, dict[str, Any]] = {}
+    for record in _iter_block_records(block):
+        timestamp = normalize_document({DATE_FIELD: record[DATE_FIELD]})[DATE_FIELD]
+        records[timestamp] = {
+            key: value for key, value in record.items() if key != DATE_FIELD
+        }
+    return records
+
+
 def fan_out(payload: Mapping[str, Mapping[str, Any]]) -> Iterator[dict[str, Any]]:
-    """Turn the IP-keyed payload into one flat document per equipment IP.
+    """Turn the IP-keyed payload into one flat document per IP and `Date`.
 
     `payload` is `{ip: {beam_condition, reso_detector, noise, reso_eb,
-    summ_beam}}`, where every inner block carries the same `Date`. Each IP
-    becomes one document with `ip` and that shared `Date` (read once, from
-    `summ_beam`) lifted to the top level so they can serve as the composite
-    `_id` and a real `date` field; the five measurement blocks are passed
-    through verbatim.
+    summ_beam}}`, where every inner value is either a pandas DataFrame or a
+    single row dict carrying a `Date` column/key. Each row in `summ_beam`
+    defines one collection event. Its `Date` is lifted to the top-level
+    `timestamp` field so it can serve as part of the composite `_id` and a real
+    OpenSearch `date` field; `Date` is removed from every nested measurement
+    block before storing.
 
-    Raises `KeyError` if an IP is missing `summ_beam` or its `Date`, or any of
-    the five blocks — an incomplete sweep should surface here, not land as a
-    half-written document.
+    Raises `KeyError` if an IP is missing one of the five blocks, a row is
+    missing `Date`, or one block lacks a `Date` present in `summ_beam` — an
+    incomplete sweep should surface here, not land as a half-written document.
     """
 
     for ip, blocks in payload.items():
-        yield {
-            "ip": ip,
-            "timestamp": blocks["summ_beam"]["Date"],
-            "beam_condition": blocks["beam_condition"],
-            "reso_detector": blocks["reso_detector"],
-            "noise": blocks["noise"],
-            "reso_eb": blocks["reso_eb"],
-            "summ_beam": blocks["summ_beam"],
+        rows_by_block = {
+            block_name: _records_by_date(blocks[block_name])
+            for block_name in MEASUREMENT_BLOCK_FIELDS
         }
+        for timestamp in rows_by_block["summ_beam"]:
+            yield {
+                "ip": ip,
+                "timestamp": timestamp,
+                "beam_condition": rows_by_block["beam_condition"][timestamp],
+                "reso_detector": rows_by_block["reso_detector"][timestamp],
+                "noise": rows_by_block["noise"][timestamp],
+                "reso_eb": rows_by_block["reso_eb"][timestamp],
+                "summ_beam": rows_by_block["summ_beam"][timestamp],
+            }
 
 
 def store_payload(
@@ -530,9 +575,11 @@ if __name__ == "__main__":
 # Not executed by this script. Copy/adapt at the office once the index exists.
 #
 # # `payload` is the nested dict: {ip: {beam_condition, reso_detector, noise,
-# # reso_eb, summ_beam}}. store_payload fans it out (one doc per IP), stamps a
-# # single os_inserted for the batch, and bulk-indexes. Pass a client to reuse
-# # one; omit it to build from the module connection variables.
+# # reso_eb, summ_beam}}, where each inner value is a DataFrame with a `Date`
+# # column (or a single row dict). store_payload fans it out one doc per
+# # IP/Date, lifts `Date` to top-level `timestamp`, removes `Date` from nested
+# # blocks, stamps a single os_inserted for the batch, and bulk-indexes. Pass a
+# # client to reuse one; omit it to build from the module connection variables.
 # indexed, errors = store_payload(payload)  # op_type="index" to upsert instead
 # print(f"indexed: {indexed}, errors: {len(errors)}")
 # for err in errors[:5]:   # with op_type="create", 409s here = already present
