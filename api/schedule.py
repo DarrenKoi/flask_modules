@@ -169,12 +169,20 @@ def init_jobs(app: Flask, *, register_with_scheduler: bool = True) -> None:
         )
         wrapped[name] = fn
         if register_with_scheduler:
+            # Optional per-job scheduler settings. Entries that omit these
+            # keys behave exactly as before (SCHEDULER_JOB_DEFAULTS applies).
+            optional = {
+                key: spec[key]
+                for key in ("misfire_grace_time", "executor")
+                if key in spec
+            }
             scheduler.add_job(
                 id=name,
                 func="api.schedule:run_registered_job",
                 args=[name],
                 trigger=spec["trigger"],
                 replace_existing=True,
+                **optional,
             )
     app.config["WRAPPED_JOBS"] = wrapped
 

@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from apscheduler.triggers.interval import IntervalTrigger
 from flask import Flask
 
 from api import extension, schedule
@@ -322,6 +323,44 @@ class DashboardRouteTests(unittest.TestCase):
         self.assertIn("task1", body)
         self.assertIn("task2", body)
         self.assertIn("restart_uwsgi", body)
+
+
+class OptionalJobKwargsTests(unittest.TestCase):
+    def test_optional_scheduler_kwargs_reach_add_job(self):
+        # A 15s job needs its own misfire window and executor. Without the
+        # pass-through, SCHEDULER_JOB_DEFAULTS' 60s misfire applies to every
+        # job, far too long for a job firing every 15 seconds.
+        app, _client, _lock, scheduler_mock = _build_test_app(self)
+        probe = {
+            "fn": lambda: None,
+            "trigger": IntervalTrigger(seconds=15),
+            "lock_ttl": 45,
+            "manual_dispatch": True,
+            "misfire_grace_time": 10,
+            "executor": "fast",
+        }
+        with patch.dict(schedule.JOB_FUNCTIONS, {"probe": probe}):
+            scheduler_mock.add_job.reset_mock()
+            schedule.init_jobs(app)
+        calls = {c.kwargs["id"]: c.kwargs for c in scheduler_mock.add_job.call_args_list}
+        self.assertEqual(calls["probe"]["misfire_grace_time"], 10)
+        self.assertEqual(calls["probe"]["executor"], "fast")
+
+    def test_existing_jobs_pass_no_optional_kwargs(self):
+        # Backward compatibility: jobs without the keys must be unchanged.
+        app, _client, _lock, scheduler_mock = _build_test_app(self)
+        scheduler_mock.add_job.reset_mock()
+        schedule.init_jobs(app)
+        calls = {c.kwargs["id"]: c.kwargs for c in scheduler_mock.add_job.call_args_list}
+        self.assertNotIn("misfire_grace_time", calls["task1"])
+        self.assertNotIn("executor", calls["task1"])
+
+    def test_fast_executor_is_registered(self):
+        app = Flask("api_test")
+        cfg = ApiRedisConfig()
+        extension.configure_scheduler(app, cfg)
+        self.assertIn("fast", app.config["SCHEDULER_EXECUTORS"])
+        self.assertIn("default", app.config["SCHEDULER_EXECUTORS"])
 
 
 if __name__ == "__main__":

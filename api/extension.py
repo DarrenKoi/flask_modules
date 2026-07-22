@@ -114,8 +114,13 @@ def configure_scheduler(app: Any, config: ApiRedisConfig) -> None:
     # scheduler thread pool at 4 so the worker hosting it (worker_id=1) keeps
     # headroom for HTTP traffic and doesn't OOM when long jobs (10-20 min,
     # pandas/OpenSearch heavy) overlap.
+    #
+    # "fast" is a separate single-thread lane for sub-minute jobs. Sharing
+    # "default" would let four concurrent long jobs starve a 15s job for
+    # 10+ minutes, and coalesce=True silently drops the missed fires.
     app.config["SCHEDULER_EXECUTORS"] = {
         "default": ThreadPoolExecutor(max_workers=4),
+        "fast": ThreadPoolExecutor(max_workers=1),
     }
     app.config["SCHEDULER_JOB_DEFAULTS"] = {
         "coalesce": True,
