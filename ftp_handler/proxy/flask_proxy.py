@@ -3,8 +3,8 @@
 Runs on a host that CAN reach the equipment FTP servers. A firewalled client
 POSTs download specs here; this side does the real FTP (reusing
 FtpFleetDownloader) and returns the file bytes over HTTP. Pair it with
-``ftp_handler/ftp_flask_downloader.py`` on the firewalled client — same public API,
-HTTP transport instead of direct FTP.
+``ftp_handler/proxy/proxy_downloader.py`` on the firewalled client — same public
+API, HTTP transport instead of direct FTP.
 
     local PC ──HTTP──> Flask app (this blueprint) ──FTP──> equipment servers
     (firewalled,        (firewall-free)                     (only reachable
@@ -12,7 +12,7 @@ HTTP transport instead of direct FTP.
 
 Mount it on an EXISTING Flask app as one blueprint among many:
 
-    from ftp_flask_proxy import ftp_proxy_sknn_v3
+    from ftp_handler.proxy.flask_proxy import ftp_proxy_sknn_v3
     app.register_blueprint(ftp_proxy_sknn_v3)
 
 Routes carry the ``_sknn_v3`` suffix so they don't collide with paths already
@@ -43,7 +43,7 @@ production — the FTP password and file bytes cross this connection.
 Standalone run (without an existing app):
     pip install flask
     set FTP_PROXY_TOKEN=secret    # PowerShell: $env:FTP_PROXY_TOKEN="secret"
-    python ftp_flask_proxy.py                       # serves 0.0.0.0:8080
+    python flask_proxy.py                           # serves 0.0.0.0:8080
 """
 
 import base64
@@ -75,7 +75,7 @@ except ImportError:  # copied beside fleet_downloader.py and imported bare
     )
 
 # Suffixed to avoid collisions with routes already mounted on the host app.
-# Keep in sync with the paths ftp_flask_downloader.py POSTs to.
+# Keep in sync with the paths proxy_downloader.py POSTs to.
 URL_DOWNLOAD = "/download_sknn_v3"
 URL_LIST = "/list_dirs_sknn_v3"
 URL_SIZE = "/size_dirs_sknn_v3"

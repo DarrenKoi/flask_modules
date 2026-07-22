@@ -342,7 +342,7 @@ class FleetTransport(Protocol):
     """The interchange seam between the two FTP deployment paths.
 
     Two adapters satisfy it: the direct ``FtpFleetDownloader`` (this module,
-    real FTP) and the HTTP-proxy ``FtpFleetDownloader`` (``ftp_flask_downloader``,
+    real FTP) and the HTTP-proxy ``FtpFleetDownloader`` (``proxy.proxy_downloader``,
     same surface over HTTP). A call site swaps one import line between them and
     nothing else changes — that swap is the whole point of the seam.
 
@@ -792,7 +792,7 @@ def specs_from_hosts(
         report = FtpFleetDownloader(user=u, password=p).list_dirs(specs)
 
     For per-host configuration that differs, build from JSON with
-    ``eqp_ftp_collect.build_host_specs`` instead.
+    ``collect.build_host_specs`` instead.
     """
     return [
         HostSpec(host=host, files=list(files or []), listings=list(listings or []))
