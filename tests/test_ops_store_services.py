@@ -1,11 +1,15 @@
 import importlib.util
 import os
+import subprocess
+import sys
 import unittest
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 _HAS_PANDAS = importlib.util.find_spec("pandas") is not None
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 from ops_store import (
     BulkCreateResult,
@@ -52,6 +56,50 @@ class FakePandasModule:
 
 
 class OSConfigTests(unittest.TestCase):
+    def test_package_import_does_not_require_opensearch_sdk(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                "-c",
+                "import ops_store; print(ops_store.OSConfig.__name__)",
+            ],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "OSConfig")
+
+    def test_injected_search_client_propagates_errors_without_sdk(self) -> None:
+        script = """
+from ops_store import OSSearch
+
+class Indices:
+    def get_mapping(self, *, index):
+        raise ValueError("bad mapping")
+
+class Client:
+    indices = Indices()
+
+try:
+    OSSearch(client=Client(), index="events").latest("timestamp")
+except ValueError as exc:
+    print(exc)
+"""
+        result = subprocess.run(
+            [sys.executable, "-S", "-c", script],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "bad mapping")
+
     def test_load_config_uses_https_defaults(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             config = load_config()
