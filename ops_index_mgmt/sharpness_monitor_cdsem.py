@@ -15,6 +15,7 @@ stay queryable/aggregatable. Lifecycle copies the network_fdc_cdsem rule:
 
 import argparse
 import json
+import os
 from collections.abc import Iterable, Iterator, Mapping
 from datetime import datetime
 from typing import Any
@@ -24,7 +25,6 @@ from ops_store import OSDoc, OSIndex, create_client, normalize_document
 
 OPENSEARCH_HOST = "skewnono-db1-os.osp01.skhynix.com"
 OPENSEARCH_USER = "skewnono001"
-OPENSEARCH_PASSWORD = ""
 
 INDEX_ALIAS = "sharpness_monitor_cdsem"
 POLICY_ID = "sharpness_monitor_cdsem_retention_policy"
@@ -244,11 +244,7 @@ def store_payload(
     governs visibility rather than forcing a refresh per batch.
     """
 
-    actual_client = client or create_client(
-        host=OPENSEARCH_HOST,
-        user=OPENSEARCH_USER,
-        password=OPENSEARCH_PASSWORD,
-    )
+    actual_client = client or create_skewnono_client()
     doc_service = OSDoc(client=actual_client, index=INDEX_ALIAS)
     os_inserted = datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
 
@@ -424,15 +420,16 @@ def build_initial_index_body() -> dict[str, Any]:
 def create_skewnono_client() -> Any:
     """Create a client for the skewnono OpenSearch cluster."""
 
-    if not OPENSEARCH_PASSWORD:
+    password = os.getenv("OPENSEARCH_PASSWORD")
+    if not password:
         raise RuntimeError(
-            "Set OPENSEARCH_PASSWORD at the top of "
-            "ops_index_mgmt/sharpness_monitor_cdsem.py before running this script."
+            "Set the OPENSEARCH_PASSWORD environment variable before running "
+            "this script."
         )
     return create_client(
-        host=OPENSEARCH_HOST,
-        user=OPENSEARCH_USER,
-        password=OPENSEARCH_PASSWORD,
+        host=os.getenv("OPENSEARCH_HOST", OPENSEARCH_HOST),
+        user=os.getenv("OPENSEARCH_USER", OPENSEARCH_USER),
+        password=password,
     )
 
 
@@ -507,9 +504,9 @@ def build_dry_run_plan() -> dict[str, Any]:
 
     return {
         "cluster": {
-            "host": OPENSEARCH_HOST,
-            "user": OPENSEARCH_USER,
-            "password_set": bool(OPENSEARCH_PASSWORD),
+            "host": os.getenv("OPENSEARCH_HOST", OPENSEARCH_HOST),
+            "user": os.getenv("OPENSEARCH_USER", OPENSEARCH_USER),
+            "password_set": bool(os.getenv("OPENSEARCH_PASSWORD")),
         },
         "policy_request": {
             "method": "PUT",

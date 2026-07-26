@@ -8,6 +8,7 @@ mapped `enabled: false`; `beam_shape_cdsem` has no special fields.
 
 import argparse
 import json
+import os
 from collections.abc import Iterable, Iterator, Mapping
 from typing import Any
 
@@ -15,7 +16,6 @@ from ops_store import OSIndex, create_client
 
 OPENSEARCH_HOST = "skewnono-db1-os.osp01.skhynix.com"
 OPENSEARCH_USER = "skewnono001"
-OPENSEARCH_PASSWORD = ""
 
 INDEX_ALIASES = ("beam_shape_cdsem", "reso_center_cdsem")
 POLICY_ID = "beam_reso_cdsem_retention_policy"
@@ -278,15 +278,16 @@ def build_initial_index_body(alias: str) -> dict[str, Any]:
 def create_skewnono_client() -> Any:
     """Create a client for the skewnono OpenSearch cluster."""
 
-    if not OPENSEARCH_PASSWORD:
+    password = os.getenv("OPENSEARCH_PASSWORD")
+    if not password:
         raise RuntimeError(
-            "Set OPENSEARCH_PASSWORD at the top of "
-            "ops_index_mgmt/beam_reso_cdsem.py before running this script."
+            "Set the OPENSEARCH_PASSWORD environment variable before running "
+            "this script."
         )
     return create_client(
-        host=OPENSEARCH_HOST,
-        user=OPENSEARCH_USER,
-        password=OPENSEARCH_PASSWORD,
+        host=os.getenv("OPENSEARCH_HOST", OPENSEARCH_HOST),
+        user=os.getenv("OPENSEARCH_USER", OPENSEARCH_USER),
+        password=password,
     )
 
 
@@ -378,9 +379,9 @@ def build_dry_run_plan() -> dict[str, Any]:
 
     return {
         "cluster": {
-            "host": OPENSEARCH_HOST,
-            "user": OPENSEARCH_USER,
-            "password_set": bool(OPENSEARCH_PASSWORD),
+            "host": os.getenv("OPENSEARCH_HOST", OPENSEARCH_HOST),
+            "user": os.getenv("OPENSEARCH_USER", OPENSEARCH_USER),
+            "password_set": bool(os.getenv("OPENSEARCH_PASSWORD")),
         },
         "policy_request": {
             "method": "PUT",
@@ -463,7 +464,7 @@ if __name__ == "__main__":
 # client = create_client(
 #     host=OPENSEARCH_HOST,
 #     user=OPENSEARCH_USER,
-#     password=OPENSEARCH_PASSWORD,
+#     password=os.environ["OPENSEARCH_PASSWORD"],
 # )
 # doc_service = OSDoc(client=client)
 #

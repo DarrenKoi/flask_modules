@@ -21,16 +21,16 @@ Settings:
 - rollover: backing index age reaches `60d`
 - retention: delete backing indices after `365d`
 
-Connection values are declared near the top of
-`ops_index_mgmt/hitachi_sem_msr_info.py`:
+Connection host/user defaults are declared near the top of each script and can
+be overridden with `OPENSEARCH_HOST` / `OPENSEARCH_USER`. Passwords are read
+only from the environment so operators never edit a secret into tracked source:
 
-```python
-OPENSEARCH_HOST = "skewnono-db1-os.osp01.skhynix.com"
-OPENSEARCH_USER = "skewnono001"
-OPENSEARCH_PASSWORD = ""
+```bash
+export OPENSEARCH_PASSWORD="..."
 ```
 
-Set `OPENSEARCH_PASSWORD` before running the script.
+`es_to_os_reindex.py` additionally reads source-cluster overrides from
+`ES_HOST`, `ES_PORT`, `ES_USER`, and the required `ES_PASSWORD`.
 
 ```bash
 python -m ops_index_mgmt.hitachi_sem_msr_info --dry-run
@@ -333,8 +333,7 @@ of `network_fdc_cdsem.py`.
 ES scroll API on the read side and `ops_store.OSDoc.bulk` on the write side.
 Document ids are preserved, so re-runs overwrite rather than duplicate.
 
-Set both clusters' connection consts at the top of the file (`ES_*` and
-`OPENSEARCH_*`), then:
+Set the `ES_*` and `OPENSEARCH_*` environment variables described above, then:
 
 ```bash
 # Inspect what would happen — no cluster contact.

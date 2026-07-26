@@ -2,13 +2,13 @@
 
 import argparse
 import json
+import os
 from typing import Any, Iterable, Iterator, Mapping
 
 from ops_store import OSIndex, create_client
 
 OPENSEARCH_HOST = "skewnono-db1-os.osp01.skhynix.com"
 OPENSEARCH_USER = "skewnono001"
-OPENSEARCH_PASSWORD = ""
 
 INDEX_ALIAS = "network_fdc_cdsem"
 POLICY_ID = "network_fdc_cdsem_retention_policy"
@@ -235,15 +235,16 @@ def build_initial_index_body() -> dict[str, Any]:
 def create_skewnono_client() -> Any:
     """Create a client for the skewnono OpenSearch cluster."""
 
-    if not OPENSEARCH_PASSWORD:
+    password = os.getenv("OPENSEARCH_PASSWORD")
+    if not password:
         raise RuntimeError(
-            "Set OPENSEARCH_PASSWORD at the top of "
-            "ops_index_mgmt/network_fdc_cdsem.py before running this script."
+            "Set the OPENSEARCH_PASSWORD environment variable before running "
+            "this script."
         )
     return create_client(
-        host=OPENSEARCH_HOST,
-        user=OPENSEARCH_USER,
-        password=OPENSEARCH_PASSWORD,
+        host=os.getenv("OPENSEARCH_HOST", OPENSEARCH_HOST),
+        user=os.getenv("OPENSEARCH_USER", OPENSEARCH_USER),
+        password=password,
     )
 
 
@@ -318,9 +319,9 @@ def build_dry_run_plan() -> dict[str, Any]:
 
     return {
         "cluster": {
-            "host": OPENSEARCH_HOST,
-            "user": OPENSEARCH_USER,
-            "password_set": bool(OPENSEARCH_PASSWORD),
+            "host": os.getenv("OPENSEARCH_HOST", OPENSEARCH_HOST),
+            "user": os.getenv("OPENSEARCH_USER", OPENSEARCH_USER),
+            "password_set": bool(os.getenv("OPENSEARCH_PASSWORD")),
         },
         "policy_request": {
             "method": "PUT",
@@ -390,7 +391,7 @@ if __name__ == "__main__":
 # client = create_client(
 #     host=OPENSEARCH_HOST,
 #     user=OPENSEARCH_USER,
-#     password=OPENSEARCH_PASSWORD,
+#     password=os.environ["OPENSEARCH_PASSWORD"],
 # )
 # doc_service = OSDoc(client=client)
 #

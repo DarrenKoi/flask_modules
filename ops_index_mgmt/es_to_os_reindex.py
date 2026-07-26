@@ -6,6 +6,7 @@ Document ids are preserved so re-runs are idempotent (same id => overwrite).
 
 import argparse
 import json
+import os
 from collections.abc import Iterator
 from typing import Any
 
@@ -15,14 +16,12 @@ from ops_store import OSDoc, create_client
 ES_HOST = "es-host.example.com"
 ES_PORT = 9200
 ES_USER = "elastic"
-ES_PASSWORD = ""
 ES_USE_SSL = True
 ES_VERIFY_CERTS = False
 
 # --- destination: OpenSearch ---
 OPENSEARCH_HOST = "skewnono-db1-os.osp01.skhynix.com"
 OPENSEARCH_USER = "skewnono001"
-OPENSEARCH_PASSWORD = ""
 
 # --- migration knobs ---
 SOURCE_INDEX = "my_es_index"
@@ -48,17 +47,24 @@ def _es_scan_helper() -> Any:
 def create_es_client() -> Any:
     """Connect to the source Elasticsearch cluster."""
 
-    if not ES_PASSWORD:
+    password = os.getenv("ES_PASSWORD")
+    if not password:
         raise RuntimeError(
-            "Set ES_PASSWORD at the top of "
-            "ops_index_mgmt/es_to_os_reindex.py before running this script."
+            "Set the ES_PASSWORD environment variable before running this "
+            "script."
         )
 
     elasticsearch = _elasticsearch_module()
     scheme = "https" if ES_USE_SSL else "http"
     return elasticsearch.Elasticsearch(
-        hosts=[{"host": ES_HOST, "port": ES_PORT, "scheme": scheme}],
-        http_auth=(ES_USER, ES_PASSWORD),
+        hosts=[
+            {
+                "host": os.getenv("ES_HOST", ES_HOST),
+                "port": int(os.getenv("ES_PORT", str(ES_PORT))),
+                "scheme": scheme,
+            }
+        ],
+        http_auth=(os.getenv("ES_USER", ES_USER), password),
         verify_certs=ES_VERIFY_CERTS,
         ssl_show_warn=False,
         timeout=60,
@@ -70,16 +76,17 @@ def create_es_client() -> Any:
 def create_os_client() -> Any:
     """Connect to the destination OpenSearch cluster."""
 
-    if not OPENSEARCH_PASSWORD:
+    password = os.getenv("OPENSEARCH_PASSWORD")
+    if not password:
         raise RuntimeError(
-            "Set OPENSEARCH_PASSWORD at the top of "
-            "ops_index_mgmt/es_to_os_reindex.py before running this script."
+            "Set the OPENSEARCH_PASSWORD environment variable before running "
+            "this script."
         )
 
     return create_client(
-        host=OPENSEARCH_HOST,
-        user=OPENSEARCH_USER,
-        password=OPENSEARCH_PASSWORD,
+        host=os.getenv("OPENSEARCH_HOST", OPENSEARCH_HOST),
+        user=os.getenv("OPENSEARCH_USER", OPENSEARCH_USER),
+        password=password,
     )
 
 
@@ -192,19 +199,19 @@ def build_dry_run_plan(
 
     return {
         "source": {
-            "host": ES_HOST,
-            "port": ES_PORT,
-            "user": ES_USER,
-            "password_set": bool(ES_PASSWORD),
+            "host": os.getenv("ES_HOST", ES_HOST),
+            "port": int(os.getenv("ES_PORT", str(ES_PORT))),
+            "user": os.getenv("ES_USER", ES_USER),
+            "password_set": bool(os.getenv("ES_PASSWORD")),
             "index": source_index,
             "query": query,
             "scroll_size": scroll_size,
             "scroll_keepalive": SCROLL_KEEPALIVE,
         },
         "destination": {
-            "host": OPENSEARCH_HOST,
-            "user": OPENSEARCH_USER,
-            "password_set": bool(OPENSEARCH_PASSWORD),
+            "host": os.getenv("OPENSEARCH_HOST", OPENSEARCH_HOST),
+            "user": os.getenv("OPENSEARCH_USER", OPENSEARCH_USER),
+            "password_set": bool(os.getenv("OPENSEARCH_PASSWORD")),
             "index": dest_index,
             "bulk_chunk": bulk_chunk,
         },

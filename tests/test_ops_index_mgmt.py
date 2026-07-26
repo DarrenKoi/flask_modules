@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import Mock, call, patch
@@ -65,14 +66,20 @@ class SemMsrInfoIndexMgmtTests(unittest.TestCase):
             mgmt.build_index_settings("meas_hist_hvsem"),
         )
 
-    def test_create_client_reads_connection_from_module_variables(self) -> None:
-        with patch.object(mgmt, "OPENSEARCH_HOST", "cluster.example"):
-            with patch.object(mgmt, "OPENSEARCH_USER", "sem-user"):
-                with patch.object(mgmt, "OPENSEARCH_PASSWORD", "secret"):
-                    with patch(
-                        "ops_index_mgmt.hitachi_sem_msr_info.create_client"
-                    ) as factory:
-                        mgmt.create_skewnono_client()
+    def test_create_client_reads_connection_from_environment(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OPENSEARCH_HOST": "cluster.example",
+                "OPENSEARCH_USER": "sem-user",
+                "OPENSEARCH_PASSWORD": "secret",
+            },
+            clear=True,
+        ):
+            with patch(
+                "ops_index_mgmt.hitachi_sem_msr_info.create_client"
+            ) as factory:
+                mgmt.create_skewnono_client()
 
         factory.assert_called_once_with(
             host="cluster.example",
@@ -80,8 +87,29 @@ class SemMsrInfoIndexMgmtTests(unittest.TestCase):
             password="secret",
         )
 
+    def test_create_client_reads_password_from_environment(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"OPENSEARCH_PASSWORD": "environment-secret"},
+            clear=True,
+        ):
+            with patch(
+                "ops_index_mgmt.hitachi_sem_msr_info.create_client"
+            ) as factory:
+                mgmt.create_skewnono_client()
+
+        factory.assert_called_once_with(
+            host="skewnono-db1-os.osp01.skhynix.com",
+            user="skewnono001",
+            password="environment-secret",
+        )
+
     def test_create_client_defaults_host_and_user(self) -> None:
-        with patch.object(mgmt, "OPENSEARCH_PASSWORD", "secret"):
+        with patch.dict(
+            os.environ,
+            {"OPENSEARCH_PASSWORD": "secret"},
+            clear=True,
+        ):
             with patch("ops_index_mgmt.hitachi_sem_msr_info.create_client") as factory:
                 mgmt.create_skewnono_client()
 
@@ -91,8 +119,12 @@ class SemMsrInfoIndexMgmtTests(unittest.TestCase):
             password="secret",
         )
 
-    def test_create_client_requires_password_variable(self) -> None:
-        with patch.object(mgmt, "OPENSEARCH_PASSWORD", ""):
+    def test_create_client_requires_password_environment_variable(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"OPENSEARCH_PASSWORD": ""},
+            clear=True,
+        ):
             with self.assertRaises(RuntimeError):
                 mgmt.create_skewnono_client()
 
@@ -754,8 +786,12 @@ class SharpnessMonitorCdsemTests(unittest.TestCase):
             ]
         )
 
-    def test_create_client_requires_password_variable(self) -> None:
-        with patch.object(sharp, "OPENSEARCH_PASSWORD", ""):
+    def test_create_client_requires_password_environment_variable(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"OPENSEARCH_PASSWORD": ""},
+            clear=True,
+        ):
             with self.assertRaises(RuntimeError):
                 sharp.create_skewnono_client()
 
@@ -824,8 +860,12 @@ class MemberInfoIndexTests(unittest.TestCase):
         self.assertEqual(kwargs["index"], "member_info")
         self.assertIn("RESP_CONT", kwargs["mappings"]["properties"])
 
-    def test_create_client_requires_password_variable(self) -> None:
-        with patch.object(member, "OPENSEARCH_PASSWORD", ""):
+    def test_create_client_requires_password_environment_variable(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"OPENSEARCH_PASSWORD": ""},
+            clear=True,
+        ):
             with self.assertRaises(RuntimeError):
                 member.create_skewnono_client()
 
