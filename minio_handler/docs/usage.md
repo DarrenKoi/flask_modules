@@ -250,7 +250,8 @@ if errors:
 ```
 
 `delete_many`는 한 번의 HTTP 요청으로 여러 object를 지웁니다. 반환값은
-실패 항목들의 리스트입니다.
+실패 항목들의 리스트입니다. 상대 key뿐 아니라 `list()`에서 받은 full
+`object_name`도 그대로 넘길 수 있습니다.
 
 key 목록을 미리 모르고 패턴으로 지우고 싶을 때는 두 가지가 더 있습니다.
 
@@ -275,9 +276,12 @@ for obj in mo.list():
 prefix 아래 하위 경로를 제한하고 싶을 때:
 
 ```python
-for obj in mo.list("logs", recursive=True):
+for obj in mo.list("logs/", recursive=True):
     print(obj.object_name)
 ```
+
+`prefix`는 S3의 문자열 prefix 그대로입니다. 따라서 `mo.list("shot")`은
+`shot01.jpeg`를 찾고, 폴더 경계를 원하면 위처럼 trailing slash를 붙입니다.
 
 `recursive=False`로 두면 디렉터리 한 단계만 보여 주고, 그 아래는 prefix
 하나로 묶여서 나옵니다 (S3의 common prefix 동작).

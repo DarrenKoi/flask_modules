@@ -153,7 +153,9 @@ for err in errors:
 ```
 
 `delete_many`는 한 번의 요청으로 여러 객체를 지웁니다. 반환값은 실패한
-항목들만 들어 있는 list입니다 (성공은 조용히 끝남).
+항목들만 들어 있는 list입니다 (성공은 조용히 끝남). 짧은 key와
+`mo.list()`가 반환한 full `object_name`을 모두 받으므로 목록 결과를 그대로
+넘겨도 default prefix가 두 번 붙지 않습니다.
 
 ### 특정 prefix 전체 삭제
 
@@ -234,31 +236,9 @@ if old_tmp:
 더 감쌀 필요는 형식적이지만, 0건일 때 print 같은 후속 동작을 분기하기엔
 편합니다.
 
-`object_name`은 default_prefix가 이미 붙은 *full key*입니다.
-`delete_many`는 다시 `_resolve_key`를 거치므로, 풀어 보면
-`2067928/2067928/...` 가 될 수도 있겠다고 의심이 들 텐데 — 실제로는
-`object_name`이 절대 키이고 wrapper의 `delete_many`는 그대로 쓰고 싶을
-때 `bucket=`만 넘기는 식이 가장 안전합니다. 즉:
-
-```python
-# 안전한 형태: prefix 합성을 우회하기 위해 use_prefix(None)로 잠시 비움
-mo.use_prefix(None)
-try:
-    mo.delete_many(old_tmp)
-finally:
-    mo.use_prefix("2067928/")
-```
-
-또는 prefix가 붙기 전 *짧은* 키를 직접 만들어서 넘깁니다.
-
-```python
-short_keys = [
-    obj.object_name.removeprefix("2067928/")
-    for obj in mo.list("scratch/")
-    if obj.object_name.endswith(".tmp")
-]
-mo.delete_many(short_keys)
-```
+`object_name`은 default prefix가 이미 붙은 *full key*이지만 `delete_many`가
+이를 인식하므로 위 `old_tmp`를 그대로 넘기면 됩니다. 직접 알고 있는 짧은 key도
+기존처럼 default prefix와 합성됩니다.
 
 ## Copy / Move
 

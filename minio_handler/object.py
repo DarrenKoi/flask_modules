@@ -387,11 +387,28 @@ class MinioObject(MinioBase):
         *,
         bucket: str | None = None,
     ) -> list[Any]:
-        """Delete multiple objects in one request. Returns any error entries."""
+        """Delete multiple objects in one request. Returns any error entries.
+
+        Keys may be relative to ``default_prefix`` or full ``object_name``
+        values returned by :meth:`list`.
+        """
 
         bucket_name = self._resolve_bucket(bucket)
         delete_object = _delete_object_class()
-        targets = [delete_object(self._resolve_key(k)) for k in keys]
+        active_prefix = (
+            f"{self.default_prefix.rstrip('/')}/"
+            if self.default_prefix
+            else None
+        )
+        targets = []
+        for key in keys:
+            cleaned_key = key.lstrip("/")
+            full_key = (
+                cleaned_key
+                if active_prefix and cleaned_key.startswith(active_prefix)
+                else self._resolve_key(cleaned_key)
+            )
+            targets.append(delete_object(full_key))
         if not targets:
             return []
         return list(self.client.remove_objects(bucket_name, targets))
@@ -418,9 +435,10 @@ class MinioObject(MinioBase):
 
         bucket_name = self._resolve_bucket(bucket)
         delete_object = _delete_object_class()
+        listing_prefix = prefix.rstrip("/") + "/"
         targets = [
             delete_object(obj.object_name)
-            for obj in self.list(prefix, bucket=bucket, recursive=True)
+            for obj in self.list(listing_prefix, bucket=bucket, recursive=True)
         ]
         if not targets:
             return []
@@ -454,9 +472,10 @@ class MinioObject(MinioBase):
 
         bucket_name = self._resolve_bucket(bucket)
         delete_object = _delete_object_class()
+        listing_prefix = prefix.rstrip("/") + "/" if prefix else prefix
         targets = [
             delete_object(obj.object_name)
-            for obj in self.list(prefix, bucket=bucket, recursive=True)
+            for obj in self.list(listing_prefix, bucket=bucket, recursive=True)
             if predicate(obj.object_name)
         ]
         if not targets:
@@ -627,19 +646,30 @@ class MinioObject(MinioBase):
         recursive: bool = True,
         start_after: str | None = None,
     ) -> Iterator[Any]:
-        """Yield objects under ``prefix`` (combined with the default prefix)."""
+        """Yield objects matching ``prefix`` (combined with the default prefix).
+
+        ``prefix`` follows the S3 string-prefix contract exactly. Use
+        ``"folder/"`` for a path boundary or ``"shot"`` to match names such as
+        ``shot01.jpeg``.
+        """
 
         bucket_name = self._resolve_bucket(bucket)
-        scoped_prefix = self._resolve_key(prefix) if prefix else self.default_prefix
+        if prefix is None:
+            scoped_prefix = (
+                f"{self.default_prefix.rstrip('/')}/"
+                if self.default_prefix
+                else None
+            )
+        else:
+            scoped_prefix = self._resolve_key(prefix)
 
         kwargs: dict[str, Any] = {
             "bucket_name": bucket_name,
             "recursive": recursive,
         }
         if scoped_prefix:
-            kwargs["prefix"] = scoped_prefix.rstrip("/") + "/"
+            kwargs["prefix"] = scoped_prefix
         if start_after is not None:
             kwargs["start_after"] = start_after
 
         return self.client.list_objects(**kwargs)
-

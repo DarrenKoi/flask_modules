@@ -1,6 +1,7 @@
 import io
 import unittest
 from datetime import date
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from minio_handler import DateFolder, DeleteOlderResult, MinioObject
@@ -53,6 +54,52 @@ class MinioObjectSafetyTests(unittest.TestCase):
 
         client.list_objects.assert_not_called()
         client.remove_objects.assert_not_called()
+
+    def test_delete_many_accepts_full_keys_returned_by_list(self) -> None:
+        client = Mock()
+        client.remove_objects.return_value = []
+        service = MinioObject(
+            client=client,
+            bucket="bucket",
+            prefix="measurements",
+        )
+
+        with patch(
+            "minio_handler.object._delete_object_class",
+            return_value=lambda name: SimpleNamespace(name=name),
+        ):
+            service.delete_many(
+                [
+                    "measurements/shot01.jpeg",
+                    "measurements/sub/shot02.jpeg",
+                    "shot03.jpeg",
+                ]
+            )
+
+        _, targets = client.remove_objects.call_args.args
+        self.assertEqual(
+            [target.name for target in targets],
+            [
+                "measurements/shot01.jpeg",
+                "measurements/sub/shot02.jpeg",
+                "measurements/shot03.jpeg",
+            ],
+        )
+
+    def test_list_keeps_explicit_name_prefix_without_adding_slash(self) -> None:
+        client = Mock()
+        service = MinioObject(
+            client=client,
+            bucket="bucket",
+            prefix="measurements",
+        )
+
+        service.list("shot")
+
+        self.assertEqual(
+            client.list_objects.call_args.kwargs["prefix"],
+            "measurements/shot",
+        )
 
 
 class MinioGetManyTests(unittest.TestCase):
