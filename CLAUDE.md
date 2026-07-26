@@ -60,5 +60,6 @@ Env vars read by the modules — keep this list in sync if you add new ones:
 - **MongoDB** (`url_shortner`): `MONGODB_HOST`, `MONGODB_PORT`, `MONGODB_USER`, `MONGODB_PASSWORD`, `MONGODB_DATABASE`, `MONGODB_COLLECTION`, `MONGODB_AUTH_SOURCE`, `MONGODB_TIMEOUT_MS`, `MONGODB_MAX_POOL_SIZE`
 - **Redis** (`url_shortner`): `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD`, `REDIS_SSL`, `REDIS_TIMEOUT`, `REDIS_TTL`
 - **URL shortener app** (`url_shortner`): `URLSHORTNER_BASE_URL` (origin used to render `short_url` in responses), `URLSHORTNER_ANALYTICS_INDEX` (OpenSearch click-events index, default `url_shortner_clicks`)
+- **FTP proxy host** (`ftp_handler.proxy.flask_proxy`): `FTP_PROXY_FTP_USER`, `FTP_PROXY_FTP_PASSWORD`, optional `FTP_PROXY_TOKEN`, and `FTP_PROXY_PORT`
 
 Run the shortener locally with `FLASK_APP=url_shortner.app:create_app flask run` once Mongo/Redis/OpenSearch env vars are set.

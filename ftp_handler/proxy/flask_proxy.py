@@ -18,7 +18,7 @@ Mount it on an EXISTING Flask app as one blueprint among many:
 Routes carry the ``_sknn_v3`` suffix so they don't collide with paths already
 used by the host app:
     POST /download_sknn_v3   request JSON:
-        {"user","password","port","max_concurrency","connect_timeout",
+        {"port","max_concurrency","connect_timeout",
          "host_timeout","passive",
          "specs":[{"host","files":[...],"listings":[{"remote_dir","pattern"}]}]}
     200 response JSON:
@@ -38,10 +38,13 @@ used by the host app:
 
 Auth: if env FTP_PROXY_TOKEN is set, requests must carry
 ``Authorization: Bearer <token>`` or get 401. Always serve behind HTTPS in
-production — the FTP password and file bytes cross this connection.
+production — file bytes cross this connection. Equipment FTP credentials stay
+on the proxy host in ``FTP_PROXY_FTP_USER`` / ``FTP_PROXY_FTP_PASSWORD``.
 
 Standalone run (without an existing app):
     pip install flask
+    set FTP_PROXY_FTP_USER=ftpuser
+    set FTP_PROXY_FTP_PASSWORD=ftppass
     set FTP_PROXY_TOKEN=secret    # PowerShell: $env:FTP_PROXY_TOKEN="secret"
     python flask_proxy.py                           # serves 0.0.0.0:8080
 """
@@ -123,14 +126,15 @@ def _unauthorized():
 def _downloader_from(body: dict) -> FtpFleetDownloader:
     """Build the FtpFleetDownloader from the request body's tuning.
 
-    Same tuning the client passes, so proxy-side behavior matches what a direct
-    FtpFleetDownloader would have done on the client. host_timeout default 45s
-    stays under the host app's harakiri=60 so the downloader's own backstop fires
-    before uWSGI kills the request. See ADR 0001.
+    FTP credentials come from the proxy host's environment and never cross the
+    client HTTP hop. The remaining tuning comes from the client so proxy-side
+    behavior matches the direct adapter. host_timeout default 45s stays under
+    the host app's harakiri=60 so the downloader's own backstop fires before
+    uWSGI kills the request. See ADR 0001.
     """
     return FtpFleetDownloader(
-        user=body["user"],
-        password=body["password"],
+        user=os.environ["FTP_PROXY_FTP_USER"],
+        password=os.environ["FTP_PROXY_FTP_PASSWORD"],
         port=body.get("port", 21),
         max_concurrency=body.get("max_concurrency", 48),
         connect_timeout=body.get("connect_timeout", 8.0),

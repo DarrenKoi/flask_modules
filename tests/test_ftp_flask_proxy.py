@@ -40,6 +40,7 @@ from fleet_downloader import HostSpec, ListDir, UploadFile, UploadSpec  # noqa: 
 
 class FakeFTP:
     scripts: dict = {}
+    logins: list[tuple[str, str]] = []
 
     def __init__(self, timeout=None):
         self.host = None
@@ -60,7 +61,7 @@ class FakeFTP:
             raise err
 
     def login(self, user, passwd):
-        pass
+        self.logins.append((user, passwd))
 
     def set_pasv(self, value):
         pass
@@ -141,11 +142,17 @@ def _seam_params(func):
 class FtpProxyPairTests(unittest.TestCase):
     def setUp(self) -> None:
         FakeFTP.scripts = {}
+        FakeFTP.logins = []
         os.environ.pop("FTP_PROXY_TOKEN", None)
+        os.environ["FTP_PROXY_FTP_USER"] = "proxy-user"
+        os.environ["FTP_PROXY_FTP_PASSWORD"] = "proxy-password"
 
     def tearDown(self) -> None:
         FakeFTP.scripts = {}
+        FakeFTP.logins = []
         os.environ.pop("FTP_PROXY_TOKEN", None)
+        os.environ.pop("FTP_PROXY_FTP_USER", None)
+        os.environ.pop("FTP_PROXY_FTP_PASSWORD", None)
 
     def _make_dl(self, token, **kw):
         # proxy_url/token are module constants now (the seam keeps the
@@ -197,6 +204,22 @@ class FtpProxyPairTests(unittest.TestCase):
         report = self._download([HostSpec("h1", files=["/log"])])
         self.assertEqual(report.grouped(), {"h1": {"/log": b"hello"}})
         self.assertEqual(report.ng, 0)
+
+    def test_proxy_payload_omits_ftp_credentials(self):
+        downloader = self._make_dl(token=None)
+
+        payload = downloader._payload([HostSpec("h1", files=["/log"])])
+
+        self.assertNotIn("user", payload)
+        self.assertNotIn("password", payload)
+
+    def test_proxy_uses_server_environment_ftp_credentials(self):
+        FakeFTP.scripts = {"h1": {"files": {"/log": b"hello"}}}
+
+        report = self._download([HostSpec("h1", files=["/log"])])
+
+        self.assertEqual(report.ng, 0)
+        self.assertEqual(FakeFTP.logins, [("proxy-user", "proxy-password")])
 
     def test_listing_through_proxy(self):
         FakeFTP.scripts = {

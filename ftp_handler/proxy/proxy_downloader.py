@@ -32,6 +32,10 @@ the top of this file for your deployment:
     PROXY_URL    e.g. "https://proxy.host:8080"   (default the SEM fileloader webapp)
     PROXY_TOKEN  bearer-token string the proxy enforces, or None for no auth
 
+The proxy host reads the equipment FTP credentials from
+``FTP_PROXY_FTP_USER`` / ``FTP_PROXY_FTP_PASSWORD``. They are never serialized
+into the client's HTTP request body.
+
 Run: pip install requests
 """
 
@@ -317,8 +321,6 @@ class FtpFleetDownloader:
 
     def _tuning(self) -> dict:
         return {
-            "user": self.user,
-            "password": self.password,
             "port": self.port,
             "max_concurrency": self.max_concurrency,
             "connect_timeout": self.connect_timeout,
