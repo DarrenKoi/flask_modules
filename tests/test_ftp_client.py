@@ -290,6 +290,12 @@ class NormalizeListingTests(unittest.TestCase):
             ["/MEAS/a.dat"],
         )
 
+    def test_normalize_listing_preserves_relative_subdirectories(self):
+        self.assertEqual(
+            _normalize_listing(["sub/d.dat"], "/MEAS"),
+            ["/MEAS/sub/d.dat"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
