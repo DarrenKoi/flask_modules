@@ -34,28 +34,6 @@ bp = Blueprint("schedule", __name__)
 SCHEDULE_TOKEN = ""
 TOKEN_HEADER = "X-API-Token"
 
-def slot_minute(index: int, *, slots: int, period: int = 60) -> int:
-    """Minute for job ``index`` of ``slots``, spread evenly across ``period``.
-
-    ``slot_minute(2, slots=6)`` -> 20. Adding a seventh job reshuffles every
-    slot by rule rather than by hand.
-
-    This is a *starting point*, not the goal. Even division knows nothing
-    about runtime, so it spaces a 20-minute job and a 5-minute one
-    identically. Once you can read real durations off the dashboard, placing
-    minutes by hand from those beats this — keep the numbers that measurement
-    gave you and let this fill in for jobs you have not measured yet.
-
-    What it is better than is APScheduler's ``jitter=``, which also smears
-    load but randomly: you cannot tell from the registry which jobs share a
-    minute, cannot reproduce a collision, and cannot line a slow run up
-    against whatever else was in flight. Fixed slots you can read off the
-    page — and whichever way minutes get chosen, CronSlottingTests is what
-    catches two jobs of *different periods* landing on the same instant.
-    """
-    return (index * period) // slots
-
-
 # ── Registry ────────────────────────────────────
 #
 # Four knobs matter, and for jobs that run minutes rather than milliseconds
@@ -64,7 +42,9 @@ def slot_minute(index: int, *, slots: int, period: int = 60) -> int:
 # `minute=`  Cron fires at an exact instant, so two jobs written `minute=0`
 #            start *together*, not "around" the hour. The executor holds
 #            max_workers=4 (extension.py), so the 5th concurrent job queues.
-#            Use slot_minute() to spread; see the staggering note below.
+#            Give every job its own minute; see the staggering note below.
+#            CronSlottingTests catches two jobs of *different periods*
+#            landing on the same instant.
 #
 # `lock_ttl` Orphan-clear window only — a live run re-arms its own TTL, so it
 #            may overrun this freely (see ApiRedisConfig.lock_ttl). Smaller is
@@ -92,7 +72,7 @@ JOB_FUNCTIONS: dict[str, dict[str, Any]] = {
     "task1": {
         "fn": task1,
         # "4-59/5" (:04 :09 :14 …), not "*/5". A plain */5 lands on :00 :05
-        # :10 … which is every slot_minute() boundary below, so it would start
+        # :10 … which hits every ten-minute slot below, so it would start
         # together with hourly_extract, halfhour_sync and intraday_refresh.
         # Phase-shifting keeps the cadence and clears the slots.
         "trigger": CronTrigger(minute="4-59/5"),
@@ -117,7 +97,7 @@ JOB_FUNCTIONS: dict[str, dict[str, Any]] = {
     # entry below.
     "restart_uwsgi": {
         "fn": restart_uwsgi,
-        "trigger": CronTrigger(hour=1, minute=slot_minute(2, slots=6)),
+        "trigger": CronTrigger(hour=1, minute=20),
         "lock_ttl": 60,
         # Reload-the-service action: keep it on the scheduler's clock only.
         # Reachable manual dispatch would let any caller bounce the process.
@@ -126,19 +106,19 @@ JOB_FUNCTIONS: dict[str, dict[str, Any]] = {
     "purge_old_logs": {
         "fn": purge_old_logs,
         # An hour after restart_uwsgi, which rolls today's log file.
-        "trigger": CronTrigger(hour=2, minute=slot_minute(2, slots=6)),
+        "trigger": CronTrigger(hour=2, minute=20),
         "lock_ttl": 300,
         "manual_dispatch": True,
     },
     # ── Reference entries ───────────────────────
     # Mock bodies (api/tasks/example_jobs.py), real scheduling shapes. These
-    # are the cases a fleet of 5-20 minute jobs runs into. Six slots, so
-    # slot_minute(i, slots=6) gives :00 :10 :20 :30 :40 :50.
+    # are the cases a fleet of 5-20 minute jobs runs into. Minutes are
+    # hand-slotted on a ten-minute grid: :00 :10 :20 :30 :40 :50.
     "hourly_extract": {
         "fn": hourly_extract,
         # 15-20 min, hourly. Longest job takes the first slot so it owns a
         # thread before the shorter ones arrive.
-        "trigger": CronTrigger(minute=slot_minute(0, slots=6)),
+        "trigger": CronTrigger(minute=0),
         # One interval. A crash costs exactly one run, never two.
         "lock_ttl": 3600,
         # Generous: worth running 15 min late, and it can queue behind peers.
@@ -151,7 +131,7 @@ JOB_FUNCTIONS: dict[str, dict[str, Any]] = {
         # 5-10 min, twice an hour. Deliberately NOT ":00,:30" — the top of the
         # hour is the most contended minute in any scheduler, so it sits in
         # its slot and half an hour later.
-        "trigger": CronTrigger(minute=f"{slot_minute(1, slots=6)},{slot_minute(4, slots=6)}"),
+        "trigger": CronTrigger(minute="10,40"),
         "lock_ttl": 1800,
         "misfire_grace_time": 600,
         "manual_dispatch": False,
@@ -174,7 +154,7 @@ JOB_FUNCTIONS: dict[str, dict[str, Any]] = {
         "fn": daily_rollup,
         # 20 min, nightly, off-peak and clear of restart_uwsgi (1 AM) and
         # purge_old_logs (2 AM).
-        "trigger": CronTrigger(hour=3, minute=slot_minute(2, slots=6)),
+        "trigger": CronTrigger(hour=3, minute=20),
         # NOT 86400. The next fire is a day away, so any TTL below that skips
         # zero runs — pick a small one and an orphan clears in minutes
         # instead of blocking tomorrow's run too.
@@ -188,9 +168,7 @@ JOB_FUNCTIONS: dict[str, dict[str, Any]] = {
         "fn": intraday_refresh,
         # 5 min, but only when anyone is looking. Restricting the window is
         # free load shedding: 14 fires a day instead of 96.
-        "trigger": CronTrigger(
-            day_of_week="mon-fri", hour="8-19", minute=slot_minute(3, slots=6)
-        ),
+        "trigger": CronTrigger(day_of_week="mon-fri", hour="8-19", minute=30),
         "lock_ttl": 3600,
         "misfire_grace_time": 600,
         "manual_dispatch": False,
@@ -199,9 +177,7 @@ JOB_FUNCTIONS: dict[str, dict[str, Any]] = {
         "fn": weekly_compaction,
         # 20+ min, Sunday pre-dawn. Weekly work wants the emptiest hour it can
         # get, because a long job at a busy minute blocks a thread for peers.
-        "trigger": CronTrigger(
-            day_of_week="sun", hour=4, minute=slot_minute(5, slots=6)
-        ),
+        "trigger": CronTrigger(day_of_week="sun", hour=4, minute=50),
         # Same reasoning as daily_rollup: interval is a week, so keep the
         # orphan window short.
         "lock_ttl": 600,
