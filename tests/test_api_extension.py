@@ -16,9 +16,38 @@ from api.extension import (
 )
 
 
+def make_lock_client(**attrs: object) -> MagicMock:
+    """Mock Redis client that redis-py's ``Lock`` can actually drive.
+
+    ``Lock.acquire`` runs the token through ``client.get_encoder()``, so the
+    mock needs a real ``Encoder`` — otherwise the token reaching SET is a
+    MagicMock and nothing about the stored value is observable.
+    """
+    from redis.connection import Encoder
+
+    client = MagicMock()
+    client.get_encoder.return_value = Encoder("utf-8", "strict", False)
+    client.pipeline.return_value.__enter__.return_value = MagicMock()
+    for key, value in attrs.items():
+        setattr(client, key, value)
+    return client
+
+
+def reset_lock_scripts() -> None:
+    """Un-cache redis-py's Lua scripts, which live on the ``Lock`` CLASS.
+
+    ``Lock.register_scripts`` only registers when the class attribute is
+    still None, so without this the first mock client in a session stays
+    bound for every later test and their script assertions read a stale mock.
+    """
+    from redis.lock import Lock
+
+    Lock.lua_release = Lock.lua_extend = Lock.lua_reacquire = None
+
+
 def _make_logger(client: MagicMock | None = None) -> tuple[TaskLogger, MagicMock, MagicMock]:
     """Build a TaskLogger backed by a mock client + mock pipeline."""
-    client = client or MagicMock()
+    client = client if client is not None else make_lock_client()
     pipe = MagicMock()
     client.pipeline.return_value.__enter__.return_value = pipe
     return TaskLogger(client, "LK", 3), client, pipe
@@ -63,8 +92,13 @@ class ApiRedisConfigTests(unittest.TestCase):
 
 class RedisLockTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.client = MagicMock()
-        self.release = self.client.register_script.return_value
+        reset_lock_scripts()
+        self.client = make_lock_client()
+        # Populated by Lock.register_scripts() on first construction.
+        self.scripts = self.client.register_script.return_value
+
+    def _release_calls(self) -> list:
+        return [c for c in self.scripts.call_args_list if c.kwargs.get("keys") == ["k"]]
 
     def test_runs_wrapped_fn_when_lock_acquired(self) -> None:
         self.client.set.return_value = True
@@ -73,27 +107,28 @@ class RedisLockTests(unittest.TestCase):
         self.assertEqual(wrapped("a", b=1), "result")
         args, kwargs = self.client.set.call_args
         self.assertEqual(args[0], "k")
-        self.assertIsInstance(args[1], str)
         self.assertTrue(kwargs.get("nx"))
-        self.assertEqual(kwargs.get("ex"), 30)
+        # Lock uses px (milliseconds), not ex (seconds).
+        self.assertEqual(kwargs.get("px"), 30000)
         token = args[1]
+        # The stored value is our owner payload, encoded to bytes by redis-py.
+        self.assertEqual(json.loads(token)["pid"], extension.os.getpid())
         inner.assert_called_once_with("a", b=1)
         self.client.delete.assert_not_called()
-        self.release.assert_called_once_with(keys=["k"], args=[token], client=self.client)
+        self.scripts.assert_called_once_with(keys=["k"], args=[token], client=self.client)
 
     def test_skips_when_lock_held(self) -> None:
-        self.client.set.return_value = False
+        self.client.set.return_value = None  # SET NX returns nil when held
         inner = MagicMock()
         inner.__name__ = "task_under_lock"
         wrapped = redis_lock(self.client, key="k", ttl=30)(inner)
         self.assertIsNone(wrapped())
         inner.assert_not_called()
-        self.release.assert_not_called()
+        self.scripts.assert_not_called()
 
     def test_invokes_on_skip_callback_with_holder_info(self) -> None:
-        self.client.set.return_value = False
-        pipe = MagicMock()
-        self.client.pipeline.return_value.__enter__.return_value = pipe
+        self.client.set.return_value = None
+        pipe = self.client.pipeline.return_value.__enter__.return_value
         pipe.execute.return_value = [
             json.dumps({"host": "web-2", "pid": 41, "acquired": "2026-07-27T05:00:00+00:00"}),
             120,
@@ -114,7 +149,45 @@ class RedisLockTests(unittest.TestCase):
         wrapped = redis_lock(self.client, key="k", ttl=30)(inner)
         with self.assertRaises(RuntimeError):
             wrapped()
-        self.release.assert_called_once()
+        self.scripts.assert_called_once()
+
+    def test_swallows_lost_ownership_on_release(self) -> None:
+        # The key expired mid-run and someone else owns it: redis-py raises
+        # LockNotOwnedError. There is nothing of ours to delete, and the task
+        # already succeeded — it must not surface as a job failure.
+        self.client.set.return_value = True
+        self.scripts.return_value = 0  # CAS says: not yours
+        wrapped = redis_lock(self.client, key="k", ttl=30)(MagicMock(return_value="ok"))
+        self.assertEqual(wrapped(), "ok")
+
+    def test_watchdog_thread_can_extend_the_lock(self) -> None:
+        # Guards thread_local=False. redis-py's default stashes the
+        # acquisition token in threading.local(), so the renewal thread would
+        # find none and extend() would raise LockError on every tick — the
+        # lock would then quietly expire mid-run instead of being renewed.
+        self.client.set.return_value = True
+        captured: dict = {}
+        errors: list[Exception] = []
+
+        def fake_start(lock, ttl):
+            captured["lock"] = lock
+            return threading.Event()
+
+        def job() -> None:
+            def tick() -> None:
+                try:
+                    captured["lock"].extend(30, replace_ttl=True)
+                except Exception as exc:  # noqa: BLE001 - recorded, then asserted
+                    errors.append(exc)
+
+            thread = threading.Thread(target=tick)
+            thread.start()
+            thread.join()
+
+        with patch.object(extension, "_start_renewal", fake_start):
+            redis_lock(self.client, key="k", ttl=30)(job)()
+
+        self.assertEqual(errors, [])
 
     def test_unique_token_per_acquisition(self) -> None:
         # Two acquisitions must mint different tokens so a stale wrapper
@@ -130,7 +203,7 @@ class RedisLockTests(unittest.TestCase):
     def test_starts_daemon_renewal_thread_and_stops_it_before_release(self) -> None:
         self.client.set.return_value = True
         order: list[str] = []
-        self.release.side_effect = lambda **kw: order.append("release")
+        self.scripts.side_effect = lambda **kw: order.append("release") or 1
 
         with patch.object(extension.threading, "Thread") as mock_thread:
             mock_thread.return_value.start.side_effect = lambda: order.append("start")
@@ -140,9 +213,9 @@ class RedisLockTests(unittest.TestCase):
         kwargs = mock_thread.call_args.kwargs
         self.assertTrue(kwargs["daemon"])
         self.assertEqual(kwargs["target"], extension._renew_until_stopped)
-        self.assertEqual(kwargs["args"][1], "k")
-        self.assertEqual(kwargs["args"][3], 30)
-        stop = kwargs["args"][4]
+        lock, ttl, stop = kwargs["args"]
+        self.assertEqual(lock.name, "k")
+        self.assertEqual(ttl, 30)
         # The watchdog must be told to stop BEFORE the key is deleted,
         # otherwise it could re-EXPIRE a lock that no longer has an owner.
         self.assertTrue(stop.is_set())
@@ -201,8 +274,8 @@ class DescribeLockHolderTests(unittest.TestCase):
 
 class RenewUntilStoppedTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.client = MagicMock()
-        self.renew = self.client.register_script.return_value
+        self.lock = MagicMock(name="lock")
+        self.lock.name = "k"
 
     def _stop_after(self, ticks: int) -> MagicMock:
         """A stop event that lets ``ticks`` renewals through, then halts."""
@@ -211,38 +284,36 @@ class RenewUntilStoppedTests(unittest.TestCase):
         return stop
 
     def test_rearms_ttl_each_tick_until_stopped(self) -> None:
-        self.renew.return_value = 1
-        extension._renew_until_stopped(
-            self.client, "k", "tok", 30, self._stop_after(2), self.renew
-        )
-        self.assertEqual(self.renew.call_count, 2)
-        self.renew.assert_called_with(keys=["k"], args=["tok", 30], client=self.client)
+        extension._renew_until_stopped(self.lock, 30, self._stop_after(2))
+        self.assertEqual(self.lock.extend.call_count, 2)
+        # replace_ttl=True is load-bearing: the default ADDS to the remaining
+        # ttl, so each tick would push the expiry further out and a killed
+        # process would strand the lock far beyond ttl.
+        self.lock.extend.assert_called_with(30, replace_ttl=True)
 
     def test_renews_at_one_third_of_ttl(self) -> None:
         stop = self._stop_after(1)
-        extension._renew_until_stopped(self.client, "k", "tok", 300, stop, self.renew)
+        extension._renew_until_stopped(self.lock, 300, stop)
         stop.wait.assert_called_with(100)
 
     def test_renew_interval_never_drops_below_one_second(self) -> None:
         stop = self._stop_after(1)
-        extension._renew_until_stopped(self.client, "k", "tok", 2, stop, self.renew)
+        extension._renew_until_stopped(self.lock, 2, stop)
         stop.wait.assert_called_with(1)
 
     def test_stops_when_ownership_lost(self) -> None:
-        # CAS returned 0: the key expired and someone else owns it now.
-        # Renewing again would extend a stranger's lock.
-        self.renew.return_value = 0
-        extension._renew_until_stopped(
-            self.client, "k", "tok", 30, self._stop_after(5), self.renew
-        )
-        self.assertEqual(self.renew.call_count, 1)
+        # The key expired and someone else owns it now; redis-py raises
+        # LockNotOwnedError. Renewing again would extend a stranger's lock.
+        from redis.exceptions import LockNotOwnedError
+
+        self.lock.extend.side_effect = LockNotOwnedError("gone")
+        extension._renew_until_stopped(self.lock, 30, self._stop_after(5))
+        self.assertEqual(self.lock.extend.call_count, 1)
 
     def test_keeps_renewing_after_a_transient_redis_error(self) -> None:
-        self.renew.side_effect = [RuntimeError("blip"), 1]
-        extension._renew_until_stopped(
-            self.client, "k", "tok", 30, self._stop_after(2), self.renew
-        )
-        self.assertEqual(self.renew.call_count, 2)
+        self.lock.extend.side_effect = [RuntimeError("blip"), True]
+        extension._renew_until_stopped(self.lock, 30, self._stop_after(2))
+        self.assertEqual(self.lock.extend.call_count, 2)
 
 
 class TaskLoggerRecordTests(unittest.TestCase):

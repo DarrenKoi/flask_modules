@@ -23,7 +23,18 @@ def _build_test_app(test_case, *, lock_held: bool = False, redis_ok: bool = True
     cfg = ApiRedisConfig()
     app.config["API_REDIS_CONFIG"] = cfg
 
+    # redis-py's Lock runs the token through client.get_encoder(), and caches
+    # its Lua scripts on the Lock CLASS — reset so each test binds its own
+    # mock. (Kept local rather than shared with test_api_extension: unittest
+    # discovery imports these modules under different names depending on how
+    # the suite is invoked, so a cross-module import breaks one of them.)
+    from redis.connection import Encoder
+    from redis.lock import Lock
+
+    Lock.lua_release = Lock.lua_extend = Lock.lua_reacquire = None
+
     lock_client = MagicMock()
+    lock_client.get_encoder.return_value = Encoder("utf-8", "strict", False)
     lock_client.set.return_value = not lock_held
     # Default: heartbeat key present, so /health reports overall=ok. Tests that
     # need to simulate a dead scheduler override this with lock_client.get.return_value = None.
@@ -108,11 +119,14 @@ class InitJobsTests(unittest.TestCase):
         self.assertEqual(set(app.config["WRAPPED_JOBS"]), set(schedule.JOB_FUNCTIONS))
 
     def _ttl_used_by(self, app, lock_client, job: str) -> int:
-        """Invoke a wrapped job and report the TTL it passed to SET."""
+        """Invoke a wrapped job and report the TTL in seconds it locked with.
+
+        redis-py's Lock sets expiry in milliseconds via ``px``.
+        """
         lock_client.set.reset_mock()
         lock_client.set.return_value = True
         app.config["WRAPPED_JOBS"][job]()
-        return lock_client.set.call_args.kwargs["ex"]
+        return lock_client.set.call_args.kwargs["px"] // 1000
 
     def test_per_task_lock_ttls_propagate(self) -> None:
         app, _, lock_client, _ = _build_test_app(self)

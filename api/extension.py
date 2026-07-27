@@ -258,34 +258,13 @@ def _record_is_older_than(rec: dict[str, Any], cutoff: datetime) -> bool:
     return ts < cutoff
 
 
-# Compare-and-delete: only release the lock if we still own it. Without this
-# guard a task that overruns its TTL would DEL whoever acquired the key next,
-# breaking mutual exclusion.
-_LOCK_RELEASE_SCRIPT = (
-    "if redis.call('get', KEYS[1]) == ARGV[1] then "
-    "  return redis.call('del', KEYS[1]) "
-    "else "
-    "  return 0 "
-    "end"
-)
-
-# Same CAS guard, but pushes the expiry out instead of deleting. Returned 0
-# means we no longer own the key, so the caller must stop renewing.
-_LOCK_RENEW_SCRIPT = (
-    "if redis.call('get', KEYS[1]) == ARGV[1] then "
-    "  return redis.call('expire', KEYS[1], ARGV[2]) "
-    "else "
-    "  return 0 "
-    "end"
-)
-
 def lock_owner_token() -> str:
     """Mint this acquisition's lock value: identity plus a uniqueness nonce.
 
-    Doubles as the CAS token — ``_LOCK_RELEASE_SCRIPT`` compares the stored
-    value byte-for-byte, so any unique string works, and packing the holder's
-    identity in means a contender that loses the race can report *who* beat
-    it instead of a bare "lock held".
+    Handed to ``Lock.acquire(token=...)`` as the key's value. redis-py's
+    release/extend scripts compare it byte-for-byte, so any unique string
+    works — packing the holder's identity in means a contender that loses
+    the race can report *who* beat it instead of a bare "lock held".
     """
     return json.dumps(
         {
@@ -332,15 +311,8 @@ def describe_lock_holder(client: Any, key: str) -> dict[str, Any]:
     return info
 
 
-def _renew_until_stopped(
-    client: Any,
-    key: str,
-    token: str,
-    ttl: int,
-    stop: threading.Event,
-    renew: Any,
-) -> None:
-    """Re-arm ``key``'s TTL every ``ttl // 3`` seconds until ``stop`` is set.
+def _renew_until_stopped(lock: Any, ttl: int, stop: threading.Event) -> None:
+    """Re-arm ``lock``'s TTL every ``ttl // 3`` seconds until ``stop`` is set.
 
     This is what decouples ``ttl`` from job runtime. Without it, ``ttl`` has
     to be a bet on how long the task takes: bet low and the key expires
@@ -349,30 +321,30 @@ def _renew_until_stopped(
     key for the full ``ttl``. Renewing means a live run holds the lock for
     as long as it needs while ``ttl`` shrinks to just the orphan window.
 
-    A renewal returning 0 means we lost ownership (the key already expired
-    and someone else took it). Stop immediately — the release CAS in the
-    wrapper's ``finally`` will correctly no-op too, so we never delete the
-    new owner's lock.
+    ``replace_ttl=True`` is required: ``extend`` otherwise *adds* to the
+    remaining TTL, so every tick would push the expiry further out and a
+    killed process would leave an orphan lasting far beyond ``ttl``.
+
+    ``LockNotOwnedError`` means we lost ownership (the key expired and
+    someone else took it). Stop immediately — the release in the wrapper's
+    ``finally`` raises the same way, so we never delete the new owner's lock.
     """
+    from redis.exceptions import LockNotOwnedError
+
     interval = max(ttl // 3, 1)
     while not stop.wait(interval):
         try:
-            if not renew(keys=[key], args=[token, ttl], client=client):
-                log.warning("lock %s no longer owned; stopping renewal", key)
-                return
+            lock.extend(ttl, replace_ttl=True)
+        except LockNotOwnedError:
+            log.warning("lock %s no longer owned; stopping renewal", lock.name)
+            return
         except Exception:
             # Transient Redis blips shouldn't kill the watchdog — the next
             # tick retries, and there is still ``ttl`` of runway left.
-            log.exception("failed to renew lock %s", key)
+            log.exception("failed to renew lock %s", lock.name)
 
 
-def _start_renewal(
-    client: Any,
-    key: str,
-    token: str,
-    ttl: int,
-    renew: Any,
-) -> threading.Event:
+def _start_renewal(lock: Any, ttl: int) -> threading.Event:
     """Run :func:`_renew_until_stopped` on a daemon thread; return its stop flag.
 
     Daemon so a watchdog can never hold up interpreter shutdown — losing a
@@ -381,8 +353,8 @@ def _start_renewal(
     stop = threading.Event()
     threading.Thread(
         target=_renew_until_stopped,
-        args=(client, key, token, ttl, stop, renew),
-        name=f"lock-renew:{key}",
+        args=(lock, ttl, stop),
+        name=f"lock-renew:{lock.name}",
         daemon=True,
     ).start()
     return stop
@@ -397,31 +369,37 @@ def redis_lock(
 ) -> Callable[[Callable], Callable]:
     """Skip-if-held lock with owner-checked release and TTL renewal.
 
-    Each acquisition mints a fresh owner token (see :func:`lock_owner_token`)
-    stored as the key's value. While the wrapped function runs, a daemon
-    watchdog thread re-arms the TTL, so ``ttl`` bounds only how long an
-    orphaned lock outlives a killed process — not how long the job may take.
-    Release runs a Lua CAS so we only DEL the key when we still hold it.
+    Built on ``redis.lock.Lock``: its release/extend Lua scripts are the
+    owner-checked compare-and-swap this needs, so we only DEL or re-EXPIRE
+    the key while we still hold it. Each acquisition mints a fresh owner
+    token (see :func:`lock_owner_token`) as the key's value. While the
+    wrapped function runs, a daemon watchdog re-arms the TTL, so ``ttl``
+    bounds only how long an orphaned lock outlives a killed process — not
+    how long the job may take.
 
     Optional ``on_skip(holder_info)`` fires when another holder already has
     the lock; ``holder_info`` comes from :func:`describe_lock_holder`. It
     takes no job name — a generic lock has no business naming the caller's
     work, and the caller already knows which job it wrapped.
     """
-    # register_script does no I/O — it just computes the sha1 locally and
-    # defers EVALSHA + NOSCRIPT fallback to call time.
-    release = client.register_script(_LOCK_RELEASE_SCRIPT)
-    renew = client.register_script(_LOCK_RENEW_SCRIPT)
+    from redis.exceptions import LockError
+    from redis.lock import Lock
 
     def decorator(fn: Callable) -> Callable:
         @wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            token = lock_owner_token()
-            if not client.set(key, token, nx=True, ex=ttl):
+            # A fresh Lock per call, and thread_local=False for two separate
+            # reasons. Fresh: Lock stores the acquisition token on itself, so
+            # a shared instance would let concurrent runs clobber each
+            # other's. Not thread-local: the watchdog calls extend() from
+            # another thread, and the default stashes the token in
+            # threading.local() where that thread would find none and raise.
+            lock = Lock(client, key, timeout=ttl, thread_local=False)
+            if not lock.acquire(blocking=False, token=lock_owner_token()):
                 if on_skip is not None:
                     on_skip(describe_lock_holder(client, key))
                 return None
-            stop = _start_renewal(client, key, token, ttl, renew)
+            stop = _start_renewal(lock, ttl)
             try:
                 return fn(*args, **kwargs)
             finally:
@@ -430,10 +408,12 @@ def redis_lock(
                 # renewed orphan behind.
                 stop.set()
                 try:
-                    release(keys=[key], args=[token], client=client)
-                except Exception:
-                    # Same swallow-and-log posture as every other Redis call
-                    # in this module: observability never breaks the task.
+                    lock.release()
+                except LockError:
+                    # Covers LockNotOwnedError — the key expired mid-run and
+                    # someone else owns it now, so there is nothing of ours
+                    # to delete. Swallow-and-log like every other Redis call
+                    # here: observability never breaks the task.
                     log.exception("failed to release lock %s", key)
 
         return wrapper
