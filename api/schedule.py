@@ -5,7 +5,6 @@ emits a single ``skip`` record (not ``start``/``skip``/``end``).
 """
 
 import hmac
-from datetime import datetime, timezone
 from typing import Any, Callable
 
 from apscheduler.triggers.cron import CronTrigger
@@ -18,6 +17,7 @@ from api.extension import (
     read_task_logs,
     redis_lock,
     scheduler,
+    utc_stamp,
 )
 from api.tasks.many_tasks import purge_old_logs, restart_uwsgi, task1, task2
 
@@ -26,14 +26,10 @@ bp = Blueprint("schedule", __name__)
 SCHEDULE_TOKEN = ""
 TOKEN_HEADER = "X-API-Token"
 
-# `lock_ttl` is an ORPHAN-CLEAR WINDOW, not a runtime budget — a running job
-# re-arms its own TTL in the background (extension._renew_until_stopped), so
-# it may overrun this value freely. Size it by "how long may a lock left
-# behind by a killed process block the next run?", i.e. roughly one trigger
-# interval; the cost of a crash is ceil(lock_ttl / interval) skipped runs.
-# Do NOT size it under the job's runtime hoping to avoid skips — that is the
-# one setting that breaks mutual exclusion outright.
-# `lock_ttl=None` falls back to ApiRedisConfig.lock_ttl (default 300s).
+# Size `lock_ttl` at roughly one trigger interval: a crash then costs
+# ceil(lock_ttl / interval) skipped runs and nothing more. A job may overrun
+# it freely — see ApiRedisConfig.lock_ttl for why it is not a runtime budget.
+# Omit the key (or pass None) to inherit that config default (300s).
 # Cron triggers interpret `hour=` in scheduler timezone (Asia/Seoul).
 # `manual_dispatch=False` removes the job from the /jobs/run_job allow list;
 # the scheduler still fires it on the configured trigger via run_registered_job.
@@ -71,47 +67,6 @@ JOB_FUNCTIONS: dict[str, dict[str, Any]] = {
         "manual_dispatch": True,
     },
 }
-
-
-def skip_message(info: dict[str, Any]) -> str:
-    """Render a holder dict from ``describe_lock_holder`` as one Detail line.
-
-    The dashboard's Detail column reads ``error ?? message`` only, so the
-    holder identity has to ride inside ``message`` to be visible. The
-    structured fields are still attached to the record for /jobs/logs.
-
-    Reading a row: a ``holder`` on another host/pid than the scheduler
-    worker means genuine cross-process contention (manual dispatch, a
-    second scheduler during a reload, another deployment). A holder whose
-    pid is gone, with ``held_since`` well in the past, means an orphan left
-    by a killed process — the lock protecting nothing.
-    """
-    holder = info.get("holder")
-    if holder is None:
-        return "lock held"
-    return (
-        f"lock held by {holder} since {info.get('held_since')} "
-        f"({info.get('ttl_remaining')}s ttl left)"
-    )
-
-
-def _wrap(
-    fn: Callable,
-    *,
-    lock_client: Any,
-    task_logger: TaskLogger,
-    key_prefix: str,
-    ttl: int,
-) -> Callable:
-    logged = task_logger.wrap(fn)
-    return redis_lock(
-        lock_client,
-        key=f"{key_prefix}{fn.__name__}",
-        ttl=ttl,
-        on_skip=lambda name, info: task_logger.record(
-            name, "skip", message=skip_message(info), **info
-        ),
-    )(logged)
 
 
 HEARTBEAT_JOB_ID = "_scheduler_heartbeat"
@@ -166,11 +121,7 @@ def write_scheduler_heartbeat() -> None:
         cfg: ApiRedisConfig = app.config["API_REDIS_CONFIG"]
         client = app.config["LOCK_CLIENT"]
         try:
-            client.set(
-                cfg.heartbeat_key,
-                datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                ex=cfg.heartbeat_ttl,
-            )
+            client.set(cfg.heartbeat_key, utc_stamp(), ex=cfg.heartbeat_ttl)
         except Exception:
             # Same swallow-and-log policy as TaskLogger: observability must
             # never crash the scheduler thread.
@@ -190,20 +141,26 @@ def init_jobs(app: Flask, *, register_with_scheduler: bool = True) -> None:
     lock_client = app.config["LOCK_CLIENT"]
     task_logger: TaskLogger = app.config["TASK_LOGGER"]
 
+    # A held lock emits one `skip` record carrying the holder's identity —
+    # wrapping this way (lock outside, logger inside) is what keeps it to a
+    # single record instead of start/skip/end.
+    def on_skip(name: str, info: dict[str, Any]) -> None:
+        task_logger.record(name, "skip", **info)
+
     wrapped: dict[str, Callable] = {}
     for name, spec in JOB_FUNCTIONS.items():
-        ttl = spec["lock_ttl"] if spec["lock_ttl"] is not None else cfg.lock_ttl
-        fn = _wrap(
-            spec["fn"],
-            lock_client=lock_client,
-            task_logger=task_logger,
-            key_prefix=cfg.lock_key_prefix,
-            ttl=ttl,
-        )
-        wrapped[name] = fn
+        wrapped[name] = redis_lock(
+            lock_client,
+            key=f"{cfg.lock_key_prefix}{spec['fn'].__name__}",
+            # `or` not `.get(key, default)`: an explicit `"lock_ttl": None`
+            # must fall back too. Passing None through would reach
+            # `SET ... ex=None`, i.e. a lock with NO expiry — one killed
+            # process would then block the job forever.
+            ttl=spec.get("lock_ttl") or cfg.lock_ttl,
+            on_skip=on_skip,
+        )(task_logger.wrap(spec["fn"]))
         if register_with_scheduler:
-            # Optional per-job scheduler settings. Entries that omit these
-            # keys behave exactly as before (SCHEDULER_JOB_DEFAULTS applies).
+            # Optional per-job scheduler settings.
             optional = {
                 key: spec[key]
                 for key in ("misfire_grace_time", "executor")

@@ -18,9 +18,6 @@ def _build_test_app(test_case, *, lock_held: bool = False, redis_ok: bool = True
     test (cleanup registered on ``test_case``) so route handlers hit the mock
     too — not just ``init_jobs``.
     """
-    # hermetic: each test gets a fresh cache for both Lua scripts
-    extension._release_lock = None
-    extension._renew_lock = None
     template_dir = Path(__file__).resolve().parent.parent / "api" / "templates"
     app = Flask("api_test", template_folder=str(template_dir))
     cfg = ApiRedisConfig()
@@ -92,7 +89,6 @@ class InitJobsTests(unittest.TestCase):
     def test_register_with_scheduler_false_skips_add_job(self) -> None:
         # Non-scheduler uWSGI workers still build WRAPPED_JOBS (for on-demand
         # dispatch) but must not write to the shared Redis job store.
-        extension._release_lock = None
         template_dir = Path(__file__).resolve().parent.parent / "api" / "templates"
         app = Flask("api_test_noreg", template_folder=str(template_dir))
         cfg = ApiRedisConfig()
@@ -111,61 +107,70 @@ class InitJobsTests(unittest.TestCase):
         # Non-scheduler workers still need every wrapped job for /jobs/run_job.
         self.assertEqual(set(app.config["WRAPPED_JOBS"]), set(schedule.JOB_FUNCTIONS))
 
-    def test_per_task_lock_ttls_propagate(self) -> None:
-        # task1 ttl=60, task2 ttl=60, restart_uwsgi ttl=60. We can't directly
-        # inspect the closed-over ttl, but we can invoke each wrapped fn and
-        # check the SET call args.
-        app, _, lock_client, _ = _build_test_app(self)
-        wrapped = app.config["WRAPPED_JOBS"]
-        lock_client.set.return_value = True
-
-        wrapped["task1"]()
-        ttl_task1 = lock_client.set.call_args.kwargs["ex"]
-
+    def _ttl_used_by(self, app, lock_client, job: str) -> int:
+        """Invoke a wrapped job and report the TTL it passed to SET."""
         lock_client.set.reset_mock()
         lock_client.set.return_value = True
-        wrapped["task2"]()
-        ttl_task2 = lock_client.set.call_args.kwargs["ex"]
+        app.config["WRAPPED_JOBS"][job]()
+        return lock_client.set.call_args.kwargs["ex"]
 
-        self.assertEqual(ttl_task1, 60)
-        self.assertEqual(ttl_task2, 60)
+    def test_per_task_lock_ttls_propagate(self) -> None:
+        app, _, lock_client, _ = _build_test_app(self)
+        self.assertEqual(self._ttl_used_by(app, lock_client, "task1"), 60)
+        self.assertEqual(self._ttl_used_by(app, lock_client, "task2"), 60)
+
+    def test_missing_or_null_lock_ttl_falls_back_to_config(self) -> None:
+        # Both spellings must reach cfg.lock_ttl. A None leaking through to
+        # SET ex=None would create a lock with no expiry at all, so one
+        # killed process would block that job permanently.
+        app, _, lock_client, _ = _build_test_app(self)
+        cfg = app.config["API_REDIS_CONFIG"]
+        probe = MagicMock(__name__="ttl_probe")
+        base = {"fn": probe, "trigger": IntervalTrigger(seconds=30)}
+        for spelling, spec in (
+            ("omitted", base),
+            ("explicit None", {**base, "lock_ttl": None}),
+        ):
+            with self.subTest(spelling=spelling):
+                with patch.dict(schedule.JOB_FUNCTIONS, {"ttl_probe": spec}):
+                    schedule.init_jobs(app, register_with_scheduler=False)
+                self.assertEqual(
+                    self._ttl_used_by(app, lock_client, "ttl_probe"), cfg.lock_ttl
+                )
 
 
-class SkipMessageTests(unittest.TestCase):
-    """The dashboard Detail column renders ``error ?? message``, so the lock
-    holder has to be inside the message string to be visible at all."""
+class SkipRecordTests(unittest.TestCase):
+    """A skipped run records the holder as structured fields. The dashboard's
+    detailFor() renders them, so held_since goes through toKst like every
+    other timestamp instead of being pre-formatted here as raw UTC."""
 
-    def test_names_holder_and_remaining_ttl(self) -> None:
-        msg = schedule.skip_message(
-            {
-                "holder": "web-3:812",
-                "held_since": "2026-07-27T05:00:00+00:00",
-                "ttl_remaining": 47,
-            }
-        )
-        self.assertIn("web-3:812", msg)
-        self.assertIn("2026-07-27T05:00:00+00:00", msg)
-        self.assertIn("47s", msg)
-
-    def test_falls_back_when_holder_unknown(self) -> None:
-        # describe_lock_holder returns {} when Redis is unreachable, and just
-        # a ttl for locks written before owner payloads existed.
-        self.assertEqual(schedule.skip_message({}), "lock held")
-        self.assertEqual(schedule.skip_message({"ttl_remaining": 9}), "lock held")
-
-    def test_skip_record_carries_structured_holder_fields(self) -> None:
+    def _skip_record(self, raw_owner: object, ttl: int) -> dict:
         app, _, lock_client, _ = _build_test_app(self, lock_held=True)
         pipe = lock_client.pipeline.return_value.__enter__.return_value
-        pipe.execute.return_value = [
-            json.dumps({"host": "web-3", "pid": 812, "acquired": "2026-07-27T05:00:00+00:00"}),
-            47,
-        ]
+        pipe.execute.return_value = [raw_owner, ttl]
         app.config["WRAPPED_JOBS"]["task1"]()
-        rec = json.loads(pipe.lpush.call_args.args[1])
+        return json.loads(pipe.lpush.call_args.args[1])
+
+    def test_carries_holder_identity_and_remaining_ttl(self) -> None:
+        rec = self._skip_record(
+            json.dumps(
+                {"host": "web-3", "pid": 812, "acquired": "2026-07-27T05:00:00+00:00"}
+            ),
+            47,
+        )
         self.assertEqual(rec["event"], "skip")
+        self.assertEqual(rec["job"], "task1")
         self.assertEqual(rec["holder"], "web-3:812")
+        self.assertEqual(rec["held_since"], "2026-07-27T05:00:00+00:00")
         self.assertEqual(rec["ttl_remaining"], 47)
-        self.assertIn("web-3:812", rec["message"])
+
+    def test_records_skip_even_when_holder_is_unreadable(self) -> None:
+        # A lock written by a pre-upgrade deploy holds a bare uuid hex: no
+        # holder fields, but the skip itself must still reach the dashboard.
+        rec = self._skip_record("deadbeef", 9)
+        self.assertEqual(rec["event"], "skip")
+        self.assertEqual(rec["ttl_remaining"], 9)
+        self.assertNotIn("holder", rec)
 
 
 class HealthRouteTests(unittest.TestCase):

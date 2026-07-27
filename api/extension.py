@@ -35,13 +35,28 @@ if str(ROOT_DIR) not in sys.path:
 log = logging.getLogger(__name__)
 
 
+def utc_stamp() -> str:
+    """Second-precision UTC ISO timestamp — the one time format records use.
+
+    Everything this package writes to Redis is stamped in aware UTC; the
+    dashboard converts to KST at render time (see ``toKst`` in index.html).
+    Storing UTC and displaying local keeps records comparable across hosts
+    while operators still read Seoul time.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 @dataclass(slots=True)
 class ApiRedisConfig:
-    host: str = "localhost"
-    port: int = 6379
+    host: str = "10.156.133.129"
+    port: int = 10108
+    # Everything this app stores is namespaced by the key prefixes below, so
+    # one logical db holds jobs, locks, logs and heartbeat without collision.
+    # A second db would only add a dependency on multi-db support, which
+    # Redis Cluster does not have (SELECT is rejected there) and which the
+    # Redis maintainers treat as a legacy feature.
     db: int = 0
-    lock_db: int = 1
-    password: str | None = None
+    password: str | None = "skewRedis!2"
     ssl: bool = False
     socket_timeout: float = 2.0
     # Orphan-clear window, NOT a runtime budget. A live run re-arms its own
@@ -60,14 +75,24 @@ class ApiRedisConfig:
     heartbeat_ttl: int = 120
     extra_client_kwargs: dict[str, Any] = field(default_factory=dict)
 
-    def to_lock_client_kwargs(self) -> dict[str, Any]:
+    def to_client_kwargs(self, *, decode_responses: bool) -> dict[str, Any]:
+        """Connection posture shared by the lock client and the job store.
+
+        One builder for both so they cannot drift: if only one of them learns
+        about ``ssl``, locks and heartbeat speak TLS while the job store tries
+        bare TCP against the same host and silently loads no jobs.
+
+        ``decode_responses`` is the one honest difference — the lock client
+        reads str, the job store reads pickled bytes — so it's a parameter
+        rather than a second copy of this dict.
+        """
         kwargs: dict[str, Any] = {
             "host": self.host,
             "port": self.port,
-            "db": self.lock_db,
+            "db": self.db,
             "ssl": self.ssl,
             "socket_timeout": self.socket_timeout,
-            "decode_responses": True,
+            "decode_responses": decode_responses,
         }
         if self.password:
             kwargs["password"] = self.password
@@ -89,7 +114,7 @@ def create_lock_client(
         config = ApiRedisConfig()
     if overrides:
         config = replace(config, **overrides)
-    return _redis_client_class()(**config.to_lock_client_kwargs())
+    return _redis_client_class()(**config.to_client_kwargs(decode_responses=True))
 
 
 from flask_apscheduler import APScheduler
@@ -101,22 +126,10 @@ def configure_scheduler(app: Any, config: ApiRedisConfig) -> None:
     from apscheduler.executors.pool import ThreadPoolExecutor
     from apscheduler.jobstores.redis import RedisJobStore
 
-    # Forward the full connection posture (ssl, timeout, extras) so the
-    # job-store client matches the lock client. Otherwise locks + heartbeat
-    # speak TLS while the job store tries a bare TCP connection on the same
-    # host and silently fails to load any jobs.
-    store_kwargs: dict[str, Any] = {
-        "host": config.host,
-        "port": config.port,
-        "db": config.db,
-        "ssl": config.ssl,
-        "socket_timeout": config.socket_timeout,
-        "jobs_key": f"{config.jobstore_key_prefix}jobs",
-        "run_times_key": f"{config.jobstore_key_prefix}run_times",
-    }
-    if config.password:
-        store_kwargs["password"] = config.password
-    store_kwargs.update(config.extra_client_kwargs)
+    # decode_responses=False: RedisJobStore reads back pickled job bytes.
+    store_kwargs = config.to_client_kwargs(decode_responses=False)
+    store_kwargs["jobs_key"] = f"{config.jobstore_key_prefix}jobs"
+    store_kwargs["run_times_key"] = f"{config.jobstore_key_prefix}run_times"
 
     app.config["SCHEDULER_JOBSTORES"] = {"default": RedisJobStore(**store_kwargs)}
     # 2 CPU / 8 GiB cloud env, 4 uWSGI workers → ~2 GiB per worker. Cap the
@@ -156,7 +169,7 @@ class TaskLogger:
 
     def record(self, job: str, event: str, **extra: Any) -> None:
         rec: dict[str, Any] = {
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "ts": utc_stamp(),
             "job": job,
             "event": event,
         }
@@ -257,40 +270,20 @@ _LOCK_RENEW_SCRIPT = (
     "end"
 )
 
-# Module-level Scripts so redis-py caches the SHA and uses EVALSHA + NOSCRIPT
-# fallback automatically. Bound at call time via the ``client=`` kwarg.
-_release_lock: Any = None
-_renew_lock: Any = None
-
-
-def _get_release_script(client: Any) -> Any:
-    global _release_lock
-    if _release_lock is None:
-        _release_lock = client.register_script(_LOCK_RELEASE_SCRIPT)
-    return _release_lock
-
-
-def _get_renew_script(client: Any) -> Any:
-    global _renew_lock
-    if _renew_lock is None:
-        _renew_lock = client.register_script(_LOCK_RENEW_SCRIPT)
-    return _renew_lock
-
-
 def lock_owner_token() -> str:
     """Mint this acquisition's lock value: identity plus a uniqueness nonce.
 
     Doubles as the CAS token — ``_LOCK_RELEASE_SCRIPT`` compares the stored
     value byte-for-byte, so any unique string works, and packing the holder's
     identity in means a contender that loses the race can report *who* beat
-    it instead of a bare "lock held". ``sort_keys`` keeps the encoding stable.
+    it instead of a bare "lock held".
     """
     return json.dumps(
         {
             "token": uuid.uuid4().hex,
             "host": socket.gethostname(),
             "pid": os.getpid(),
-            "acquired": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "acquired": utc_stamp(),
         },
         sort_keys=True,
     )
@@ -319,7 +312,9 @@ def describe_lock_holder(client: Any, key: str) -> dict[str, Any]:
 
     info: dict[str, Any] = {"ttl_remaining": ttl_remaining}
     try:
-        owner = json.loads(raw) if raw else None
+        # Both empty-string and None raise here (ValueError / TypeError), so
+        # a missing or pre-upgrade bare-uuid value lands on owner = None.
+        owner = json.loads(raw)
     except (ValueError, TypeError):
         owner = None
     if isinstance(owner, dict):
@@ -349,10 +344,6 @@ def _renew_until_stopped(
     and someone else took it). Stop immediately — the release CAS in the
     wrapper's ``finally`` will correctly no-op too, so we never delete the
     new owner's lock.
-
-    ``renew`` is passed in rather than looked up here: every concurrent job
-    runs one of these threads, and resolving the cached ``Script`` on the
-    main thread at decoration time keeps them off the module global.
     """
     interval = max(ttl // 3, 1)
     while not stop.wait(interval):
@@ -364,6 +355,28 @@ def _renew_until_stopped(
             # Transient Redis blips shouldn't kill the watchdog — the next
             # tick retries, and there is still ``ttl`` of runway left.
             log.exception("failed to renew lock %s", key)
+
+
+def _start_renewal(
+    client: Any,
+    key: str,
+    token: str,
+    ttl: int,
+    renew: Any,
+) -> threading.Event:
+    """Run :func:`_renew_until_stopped` on a daemon thread; return its stop flag.
+
+    Daemon so a watchdog can never hold up interpreter shutdown — losing a
+    renewal on exit is harmless, the key just expires on its own.
+    """
+    stop = threading.Event()
+    threading.Thread(
+        target=_renew_until_stopped,
+        args=(client, key, token, ttl, stop, renew),
+        name=f"lock-renew:{key}",
+        daemon=True,
+    ).start()
+    return stop
 
 
 def redis_lock(
@@ -385,10 +398,10 @@ def redis_lock(
     already has the lock; ``holder_info`` comes from
     :func:`describe_lock_holder`.
     """
-    from redis.exceptions import RedisError
-
-    release = _get_release_script(client)
-    renew = _get_renew_script(client)
+    # register_script does no I/O — it just computes the sha1 locally and
+    # defers EVALSHA + NOSCRIPT fallback to call time.
+    release = client.register_script(_LOCK_RELEASE_SCRIPT)
+    renew = client.register_script(_LOCK_RENEW_SCRIPT)
 
     def decorator(fn: Callable) -> Callable:
         @wraps(fn)
@@ -398,14 +411,7 @@ def redis_lock(
                 if on_skip is not None:
                     on_skip(fn.__name__, describe_lock_holder(client, key))
                 return None
-            stop = threading.Event()
-            keeper = threading.Thread(
-                target=_renew_until_stopped,
-                args=(client, key, token, ttl, stop, renew),
-                name=f"lock-renew:{key}",
-                daemon=True,
-            )
-            keeper.start()
+            stop = _start_renewal(client, key, token, ttl, renew)
             try:
                 return fn(*args, **kwargs)
             finally:
@@ -415,7 +421,9 @@ def redis_lock(
                 stop.set()
                 try:
                     release(keys=[key], args=[token], client=client)
-                except RedisError:
+                except Exception:
+                    # Same swallow-and-log posture as every other Redis call
+                    # in this module: observability never breaks the task.
                     log.exception("failed to release lock %s", key)
 
         return wrapper

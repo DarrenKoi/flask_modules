@@ -1,6 +1,7 @@
 import json
 import threading
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from api import extension
@@ -11,15 +12,8 @@ from api.extension import (
     lock_owner_token,
     read_task_logs,
     redis_lock,
+    utc_stamp,
 )
-
-
-def _reset_release_script_cache() -> None:
-    """The module caches a single ``Script`` instance per Lua script across
-    calls; reset both between tests so each test sees fresh
-    ``register_script`` calls on its own mock client."""
-    extension._release_lock = None
-    extension._renew_lock = None
 
 
 def _make_logger(client: MagicMock | None = None) -> tuple[TaskLogger, MagicMock, MagicMock]:
@@ -33,9 +27,10 @@ def _make_logger(client: MagicMock | None = None) -> tuple[TaskLogger, MagicMock
 class ApiRedisConfigTests(unittest.TestCase):
     def test_defaults(self) -> None:
         cfg = ApiRedisConfig()
-        self.assertEqual(cfg.host, "localhost")
+        self.assertEqual(cfg.host, "10.156.133.129")
+        self.assertEqual(cfg.port, 10108)
         self.assertEqual(cfg.lock_ttl, 300)
-        self.assertEqual(cfg.lock_db, 1)
+        self.assertEqual(cfg.db, 0)
         self.assertEqual(cfg.jobstore_key_prefix, "api_skewnono:jobs:")
         self.assertEqual(cfg.lock_key_prefix, "api_skewnono:lock:")
         self.assertEqual(cfg.log_list_key, "api_skewnono:logs:tasks")
@@ -46,20 +41,21 @@ class ApiRedisConfigTests(unittest.TestCase):
             host="redis.internal",
             port=6380,
             db=2,
-            lock_db=3,
             lock_ttl=900,
             log_list_max=100,
         )
         self.assertEqual(cfg.host, "redis.internal")
         self.assertEqual(cfg.port, 6380)
         self.assertEqual(cfg.db, 2)
-        self.assertEqual(cfg.lock_db, 3)
         self.assertEqual(cfg.lock_ttl, 900)
         self.assertEqual(cfg.log_list_max, 100)
 
-    def test_to_lock_client_kwargs_uses_lock_db(self) -> None:
-        cfg = ApiRedisConfig(host="h", port=1, db=0, lock_db=7, password="pw")
-        kwargs = cfg.to_lock_client_kwargs()
+    def test_to_client_kwargs_shares_one_db_with_the_jobstore(self) -> None:
+        # Locks, logs and heartbeat live in the same db as the job store —
+        # the key prefixes keep them apart, so nothing depends on Redis
+        # supporting more than db 0.
+        cfg = ApiRedisConfig(host="h", port=1, db=7, password="pw")
+        kwargs = cfg.to_client_kwargs(decode_responses=True)
         self.assertEqual(kwargs["db"], 7)
         self.assertEqual(kwargs["password"], "pw")
         self.assertTrue(kwargs["decode_responses"])
@@ -67,7 +63,6 @@ class ApiRedisConfigTests(unittest.TestCase):
 
 class RedisLockTests(unittest.TestCase):
     def setUp(self) -> None:
-        _reset_release_script_cache()
         self.client = MagicMock()
         self.release = self.client.register_script.return_value
 
@@ -132,13 +127,6 @@ class RedisLockTests(unittest.TestCase):
         tokens = [c.args[1] for c in self.client.set.call_args_list]
         self.assertEqual(len(set(tokens)), 2)
 
-    def test_scripts_are_cached_across_decorators(self) -> None:
-        # register_script should only run once per Lua script (release +
-        # renew); the cached Scripts are reused by every redis_lock(...).
-        redis_lock(self.client, key="a", ttl=30)(MagicMock())
-        redis_lock(self.client, key="b", ttl=30)(MagicMock())
-        self.assertEqual(self.client.register_script.call_count, 2)
-
     def test_starts_daemon_renewal_thread_and_stops_it_before_release(self) -> None:
         self.client.set.return_value = True
         order: list[str] = []
@@ -159,6 +147,15 @@ class RedisLockTests(unittest.TestCase):
         # otherwise it could re-EXPIRE a lock that no longer has an owner.
         self.assertTrue(stop.is_set())
         self.assertEqual(order, ["start", "release"])
+
+
+class UtcStampTests(unittest.TestCase):
+    def test_is_second_precision_aware_utc(self) -> None:
+        # Aware UTC, never naive: the dashboard's toKst() needs the offset to
+        # convert, and a naive string would render 9h off in Seoul.
+        parsed = datetime.fromisoformat(utc_stamp())
+        self.assertEqual(parsed.tzinfo, timezone.utc)
+        self.assertEqual(parsed.microsecond, 0)
 
 
 class LockOwnerTokenTests(unittest.TestCase):
@@ -204,7 +201,6 @@ class DescribeLockHolderTests(unittest.TestCase):
 
 class RenewUntilStoppedTests(unittest.TestCase):
     def setUp(self) -> None:
-        _reset_release_script_cache()
         self.client = MagicMock()
         self.renew = self.client.register_script.return_value
 
@@ -300,11 +296,8 @@ class TaskLoggerWrapTests(unittest.TestCase):
 
 
 class ComposedLockAndLogTests(unittest.TestCase):
-    """The wrapping order in schedule._wrap matters: a held lock must emit only
-    a single ``skip`` record — not ``start``, ``skip``, ``end``."""
-
-    def setUp(self) -> None:
-        _reset_release_script_cache()
+    """The wrapping order in schedule.init_jobs matters: a held lock must emit
+    only a single ``skip`` record — not ``start``, ``skip``, ``end``."""
 
     def test_skip_emits_only_skip(self) -> None:
         logger, client, pipe = _make_logger()
@@ -318,7 +311,7 @@ class ComposedLockAndLogTests(unittest.TestCase):
             client,
             key="k",
             ttl=30,
-            on_skip=lambda name, info: logger.record(name, "skip", message="lock held"),
+            on_skip=lambda name, info: logger.record(name, "skip", **info),
         )(logger.wrap(task))
         wrapped()
 

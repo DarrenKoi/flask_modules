@@ -113,6 +113,22 @@
       return d.toLocaleString('sv-SE', { timeZone: 'Asia/Seoul', hour12: false });
     }
 
+    // Detail column. Records carry structured extras, not pre-formatted
+    // prose, so timestamps in them go through toKst like every other one.
+    // A skip names the lock holder: another host/pid means real cross-process
+    // contention (manual dispatch, a second scheduler during a reload); a
+    // holder whose pid is gone and held_since well in the past is an orphan
+    // left by a killed process.
+    function detailFor(rec) {
+      if (rec.error) return rec.error;
+      if (rec.event === 'skip') {
+        if (!rec.holder) return 'lock held';
+        return `lock held by ${rec.holder} since ${toKst(rec.held_since)}`
+             + ` (${rec.ttl_remaining}s ttl left)`;
+      }
+      return rec.message ?? '';
+    }
+
     function matchesEvent(rec, mode) {
       if (mode === 'all') return true;
       if (mode === 'problems') return rec.event === 'error' || rec.event === 'skip';
@@ -158,7 +174,7 @@
               <td>${escapeHtml(toKst(rec.ts))}</td>
               <td class="event-${escapeHtml(rec.event)}">${escapeHtml(rec.event)}</td>
               <td>${rec.duration_ms != null ? (rec.duration_ms / 1000).toFixed(1) : ''}</td>
-              <td>${escapeHtml(rec.error ?? rec.message ?? '')}</td>
+              <td>${escapeHtml(detailFor(rec))}</td>
             </tr>`).join('')
         : `<tr><td colspan="4"><em class="empty">no records match the event filter</em></td></tr>`;
       return `
