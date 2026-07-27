@@ -18,7 +18,9 @@ def _build_test_app(test_case, *, lock_held: bool = False, redis_ok: bool = True
     test (cleanup registered on ``test_case``) so route handlers hit the mock
     too — not just ``init_jobs``.
     """
-    extension._release_lock = None  # hermetic: each test gets fresh script cache
+    # hermetic: each test gets a fresh cache for both Lua scripts
+    extension._release_lock = None
+    extension._renew_lock = None
     template_dir = Path(__file__).resolve().parent.parent / "api" / "templates"
     app = Flask("api_test", template_folder=str(template_dir))
     cfg = ApiRedisConfig()
@@ -53,11 +55,16 @@ def _build_test_app(test_case, *, lock_held: bool = False, redis_ok: bool = True
 
 
 class InitJobsTests(unittest.TestCase):
-    def test_registers_all_three_jobs(self) -> None:
+    def test_registers_every_job_in_the_registry(self) -> None:
+        # Derived from JOB_FUNCTIONS rather than a hardcoded set: the
+        # behavior under test is "init_jobs registers everything in the
+        # registry", and the registry itself is config that changes per
+        # deployment. A literal set here goes stale the next time a job
+        # is added (it did — purge_old_logs).
         app, _, _, scheduler_mock = _build_test_app(self)
         registered = {call.kwargs["id"]: call.kwargs for call in scheduler_mock.add_job.call_args_list}
         user_jobs = set(registered) - {schedule.HEARTBEAT_JOB_ID}
-        self.assertEqual(user_jobs, {"task1", "task2", "restart_uwsgi"})
+        self.assertEqual(user_jobs, set(schedule.JOB_FUNCTIONS))
         self.assertTrue(registered["task1"]["replace_existing"])
 
     def test_jobs_registered_by_import_path_not_closure(self) -> None:
@@ -101,12 +108,13 @@ class InitJobsTests(unittest.TestCase):
 
         schedule.init_jobs(app, register_with_scheduler=False)
         scheduler_mock.add_job.assert_not_called()
-        self.assertEqual(set(app.config["WRAPPED_JOBS"].keys()), {"task1", "task2", "restart_uwsgi"})
+        # Non-scheduler workers still need every wrapped job for /jobs/run_job.
+        self.assertEqual(set(app.config["WRAPPED_JOBS"]), set(schedule.JOB_FUNCTIONS))
 
     def test_per_task_lock_ttls_propagate(self) -> None:
-        # task1 ttl=60, task2 falls back to config (1200), restart_uwsgi ttl=60.
-        # We can't directly inspect the closed-over ttl, but we can invoke each
-        # wrapped fn and check the SET call args.
+        # task1 ttl=60, task2 ttl=60, restart_uwsgi ttl=60. We can't directly
+        # inspect the closed-over ttl, but we can invoke each wrapped fn and
+        # check the SET call args.
         app, _, lock_client, _ = _build_test_app(self)
         wrapped = app.config["WRAPPED_JOBS"]
         lock_client.set.return_value = True
@@ -120,7 +128,44 @@ class InitJobsTests(unittest.TestCase):
         ttl_task2 = lock_client.set.call_args.kwargs["ex"]
 
         self.assertEqual(ttl_task1, 60)
-        self.assertEqual(ttl_task2, 1200)
+        self.assertEqual(ttl_task2, 60)
+
+
+class SkipMessageTests(unittest.TestCase):
+    """The dashboard Detail column renders ``error ?? message``, so the lock
+    holder has to be inside the message string to be visible at all."""
+
+    def test_names_holder_and_remaining_ttl(self) -> None:
+        msg = schedule.skip_message(
+            {
+                "holder": "web-3:812",
+                "held_since": "2026-07-27T05:00:00+00:00",
+                "ttl_remaining": 47,
+            }
+        )
+        self.assertIn("web-3:812", msg)
+        self.assertIn("2026-07-27T05:00:00+00:00", msg)
+        self.assertIn("47s", msg)
+
+    def test_falls_back_when_holder_unknown(self) -> None:
+        # describe_lock_holder returns {} when Redis is unreachable, and just
+        # a ttl for locks written before owner payloads existed.
+        self.assertEqual(schedule.skip_message({}), "lock held")
+        self.assertEqual(schedule.skip_message({"ttl_remaining": 9}), "lock held")
+
+    def test_skip_record_carries_structured_holder_fields(self) -> None:
+        app, _, lock_client, _ = _build_test_app(self, lock_held=True)
+        pipe = lock_client.pipeline.return_value.__enter__.return_value
+        pipe.execute.return_value = [
+            json.dumps({"host": "web-3", "pid": 812, "acquired": "2026-07-27T05:00:00+00:00"}),
+            47,
+        ]
+        app.config["WRAPPED_JOBS"]["task1"]()
+        rec = json.loads(pipe.lpush.call_args.args[1])
+        self.assertEqual(rec["event"], "skip")
+        self.assertEqual(rec["holder"], "web-3:812")
+        self.assertEqual(rec["ttl_remaining"], 47)
+        self.assertIn("web-3:812", rec["message"])
 
 
 class HealthRouteTests(unittest.TestCase):
@@ -207,12 +252,12 @@ class RunJobRouteTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 403)
 
     def test_unknown_job_returns_404(self) -> None:
-        _, client, _, _ = self._app()
+        _, client, _, _ = self._app_with_token()
         resp = client.post("/jobs/run_job", json={"job_name": "nope"}, headers=self.AUTH)
         self.assertEqual(resp.status_code, 404)
 
     def test_known_job_invokes_wrapped_fn(self) -> None:
-        app, client, _, _ = self._app()
+        app, client, _, _ = self._app_with_token()
         with patch.dict(app.config["WRAPPED_JOBS"], {"task1": MagicMock()}):
             resp = client.post("/jobs/run_job", json={"job_name": "task1"}, headers=self.AUTH)
             self.assertEqual(resp.status_code, 200)
@@ -220,7 +265,7 @@ class RunJobRouteTests(unittest.TestCase):
             app.config["WRAPPED_JOBS"]["task1"].assert_called_once()
 
     def test_lock_held_skips_real_work_but_returns_200(self) -> None:
-        _, client, lock_client, _ = self._app(lock_held=True)
+        _, client, lock_client, _ = self._app_with_token(lock_held=True)
         # SET returns False → skip; no release fires (we never acquired).
         resp = client.post("/jobs/run_job", json={"job_name": "task1"}, headers=self.AUTH)
         self.assertEqual(resp.status_code, 200)

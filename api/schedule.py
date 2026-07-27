@@ -26,7 +26,14 @@ bp = Blueprint("schedule", __name__)
 SCHEDULE_TOKEN = ""
 TOKEN_HEADER = "X-API-Token"
 
-# `lock_ttl=None` falls back to ApiRedisConfig.lock_ttl (default 1200s).
+# `lock_ttl` is an ORPHAN-CLEAR WINDOW, not a runtime budget — a running job
+# re-arms its own TTL in the background (extension._renew_until_stopped), so
+# it may overrun this value freely. Size it by "how long may a lock left
+# behind by a killed process block the next run?", i.e. roughly one trigger
+# interval; the cost of a crash is ceil(lock_ttl / interval) skipped runs.
+# Do NOT size it under the job's runtime hoping to avoid skips — that is the
+# one setting that breaks mutual exclusion outright.
+# `lock_ttl=None` falls back to ApiRedisConfig.lock_ttl (default 300s).
 # Cron triggers interpret `hour=` in scheduler timezone (Asia/Seoul).
 # `manual_dispatch=False` removes the job from the /jobs/run_job allow list;
 # the scheduler still fires it on the configured trigger via run_registered_job.
@@ -43,7 +50,9 @@ JOB_FUNCTIONS: dict[str, dict[str, Any]] = {
     "task2": {
         "fn": task2,
         "trigger": IntervalTrigger(seconds=30),
-        "lock_ttl": None,
+        # Explicit, not the shared default: at a 30s interval every extra
+        # minute of orphan TTL costs two more skipped runs.
+        "lock_ttl": 60,
         "manual_dispatch": True,
     },
     "restart_uwsgi": {
@@ -64,6 +73,28 @@ JOB_FUNCTIONS: dict[str, dict[str, Any]] = {
 }
 
 
+def skip_message(info: dict[str, Any]) -> str:
+    """Render a holder dict from ``describe_lock_holder`` as one Detail line.
+
+    The dashboard's Detail column reads ``error ?? message`` only, so the
+    holder identity has to ride inside ``message`` to be visible. The
+    structured fields are still attached to the record for /jobs/logs.
+
+    Reading a row: a ``holder`` on another host/pid than the scheduler
+    worker means genuine cross-process contention (manual dispatch, a
+    second scheduler during a reload, another deployment). A holder whose
+    pid is gone, with ``held_since`` well in the past, means an orphan left
+    by a killed process — the lock protecting nothing.
+    """
+    holder = info.get("holder")
+    if holder is None:
+        return "lock held"
+    return (
+        f"lock held by {holder} since {info.get('held_since')} "
+        f"({info.get('ttl_remaining')}s ttl left)"
+    )
+
+
 def _wrap(
     fn: Callable,
     *,
@@ -77,7 +108,9 @@ def _wrap(
         lock_client,
         key=f"{key_prefix}{fn.__name__}",
         ttl=ttl,
-        on_skip=lambda name: task_logger.record(name, "skip", message="lock held"),
+        on_skip=lambda name, info: task_logger.record(
+            name, "skip", message=skip_message(info), **info
+        ),
     )(logged)
 
 

@@ -1,4 +1,5 @@
 import json
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -6,16 +7,19 @@ from api import extension
 from api.extension import (
     ApiRedisConfig,
     TaskLogger,
+    describe_lock_holder,
+    lock_owner_token,
     read_task_logs,
     redis_lock,
 )
 
 
 def _reset_release_script_cache() -> None:
-    """The module caches a single ``Script`` instance across calls; reset it
-    between tests so each test sees a fresh ``register_script`` call on its
-    own mock client."""
+    """The module caches a single ``Script`` instance per Lua script across
+    calls; reset both between tests so each test sees fresh
+    ``register_script`` calls on its own mock client."""
     extension._release_lock = None
+    extension._renew_lock = None
 
 
 def _make_logger(client: MagicMock | None = None) -> tuple[TaskLogger, MagicMock, MagicMock]:
@@ -30,7 +34,7 @@ class ApiRedisConfigTests(unittest.TestCase):
     def test_defaults(self) -> None:
         cfg = ApiRedisConfig()
         self.assertEqual(cfg.host, "localhost")
-        self.assertEqual(cfg.lock_ttl, 1200)
+        self.assertEqual(cfg.lock_ttl, 300)
         self.assertEqual(cfg.lock_db, 1)
         self.assertEqual(cfg.jobstore_key_prefix, "api_skewnono:jobs:")
         self.assertEqual(cfg.lock_key_prefix, "api_skewnono:lock:")
@@ -91,14 +95,23 @@ class RedisLockTests(unittest.TestCase):
         inner.assert_not_called()
         self.release.assert_not_called()
 
-    def test_invokes_on_skip_callback_when_lock_held(self) -> None:
+    def test_invokes_on_skip_callback_with_holder_info(self) -> None:
         self.client.set.return_value = False
+        pipe = MagicMock()
+        self.client.pipeline.return_value.__enter__.return_value = pipe
+        pipe.execute.return_value = [
+            json.dumps({"host": "web-2", "pid": 41, "acquired": "2026-07-27T05:00:00+00:00"}),
+            120,
+        ]
         on_skip = MagicMock()
         inner = MagicMock()
         inner.__name__ = "the_task"
         wrapped = redis_lock(self.client, key="k", ttl=30, on_skip=on_skip)(inner)
         wrapped()
-        on_skip.assert_called_once_with("the_task")
+        name, info = on_skip.call_args.args
+        self.assertEqual(name, "the_task")
+        self.assertEqual(info["holder"], "web-2:41")
+        self.assertEqual(info["ttl_remaining"], 120)
 
     def test_releases_lock_on_exception(self) -> None:
         self.client.set.return_value = True
@@ -119,12 +132,121 @@ class RedisLockTests(unittest.TestCase):
         tokens = [c.args[1] for c in self.client.set.call_args_list]
         self.assertEqual(len(set(tokens)), 2)
 
-    def test_release_script_is_cached_across_decorators(self) -> None:
-        # register_script should only be called once at module level — the
-        # cached Script is reused by every redis_lock(...) invocation.
+    def test_scripts_are_cached_across_decorators(self) -> None:
+        # register_script should only run once per Lua script (release +
+        # renew); the cached Scripts are reused by every redis_lock(...).
         redis_lock(self.client, key="a", ttl=30)(MagicMock())
         redis_lock(self.client, key="b", ttl=30)(MagicMock())
-        self.client.register_script.assert_called_once()
+        self.assertEqual(self.client.register_script.call_count, 2)
+
+    def test_starts_daemon_renewal_thread_and_stops_it_before_release(self) -> None:
+        self.client.set.return_value = True
+        order: list[str] = []
+        self.release.side_effect = lambda **kw: order.append("release")
+
+        with patch.object(extension.threading, "Thread") as mock_thread:
+            mock_thread.return_value.start.side_effect = lambda: order.append("start")
+            wrapped = redis_lock(self.client, key="k", ttl=30)(MagicMock())
+            wrapped()
+
+        kwargs = mock_thread.call_args.kwargs
+        self.assertTrue(kwargs["daemon"])
+        self.assertEqual(kwargs["target"], extension._renew_until_stopped)
+        self.assertEqual(kwargs["args"][1], "k")
+        self.assertEqual(kwargs["args"][3], 30)
+        stop = kwargs["args"][4]
+        # The watchdog must be told to stop BEFORE the key is deleted,
+        # otherwise it could re-EXPIRE a lock that no longer has an owner.
+        self.assertTrue(stop.is_set())
+        self.assertEqual(order, ["start", "release"])
+
+
+class LockOwnerTokenTests(unittest.TestCase):
+    def test_encodes_identity_and_is_unique(self) -> None:
+        first = lock_owner_token()
+        second = lock_owner_token()
+        self.assertNotEqual(first, second)
+        rec = json.loads(first)
+        self.assertEqual(rec["pid"], extension.os.getpid())
+        self.assertIn("host", rec)
+        self.assertIn("acquired", rec)
+
+
+class DescribeLockHolderTests(unittest.TestCase):
+    def _client_returning(self, raw: object, ttl: int) -> MagicMock:
+        client = MagicMock()
+        pipe = MagicMock()
+        client.pipeline.return_value.__enter__.return_value = pipe
+        pipe.execute.return_value = [raw, ttl]
+        return client
+
+    def test_parses_owner_payload(self) -> None:
+        client = self._client_returning(
+            json.dumps({"host": "web-1", "pid": 7, "acquired": "2026-07-27T05:00:00+00:00"}),
+            42,
+        )
+        info = describe_lock_holder(client, "k")
+        self.assertEqual(info["holder"], "web-1:7")
+        self.assertEqual(info["held_since"], "2026-07-27T05:00:00+00:00")
+        self.assertEqual(info["ttl_remaining"], 42)
+
+    def test_reports_ttl_only_when_value_is_unparseable(self) -> None:
+        # Locks written by a pre-upgrade deploy hold a bare uuid hex.
+        info = describe_lock_holder(self._client_returning("deadbeef", 9), "k")
+        self.assertEqual(info, {"ttl_remaining": 9})
+
+    def test_returns_empty_when_redis_unreachable(self) -> None:
+        # A skip record must still be written even if the holder read fails.
+        client = MagicMock()
+        client.pipeline.side_effect = RuntimeError("redis down")
+        self.assertEqual(describe_lock_holder(client, "k"), {})
+
+
+class RenewUntilStoppedTests(unittest.TestCase):
+    def setUp(self) -> None:
+        _reset_release_script_cache()
+        self.client = MagicMock()
+        self.renew = self.client.register_script.return_value
+
+    def _stop_after(self, ticks: int) -> MagicMock:
+        """A stop event that lets ``ticks`` renewals through, then halts."""
+        stop = MagicMock(spec=threading.Event)
+        stop.wait.side_effect = [False] * ticks + [True]
+        return stop
+
+    def test_rearms_ttl_each_tick_until_stopped(self) -> None:
+        self.renew.return_value = 1
+        extension._renew_until_stopped(
+            self.client, "k", "tok", 30, self._stop_after(2), self.renew
+        )
+        self.assertEqual(self.renew.call_count, 2)
+        self.renew.assert_called_with(keys=["k"], args=["tok", 30], client=self.client)
+
+    def test_renews_at_one_third_of_ttl(self) -> None:
+        stop = self._stop_after(1)
+        extension._renew_until_stopped(self.client, "k", "tok", 300, stop, self.renew)
+        stop.wait.assert_called_with(100)
+
+    def test_renew_interval_never_drops_below_one_second(self) -> None:
+        stop = self._stop_after(1)
+        extension._renew_until_stopped(self.client, "k", "tok", 2, stop, self.renew)
+        stop.wait.assert_called_with(1)
+
+    def test_stops_when_ownership_lost(self) -> None:
+        # CAS returned 0: the key expired and someone else owns it now.
+        # Renewing again would extend a stranger's lock.
+        self.renew.return_value = 0
+        extension._renew_until_stopped(
+            self.client, "k", "tok", 30, self._stop_after(5), self.renew
+        )
+        self.assertEqual(self.renew.call_count, 1)
+
+    def test_keeps_renewing_after_a_transient_redis_error(self) -> None:
+        self.renew.side_effect = [RuntimeError("blip"), 1]
+        extension._renew_until_stopped(
+            self.client, "k", "tok", 30, self._stop_after(2), self.renew
+        )
+        self.assertEqual(self.renew.call_count, 2)
 
 
 class TaskLoggerRecordTests(unittest.TestCase):
@@ -187,6 +309,7 @@ class ComposedLockAndLogTests(unittest.TestCase):
     def test_skip_emits_only_skip(self) -> None:
         logger, client, pipe = _make_logger()
         client.set.return_value = False  # lock already held
+        pipe.execute.return_value = [None, 5]
 
         def task() -> None:
             return None
@@ -195,7 +318,7 @@ class ComposedLockAndLogTests(unittest.TestCase):
             client,
             key="k",
             ttl=30,
-            on_skip=lambda name: logger.record(name, "skip", message="lock held"),
+            on_skip=lambda name, info: logger.record(name, "skip", message="lock held"),
         )(logger.wrap(task))
         wrapped()
 

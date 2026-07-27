@@ -2,7 +2,10 @@
 
 import json
 import logging
+import os
+import socket
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field, replace
@@ -41,7 +44,13 @@ class ApiRedisConfig:
     password: str | None = None
     ssl: bool = False
     socket_timeout: float = 2.0
-    lock_ttl: int = 1200
+    # Orphan-clear window, NOT a runtime budget. A live run re-arms its own
+    # TTL every ``lock_ttl // 3`` seconds (see _renew_until_stopped), so this
+    # only bounds how long a lock survives a process that died without
+    # running its release (OOM kill, uWSGI harakiri, host maintenance).
+    # Shorter = fewer wasted `lock held` skips after a crash; too short risks
+    # expiring under a starved renewal thread. 300s renews every 100s.
+    lock_ttl: int = 300
     jobstore_key_prefix: str = "api_skewnono:jobs:"
     lock_key_prefix: str = "api_skewnono:lock:"
     log_list_key: str = "api_skewnono:logs:tasks"
@@ -238,9 +247,20 @@ _LOCK_RELEASE_SCRIPT = (
     "end"
 )
 
-# Module-level Script so redis-py caches the SHA and uses EVALSHA + NOSCRIPT
+# Same CAS guard, but pushes the expiry out instead of deleting. Returned 0
+# means we no longer own the key, so the caller must stop renewing.
+_LOCK_RENEW_SCRIPT = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] then "
+    "  return redis.call('expire', KEYS[1], ARGV[2]) "
+    "else "
+    "  return 0 "
+    "end"
+)
+
+# Module-level Scripts so redis-py caches the SHA and uses EVALSHA + NOSCRIPT
 # fallback automatically. Bound at call time via the ``client=`` kwarg.
 _release_lock: Any = None
+_renew_lock: Any = None
 
 
 def _get_release_script(client: Any) -> Any:
@@ -250,34 +270,149 @@ def _get_release_script(client: Any) -> Any:
     return _release_lock
 
 
+def _get_renew_script(client: Any) -> Any:
+    global _renew_lock
+    if _renew_lock is None:
+        _renew_lock = client.register_script(_LOCK_RENEW_SCRIPT)
+    return _renew_lock
+
+
+def lock_owner_token() -> str:
+    """Mint this acquisition's lock value: identity plus a uniqueness nonce.
+
+    Doubles as the CAS token — ``_LOCK_RELEASE_SCRIPT`` compares the stored
+    value byte-for-byte, so any unique string works, and packing the holder's
+    identity in means a contender that loses the race can report *who* beat
+    it instead of a bare "lock held". ``sort_keys`` keeps the encoding stable.
+    """
+    return json.dumps(
+        {
+            "token": uuid.uuid4().hex,
+            "host": socket.gethostname(),
+            "pid": os.getpid(),
+            "acquired": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        },
+        sort_keys=True,
+    )
+
+
+def describe_lock_holder(client: Any, key: str) -> dict[str, Any]:
+    """Read who currently holds ``key`` and how much of its TTL is left.
+
+    Called on the skip path so a dashboard ``lock held`` row is
+    self-diagnosing: an orphan from a dead process shows a ``holder`` whose
+    pid is gone and a ``held_since`` far in the past, while genuine
+    contention shows a live peer that acquired moments ago.
+
+    Returns ``{}`` if Redis is unreachable — a skip record must still be
+    written. ``ttl_remaining`` of -2 means the key vanished between the
+    failed SET and this read (the holder finished in the gap).
+    """
+    try:
+        with client.pipeline() as pipe:
+            pipe.get(key)
+            pipe.ttl(key)
+            raw, ttl_remaining = pipe.execute()
+    except Exception:
+        log.exception("failed to read lock holder for %s", key)
+        return {}
+
+    info: dict[str, Any] = {"ttl_remaining": ttl_remaining}
+    try:
+        owner = json.loads(raw) if raw else None
+    except (ValueError, TypeError):
+        owner = None
+    if isinstance(owner, dict):
+        info["holder"] = f"{owner.get('host')}:{owner.get('pid')}"
+        info["held_since"] = owner.get("acquired")
+    return info
+
+
+def _renew_until_stopped(
+    client: Any,
+    key: str,
+    token: str,
+    ttl: int,
+    stop: threading.Event,
+    renew: Any,
+) -> None:
+    """Re-arm ``key``'s TTL every ``ttl // 3`` seconds until ``stop`` is set.
+
+    This is what decouples ``ttl`` from job runtime. Without it, ``ttl`` has
+    to be a bet on how long the task takes: bet low and the key expires
+    mid-run so the next fire acquires cleanly and runs *concurrently* — the
+    lock silently stops protecting; bet high and one hard kill orphans the
+    key for the full ``ttl``. Renewing means a live run holds the lock for
+    as long as it needs while ``ttl`` shrinks to just the orphan window.
+
+    A renewal returning 0 means we lost ownership (the key already expired
+    and someone else took it). Stop immediately — the release CAS in the
+    wrapper's ``finally`` will correctly no-op too, so we never delete the
+    new owner's lock.
+
+    ``renew`` is passed in rather than looked up here: every concurrent job
+    runs one of these threads, and resolving the cached ``Script`` on the
+    main thread at decoration time keeps them off the module global.
+    """
+    interval = max(ttl // 3, 1)
+    while not stop.wait(interval):
+        try:
+            if not renew(keys=[key], args=[token, ttl], client=client):
+                log.warning("lock %s no longer owned; stopping renewal", key)
+                return
+        except Exception:
+            # Transient Redis blips shouldn't kill the watchdog — the next
+            # tick retries, and there is still ``ttl`` of runway left.
+            log.exception("failed to renew lock %s", key)
+
+
 def redis_lock(
     client: Any,
     *,
     key: str,
     ttl: int,
-    on_skip: Callable[[str], None] | None = None,
+    on_skip: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> Callable[[Callable], Callable]:
-    """Skip-if-held lock with owner-checked release.
+    """Skip-if-held lock with owner-checked release and TTL renewal.
 
-    Each acquisition mints a fresh token stored as the key's value. Release
-    runs a Lua CAS so we only DEL the key when we still hold it. Optional
-    ``on_skip(fn_name)`` fires when another holder already has the lock.
+    Each acquisition mints a fresh owner token (see :func:`lock_owner_token`)
+    stored as the key's value. While the wrapped function runs, a daemon
+    watchdog thread re-arms the TTL, so ``ttl`` bounds only how long an
+    orphaned lock outlives a killed process — not how long the job may take.
+    Release runs a Lua CAS so we only DEL the key when we still hold it.
+
+    Optional ``on_skip(fn_name, holder_info)`` fires when another holder
+    already has the lock; ``holder_info`` comes from
+    :func:`describe_lock_holder`.
     """
     from redis.exceptions import RedisError
 
     release = _get_release_script(client)
+    renew = _get_renew_script(client)
 
     def decorator(fn: Callable) -> Callable:
         @wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            token = uuid.uuid4().hex
+            token = lock_owner_token()
             if not client.set(key, token, nx=True, ex=ttl):
                 if on_skip is not None:
-                    on_skip(fn.__name__)
+                    on_skip(fn.__name__, describe_lock_holder(client, key))
                 return None
+            stop = threading.Event()
+            keeper = threading.Thread(
+                target=_renew_until_stopped,
+                args=(client, key, token, ttl, stop, renew),
+                name=f"lock-renew:{key}",
+                daemon=True,
+            )
+            keeper.start()
             try:
                 return fn(*args, **kwargs)
             finally:
+                # Set first: the watchdog must not re-arm a key we are about
+                # to delete, or a crash right after release would leave a
+                # renewed orphan behind.
+                stop.set()
                 try:
                     release(keys=[key], args=[token], client=client)
                 except RedisError:

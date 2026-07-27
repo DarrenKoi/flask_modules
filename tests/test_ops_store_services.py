@@ -515,7 +515,11 @@ class OSDocDataFrameDatetimeTests(unittest.TestCase):
                 ),
             }
         )
-        self.assertEqual(dataframe["naive_ts"].dtype.name, "datetime64[ns]")
+        # Pin the kind, not the unit: pandas 2 inferred datetime64[ns] from
+        # these strings, pandas 3 infers datetime64[us]. Normalization goes
+        # through isinstance(value, datetime) -> isoformat(), so resolution
+        # never reaches the output and pinning it only breaks on upgrade.
+        self.assertEqual(dataframe["naive_ts"].dtype.kind, "M")
 
         with patch("ops_store.document._bulk_helper") as bulk_helper:
             bulk_function = Mock(return_value=(3, []))
