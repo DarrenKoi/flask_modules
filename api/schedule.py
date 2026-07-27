@@ -185,6 +185,67 @@ JOB_FUNCTIONS: dict[str, dict[str, Any]] = {
         "misfire_grace_time": 43200,
         "manual_dispatch": False,
     },
+    # ── Trigger cookbook (commented — copy, rename, adjust) ──────
+    # Not registered. Each entry is registry-shaped so it can be uncommented
+    # as-is. Cron `hour=`/`minute=` are scheduler-local (Asia/Seoul).
+    #
+    # Every hour at :45 — one number means "that minute, every hour".
+    # "mwf_report": {
+    #     "fn": my_task,
+    #     "trigger": CronTrigger(minute=45),
+    # },
+    #
+    # Mon/Wed/Fri at 09:15 — comma list picks specific weekdays. Ranges work
+    # too: "mon-fri" (weekdays), "sat,sun" (weekend).
+    # "mwf_report": {
+    #     "fn": my_task,
+    #     "trigger": CronTrigger(day_of_week="mon,wed,fri", hour=9, minute=15),
+    # },
+    #
+    # Weekdays, hourly at :45, office hours only — the fields AND together:
+    # mon-fri AND 08-19h AND minute 45 -> 12 fires a day, 5 days a week.
+    # "office_hours_pull": {
+    #     "fn": my_task,
+    #     "trigger": CronTrigger(day_of_week="mon-fri", hour="8-19", minute=45),
+    # },
+    #
+    # Every 2 hours at :25 — "*/2" is a step over the hour field (00, 02, 04
+    # …22). Pin the minute; leaving it out means "every minute of those hours".
+    # "bihourly_sync": {
+    #     "fn": my_task,
+    #     "trigger": CronTrigger(hour="*/2", minute=25),
+    # },
+    #
+    # Every 15 minutes, cron-style — "a-59/15" starts the step at :a, so
+    # "5-59/15" -> :05 :20 :35 :50. Prefer this over IntervalTrigger for
+    # anything long enough to contend for a thread: the fire minutes are
+    # readable here and CronSlottingTests can check them against the registry.
+    # "quarter_hour_poll": {
+    #     "fn": my_task,
+    #     "trigger": CronTrigger(minute="5-59/15"),
+    # },
+    #
+    # Monthly — 1st at 06:35. `day="last"` gives the last day of the month;
+    # `day="last fri"` the last Friday.
+    # "monthly_archive": {
+    #     "fn": my_task,
+    #     "trigger": CronTrigger(day=1, hour=6, minute=35),
+    # },
+    #
+    # Every 15 minutes, interval-style — fires relative to scheduler start,
+    # so the wall-clock minutes drift with every deploy and cannot be slotted.
+    # Fine for short, frequent, don't-care-when work; see task2's note.
+    # "quarter_hour_poll": {
+    #     "fn": my_task,
+    #     "trigger": IntervalTrigger(minutes=15),
+    # },
+    #
+    # Every 6 hours, interval-style — hours/minutes/seconds compose:
+    # IntervalTrigger(hours=1, minutes=30) is every 90 minutes.
+    # "six_hourly_sweep": {
+    #     "fn": my_task,
+    #     "trigger": IntervalTrigger(hours=6),
+    # },
 }
 
 
