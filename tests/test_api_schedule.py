@@ -5,6 +5,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
+from apscheduler.events import (
+    EVENT_JOB_MAX_INSTANCES,
+    EVENT_JOB_MISSED,
+    JobExecutionEvent,
+    JobSubmissionEvent,
+)
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from flask import Flask
@@ -39,9 +45,10 @@ def _build_test_app(test_case, *, lock_held: bool = False, redis_ok: bool = True
     lock_client = MagicMock()
     lock_client.get_encoder.return_value = Encoder("utf-8", "strict", False)
     lock_client.set.return_value = not lock_held
-    # Default: heartbeat key present, so /health reports overall=ok. Tests that
-    # need to simulate a dead scheduler override this with lock_client.get.return_value = None.
-    lock_client.get.return_value = "2026-05-12T00:00:00+00:00"
+    # Default: heartbeat present, no next-runs snapshot — /health reads both
+    # in one MGET and reports overall=ok. Tests that simulate a dead
+    # scheduler override this with mget.return_value = [None, None].
+    lock_client.mget.return_value = ["2026-05-12T00:00:00+00:00", None]
     if not redis_ok:
         lock_client.ping.side_effect = RuntimeError("down")
     # Pipeline context manager for TaskLogger.record() — yields a mock pipe.
@@ -54,6 +61,9 @@ def _build_test_app(test_case, *, lock_held: bool = False, redis_ok: bool = True
     scheduler_mock.app = app  # mimic flask_apscheduler.APScheduler.init_app
     fake_job = MagicMock()
     fake_job.id = "task1"
+    # A real datetime, not a MagicMock: write_scheduler_heartbeat serializes
+    # next_run_time into the next-runs snapshot via isoformat + json.dumps.
+    fake_job.next_run_time = datetime(2026, 7, 27, 14, 4, tzinfo=ZoneInfo("Asia/Seoul"))
     scheduler_mock.get_jobs.return_value = [fake_job]
 
     patcher = patch.object(schedule, "scheduler", scheduler_mock)
@@ -63,6 +73,11 @@ def _build_test_app(test_case, *, lock_held: bool = False, redis_ok: bool = True
     schedule.init_jobs(app)
     app.register_blueprint(schedule.bp)
     return app, app.test_client(), lock_client, scheduler_mock
+
+
+def _pipe(lock_client) -> MagicMock:
+    """The pipeline mock that TaskLogger and the heartbeat write into."""
+    return lock_client.pipeline.return_value.__enter__.return_value
 
 
 class InitJobsTests(unittest.TestCase):
@@ -118,6 +133,10 @@ class InitJobsTests(unittest.TestCase):
 
         schedule.init_jobs(app, register_with_scheduler=False)
         scheduler_mock.add_job.assert_not_called()
+        # The missed-run listener is scheduler-worker-only too: idle
+        # schedulers never fire, so a request worker's listener would be
+        # dead weight at best and a duplicate recorder at worst.
+        scheduler_mock.add_listener.assert_not_called()
         # Non-scheduler workers still need every wrapped job for /jobs/run_job.
         self.assertEqual(set(app.config["WRAPPED_JOBS"]), set(schedule.JOB_FUNCTIONS))
 
@@ -322,6 +341,13 @@ class JobsLogsRouteTests(unittest.TestCase):
         # cfg.log_list_max=500 → range index = 499
         lock_client.lrange.assert_called_once_with("api_skewnono:logs:tasks", 0, 499)
 
+    def test_no_limit_serves_full_retained_list(self) -> None:
+        # The dashboard omits limit so the cap is defined once, server-side.
+        _, client, lock_client, _ = _build_test_app(self)
+        lock_client.lrange.return_value = []
+        client.get("/jobs/logs")
+        lock_client.lrange.assert_called_once_with("api_skewnono:logs:tasks", 0, 499)
+
 
 class RunJobRouteTests(unittest.TestCase):
     """The /jobs/run_job route is shared-secret authenticated. Manual dispatch
@@ -422,20 +448,112 @@ class RunRegisteredJobTests(unittest.TestCase):
 
 
 class WriteSchedulerHeartbeatTests(unittest.TestCase):
-    def test_sets_heartbeat_key_with_ttl(self) -> None:
+    def test_sets_heartbeat_and_next_runs_keys_with_ttl(self) -> None:
+        # One pipeline round-trip writes both keys with the same TTL, so a
+        # dead scheduler loses its schedule snapshot along with its pulse.
         app, _, lock_client, _ = _build_test_app(self)
         schedule.write_scheduler_heartbeat()
-        lock_client.set.assert_called_once()
-        args, kwargs = lock_client.set.call_args
         cfg = app.config["API_REDIS_CONFIG"]
-        self.assertEqual(args[0], cfg.heartbeat_key)
-        self.assertEqual(kwargs["ex"], cfg.heartbeat_ttl)
+        sets = {c.args[0]: c for c in _pipe(lock_client).set.call_args_list}
+        self.assertEqual(set(sets), {cfg.heartbeat_key, cfg.next_runs_key})
+        self.assertEqual(sets[cfg.heartbeat_key].kwargs["ex"], cfg.heartbeat_ttl)
+        self.assertEqual(sets[cfg.next_runs_key].kwargs["ex"], cfg.heartbeat_ttl)
+        self.assertEqual(
+            json.loads(sets[cfg.next_runs_key].args[1]),
+            {"task1": "2026-07-27T14:04:00+09:00"},
+        )
+
+    def test_paused_job_snapshots_as_null(self) -> None:
+        # A paused job has next_run_time=None; the snapshot must keep the
+        # entry (the dashboard shows it as "paused") rather than drop it.
+        app, _, lock_client, scheduler_mock = _build_test_app(self)
+        scheduler_mock.get_jobs.return_value[0].next_run_time = None
+        schedule.write_scheduler_heartbeat()
+        cfg = app.config["API_REDIS_CONFIG"]
+        payload = next(
+            c.args[1]
+            for c in _pipe(lock_client).set.call_args_list
+            if c.args[0] == cfg.next_runs_key
+        )
+        self.assertEqual(json.loads(payload), {"task1": None})
 
     def test_no_op_when_scheduler_has_no_app(self) -> None:
         _, _, lock_client, scheduler_mock = _build_test_app(self)
         scheduler_mock.app = None
         schedule.write_scheduler_heartbeat()  # must not raise
-        lock_client.set.assert_not_called()
+        _pipe(lock_client).set.assert_not_called()
+
+
+class MissedRunListenerTests(unittest.TestCase):
+    """Dropped and refused fires must land on the dashboard as ``missed``
+    records — their only other trace is a line in the uWSGI log. Real event
+    classes on purpose: a MagicMock would auto-create both
+    ``scheduled_run_time`` and ``scheduled_run_times`` and hide the shape
+    difference the listener has to bridge."""
+
+    SCHEDULED = datetime(2026, 7, 27, 14, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    def _record_from(self, event) -> dict:
+        _, _, lock_client, _ = _build_test_app(self)
+        schedule.record_missed_run(event)
+        return json.loads(_pipe(lock_client).lpush.call_args.args[1])
+
+    def test_missed_event_writes_missed_record(self) -> None:
+        rec = self._record_from(
+            JobExecutionEvent(EVENT_JOB_MISSED, "hourly_extract", "default", self.SCHEDULED)
+        )
+        self.assertEqual(rec["event"], "missed")
+        self.assertEqual(rec["job"], "hourly_extract")
+        self.assertIn("misfire_grace_time", rec["reason"])
+        self.assertEqual(rec["scheduled"], "2026-07-27T14:00:00+09:00")
+
+    def test_max_instances_event_writes_missed_record(self) -> None:
+        # JobSubmissionEvent carries scheduled_run_times (a list), not
+        # scheduled_run_time.
+        rec = self._record_from(
+            JobSubmissionEvent(EVENT_JOB_MAX_INSTANCES, "task2", "default", [self.SCHEDULED])
+        )
+        self.assertEqual(rec["event"], "missed")
+        self.assertEqual(rec["job"], "task2")
+        self.assertIn("max_instances", rec["reason"])
+        self.assertEqual(rec["scheduled"], "2026-07-27T14:00:00+09:00")
+
+    def test_no_op_when_scheduler_has_no_app(self) -> None:
+        _, _, lock_client, scheduler_mock = _build_test_app(self)
+        scheduler_mock.app = None
+        schedule.record_missed_run(
+            JobExecutionEvent(EVENT_JOB_MISSED, "task1", "default", self.SCHEDULED)
+        )
+        _pipe(lock_client).lpush.assert_not_called()
+
+    def test_listener_registered_on_scheduler_worker(self) -> None:
+        # The request-worker half (register_with_scheduler=False must NOT
+        # add the listener) is asserted in
+        # test_register_with_scheduler_false_skips_add_job.
+        _, _, _, scheduler_mock = _build_test_app(self)
+        (listener, mask) = scheduler_mock.add_listener.call_args.args
+        self.assertIs(listener, schedule.record_missed_run)
+        self.assertEqual(mask, EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES)
+
+
+class HealthNextRunsTests(unittest.TestCase):
+    HEARTBEAT = "2026-05-12T00:00:00+00:00"
+
+    def test_serves_next_runs_snapshot(self) -> None:
+        _, client, lock_client, _ = _build_test_app(self)
+        snapshot = {"task1": "2026-07-27T14:04:00+09:00", "daily_rollup": None}
+        lock_client.mget.return_value = [self.HEARTBEAT, json.dumps(snapshot)]
+        body = client.get("/health").get_json()
+        self.assertEqual(body["scheduler"]["next_runs"], snapshot)
+
+    def test_unparseable_snapshot_degrades_alone(self) -> None:
+        # A corrupt snapshot must fall back to {} without taking the
+        # heartbeat verdict down with it — the service is still healthy.
+        _, client, lock_client, _ = _build_test_app(self)
+        lock_client.mget.return_value = [self.HEARTBEAT, "not json"]
+        body = client.get("/health").get_json()
+        self.assertEqual(body["scheduler"]["next_runs"], {})
+        self.assertEqual(body["status"], "ok")
 
 
 class HealthHeartbeatTests(unittest.TestCase):
@@ -461,7 +579,7 @@ class HealthHeartbeatTests(unittest.TestCase):
         scheduler_mock.running = False
         scheduler_mock.get_jobs.return_value = []
         app.config["IS_SCHEDULER_WORKER"] = False
-        lock_client.get.return_value = None  # key expired
+        lock_client.mget.return_value = [None, None]  # keys expired
         body = client.get("/health").get_json()
         self.assertEqual(body["status"], "degraded")
         self.assertIsNone(body["scheduler"]["heartbeat"])
@@ -469,7 +587,7 @@ class HealthHeartbeatTests(unittest.TestCase):
     def test_scheduler_role_degrades_when_heartbeat_missing(self) -> None:
         app, client, lock_client, _ = _build_test_app(self)
         app.config["IS_SCHEDULER_WORKER"] = True
-        lock_client.get.return_value = None
+        lock_client.mget.return_value = [None, None]
         body = client.get("/health").get_json()
         self.assertEqual(body["status"], "degraded")
         self.assertEqual(body["scheduler"]["role"], "scheduler")

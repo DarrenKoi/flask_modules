@@ -5,8 +5,10 @@ emits a single ``skip`` record (not ``start``/``skip``/``end``).
 """
 
 import hmac
+import json
 from typing import Any, Callable
 
+from apscheduler.events import EVENT_JOB_MAX_INSTANCES, EVENT_JOB_MISSED
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from flask import Blueprint, Flask, current_app, jsonify, render_template, request
@@ -298,15 +300,55 @@ def run_registered_job(name: str) -> Any:
         return fn()
 
 
+def record_missed_run(event: Any) -> None:
+    """Log a ``missed`` record when APScheduler drops or refuses a fire.
+
+    Covers the two failure modes that are otherwise invisible from the
+    dashboard — their only trace is a line in the uWSGI log:
+
+    - ``EVENT_JOB_MISSED``: the start was already older than
+      ``misfire_grace_time`` when the job reached a worker thread (queue
+      wait counts), so the run was dropped.
+    - ``EVENT_JOB_MAX_INSTANCES``: the previous run of the same job was
+      still executing, so this fire was refused.
+
+    The missed event carries ``scheduled_run_time``; the max-instances one
+    carries a ``scheduled_run_times`` list instead.
+    ``TaskLogger.record`` needs no app context (it holds its own client),
+    so none is pushed — this runs on the scheduler's dispatch thread.
+    """
+    app = scheduler.app
+    if app is None:
+        return
+    if event.code == EVENT_JOB_MISSED:
+        reason = "start missed by more than misfire_grace_time"
+        scheduled = event.scheduled_run_time
+    else:
+        reason = "previous run still executing (max_instances)"
+        scheduled = event.scheduled_run_times[0] if event.scheduled_run_times else None
+    task_logger: TaskLogger = app.config["TASK_LOGGER"]
+    task_logger.record(
+        event.job_id,
+        "missed",
+        reason=reason,
+        scheduled=scheduled.isoformat() if scheduled else None,
+    )
+
+
 def write_scheduler_heartbeat() -> None:
-    """Refresh the scheduler-alive marker in Redis.
+    """Refresh the scheduler-alive marker and next-run snapshot in Redis.
 
     Registered as a recurring job in the scheduler worker only. All workers
-    read this key from ``/health`` so request-only workers can answer
+    read these keys from ``/health`` so request-only workers can answer
     "is the scheduler alive somewhere?" — instead of falsely reporting OK
-    just because their own process is healthy. The key is written with a
-    TTL > interval, so if the scheduler dies the key expires naturally and
+    just because their own process is healthy. Both keys are written with a
+    TTL > interval, so if the scheduler dies they expire naturally and
     every worker's ``/health`` flips to degraded with no extra plumbing.
+
+    The next-run map piggybacks on this tick because only the scheduler
+    worker can answer "when does each job fire next" — and it reads the
+    *jobstore*, so the dashboard shows the schedule actually persisted in
+    Redis, which can differ from JOB_FUNCTIONS until the next deploy boot.
     """
     app = scheduler.app
     if app is None:
@@ -315,7 +357,16 @@ def write_scheduler_heartbeat() -> None:
         cfg: ApiRedisConfig = app.config["API_REDIS_CONFIG"]
         client = app.config["LOCK_CLIENT"]
         try:
-            client.set(cfg.heartbeat_key, utc_stamp(), ex=cfg.heartbeat_ttl)
+            next_runs = {
+                job.id: job.next_run_time.isoformat() if job.next_run_time else None
+                for job in scheduler.get_jobs()
+            }
+            with client.pipeline() as pipe:
+                pipe.set(cfg.heartbeat_key, utc_stamp(), ex=cfg.heartbeat_ttl)
+                pipe.set(
+                    cfg.next_runs_key, json.dumps(next_runs), ex=cfg.heartbeat_ttl
+                )
+                pipe.execute()
         except Exception:
             # Same swallow-and-log policy as TaskLogger: observability must
             # never crash the scheduler thread.
@@ -376,6 +427,13 @@ def init_jobs(app: Flask, *, register_with_scheduler: bool = True) -> None:
             trigger=IntervalTrigger(seconds=cfg.heartbeat_interval),
             replace_existing=True,
         )
+        # Dropped and refused fires otherwise leave NO dashboard record —
+        # only a "was missed by" line in the uWSGI log (see the registry's
+        # misfire_grace_time note). Scheduler worker only: idle schedulers
+        # never fire, so registering there would just be dead weight.
+        scheduler.add_listener(
+            record_missed_run, EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES
+        )
 
 
 def reap_orphan_jobs() -> None:
@@ -426,11 +484,18 @@ def health() -> Any:
         redis_status = f"error: {exc!r}"
 
     heartbeat: str | None = None
+    raw_runs: str | None = None
+    next_runs: dict[str, Any] = {}
     if redis_status == "ok":
         try:
-            heartbeat = lock_client.get(cfg.heartbeat_key)
+            heartbeat, raw_runs = lock_client.mget(cfg.heartbeat_key, cfg.next_runs_key)
         except Exception:
             heartbeat = None
+        try:
+            next_runs = json.loads(raw_runs) if raw_runs else {}
+        except (ValueError, TypeError):
+            # A corrupt snapshot must not degrade the heartbeat verdict.
+            next_runs = {}
 
     is_scheduler_worker = current_app.config.get("IS_SCHEDULER_WORKER", True)
     job_ids = [j.id for j in scheduler.get_jobs()] if scheduler.running else []
@@ -444,6 +509,7 @@ def health() -> Any:
             "jobs": job_ids,
             "role": "scheduler" if is_scheduler_worker else "worker",
             "heartbeat": heartbeat,
+            "next_runs": next_runs,
         },
     )
 
@@ -452,7 +518,10 @@ def health() -> Any:
 def jobs_logs() -> Any:
     cfg: ApiRedisConfig = current_app.config["API_REDIS_CONFIG"]
     lock_client = current_app.config["LOCK_CLIENT"]
-    limit = min(int(request.args.get("limit", 100)), cfg.log_list_max)
+    # No limit param means the whole retained list — the dashboard relies on
+    # this so the cap is defined once, here, not mirrored in its JS.
+    raw_limit = request.args.get("limit")
+    limit = min(int(raw_limit), cfg.log_list_max) if raw_limit else cfg.log_list_max
     raw_age = request.args.get("max_age_seconds")
     max_age = int(raw_age) if raw_age else None
     return jsonify(

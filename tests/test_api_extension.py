@@ -64,6 +64,7 @@ class ApiRedisConfigTests(unittest.TestCase):
         self.assertEqual(cfg.lock_key_prefix, "api_skewnono:lock:")
         self.assertEqual(cfg.log_list_key, "api_skewnono:logs:tasks")
         self.assertEqual(cfg.log_list_max, 500)
+        self.assertEqual(cfg.next_runs_key, "api_skewnono:scheduler:next_runs")
 
     def test_overrides_via_constructor(self) -> None:
         cfg = ApiRedisConfig(

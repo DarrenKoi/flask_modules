@@ -73,6 +73,11 @@ class ApiRedisConfig:
     heartbeat_key: str = "api_skewnono:scheduler:heartbeat"
     heartbeat_interval: int = 30
     heartbeat_ttl: int = 120
+    # Written by the heartbeat job alongside heartbeat_key: a JSON map of
+    # {job_id: next_run_time} so request-only workers can serve the live
+    # schedule without owning the scheduler thread. Same TTL as the
+    # heartbeat — a dead scheduler's schedule is stale, so let it vanish.
+    next_runs_key: str = "api_skewnono:scheduler:next_runs"
     extra_client_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def to_client_kwargs(self, *, decode_responses: bool) -> dict[str, Any]:

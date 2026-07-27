@@ -19,11 +19,13 @@
     .event-end { color: #155724; }
     .event-skip { color: #856404; }
     .event-error { color: #721c24; font-weight: 600; }
+    .event-missed { color: #4527a0; font-weight: 600; }
     .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 0.75rem; margin-right: 4px; }
     .pill-error { background: #f8d7da; color: #721c24; }
     .pill-skip { background: #fff3cd; color: #856404; }
     .pill-end { background: #d4edda; color: #155724; }
     .pill-start { background: #e2e3e5; color: #383d41; }
+    .pill-missed { background: #e7defa; color: #4527a0; }
     code { background: #f4f4f4; padding: 1px 4px; border-radius: 3px; }
     small { color: #666; }
     .controls { margin-top: 1rem; display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; font-size: 0.9rem; }
@@ -37,14 +39,18 @@
   <p>Health: <span id="health-badge" class="badge">checking…</span> <small id="health-detail"></small></p>
   <p><small>Heartbeat: <span id="heartbeat">—</span> · Role: <span id="role">—</span></small></p>
 
+  <h2>Next runs</h2>
+  <div id="next-runs"><p class="empty">loading…</p></div>
+
   <h2>Recent task runs</h2>
   <div class="controls">
     <label for="event-filter">Event:</label>
     <select id="event-filter">
       <option value="all">All events</option>
-      <option value="problems">Problems (error + skip)</option>
+      <option value="problems">Problems (error + skip + missed)</option>
       <option value="error">Errors only</option>
       <option value="skip">Skips only</option>
+      <option value="missed">Missed (dropped fires)</option>
       <option value="end">Completed (end)</option>
       <option value="start">Started</option>
     </select>
@@ -79,11 +85,49 @@
         document.getElementById('heartbeat').textContent =
           hb ? `${toKst(hb)} (${Math.round((Date.now() - Date.parse(hb)) / 1000)}s ago)` : 'missing';
         document.getElementById('role').textContent = j.scheduler.role || '—';
+        renderNextRuns(j.scheduler.next_runs || {});
       } catch (e) {
         const badge = document.getElementById('health-badge');
         badge.textContent = 'unreachable';
         badge.className = 'badge bad';
       }
+    }
+
+    // The snapshot is written by the scheduler worker from the Redis
+    // JOBSTORE, so this is the schedule actually in effect — which can
+    // differ from schedule.py's registry until the next deploy boot.
+    // The key shares the heartbeat's TTL: a dead scheduler shows "missing".
+    function renderNextRuns(nextRuns) {
+      const container = document.getElementById('next-runs');
+      const entries = Object.entries(nextRuns);
+      if (!entries.length) {
+        container.innerHTML = '<p class="empty">no snapshot — scheduler heartbeat missing or stale</p>';
+        return;
+      }
+      const fireTime = iso => iso === null ? Infinity : Date.parse(iso);
+      entries.sort(([, a], [, b]) => fireTime(a) - fireTime(b));  // paused sink
+      const rows = entries.map(([job, iso]) => {
+        let eta = '—';
+        if (iso) {
+          const ms = Date.parse(iso) - Date.now();
+          // Slightly negative is normal (the snapshot is up to one
+          // heartbeat_interval old); a large lag means a stalled scheduler.
+          if (ms < -120000) eta = `<span class="event-error">overdue ${fmtDur(-ms)}</span>`;
+          else if (ms < 0) eta = 'due now';
+          else eta = `in ${fmtDur(ms)}`;
+        }
+        return `
+            <tr>
+              <td><code>${escapeHtml(job)}</code></td>
+              <td>${iso ? escapeHtml(toKst(iso)) : '<em>paused</em>'}</td>
+              <td>${eta}</td>
+            </tr>`;
+      }).join('');
+      container.innerHTML = `
+        <table>
+          <thead><tr><th>Job</th><th>Next fire (KST)</th><th>In</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
     }
 
     let lastRecords = [];
@@ -113,6 +157,15 @@
       return d.toLocaleString('sv-SE', { timeZone: 'Asia/Seoul', hour12: false });
     }
 
+    // Durations and ETAs in one human unit: seconds under 90s, minutes
+    // under 90min, hours beyond.
+    function fmtDur(ms) {
+      const s = ms / 1000;
+      if (s < 90) return `${Math.round(s)}s`;
+      if (s < 5400) return `${(s / 60).toFixed(1)}m`;
+      return `${(s / 3600).toFixed(1)}h`;
+    }
+
     // Detail column. Records carry structured extras, not pre-formatted
     // prose, so timestamps in them go through toKst like every other one.
     // A skip names the lock holder: another host/pid means real cross-process
@@ -126,12 +179,18 @@
         return `lock held by ${rec.holder} since ${toKst(rec.held_since)}`
              + ` (${rec.ttl_remaining}s ttl left)`;
       }
+      if (rec.event === 'missed') {
+        return (rec.reason ?? 'run dropped')
+             + (rec.scheduled ? ` — scheduled ${toKst(rec.scheduled)}` : '');
+      }
       return rec.message ?? '';
     }
 
+    const PROBLEM_EVENTS = new Set(['error', 'skip', 'missed']);
+
     function matchesEvent(rec, mode) {
       if (mode === 'all') return true;
-      if (mode === 'problems') return rec.event === 'error' || rec.event === 'skip';
+      if (mode === 'problems') return PROBLEM_EVENTS.has(rec.event);
       return rec.event === mode;
     }
 
@@ -152,19 +211,48 @@
     }
 
     function summaryPills(records) {
-      const counts = { start: 0, end: 0, skip: 0, error: 0 };
+      const counts = { start: 0, end: 0, skip: 0, error: 0, missed: 0 };
       for (const r of records) {
         if (counts[r.event] !== undefined) counts[r.event]++;
       }
       const pills = [];
       if (counts.error) pills.push(`<span class="pill pill-error">${counts.error} error</span>`);
+      if (counts.missed) pills.push(`<span class="pill pill-missed">${counts.missed} missed</span>`);
       if (counts.skip) pills.push(`<span class="pill pill-skip">${counts.skip} skip</span>`);
       if (counts.end) pills.push(`<span class="pill pill-end">${counts.end} ok</span>`);
       if (counts.start) pills.push(`<span class="pill pill-start">${counts.start} start</span>`);
       return pills.join('') || '<span class="pill pill-start">—</span>';
     }
 
+    // Feeds the by-hand minute placement: avg/max measured off the same
+    // records the table shows, no separate tooling needed.
+    function durationSummary(ds) {
+      if (!ds.length) return '';
+      const avg = ds.reduce((a, b) => a + b, 0) / ds.length;
+      return ` · avg ${fmtDur(avg)} · max ${fmtDur(Math.max(...ds))}`;
+    }
+
+    // A start with nothing after it is the one signature of a process dying
+    // mid-run (which is also what strands locks). Records arrive newest
+    // first, so records[0] being a start means "no end/error/skip yet".
+    // Escalate once the run is out longer than twice the worst measured
+    // duration — only when measurements exist in the window, so a narrow
+    // age filter that hides a job's end records cannot fake an alarm.
+    function runningBadge(records, ds) {
+      const newest = records[0];
+      if (!newest || newest.event !== 'start') return '';
+      const age = Date.now() - Date.parse(newest.ts);
+      if (isNaN(age)) return '';
+      const worst = Math.max(...ds, 0);
+      return worst && age > 2 * worst
+        ? `<span class="pill pill-error">running ${fmtDur(age)} — no end record</span>`
+        : `<span class="pill pill-start">running ${fmtDur(age)}</span>`;
+    }
+
     function renderJobSection(job, records) {
+      const ds = records
+        .filter(r => r.event === 'end' && r.duration_ms != null)
+        .map(r => r.duration_ms);
       const eventMode = eventEl.value;
       const filtered = records.filter(r => matchesEvent(r, eventMode));
       const total = records.length;
@@ -181,7 +269,7 @@
         <section>
           <h3>
             <span class="job-name">${escapeHtml(job)}</span>
-            <span class="job-summary">${total} run${total === 1 ? '' : 's'} · ${summaryPills(records)}</span>
+            <span class="job-summary">${total} run${total === 1 ? '' : 's'} · ${summaryPills(records)}${runningBadge(records, ds)}${durationSummary(ds)}</span>
           </h3>
           <table>
             <thead><tr><th>Time (KST)</th><th>Event</th><th>Duration (s)</th><th>Detail</th></tr></thead>
@@ -219,9 +307,23 @@
         return;
       }
 
+      // Trouble floats to the top: jobs with a problem in the window come
+      // first (newest problem first), healthy jobs follow by recency —
+      // alphabetical only breaks ties. Records are newest-first, so
+      // find() returns the latest matching record. Keys are computed once
+      // per section, not per comparison.
       const sections = [...grouped.entries()]
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([job, recs]) => renderJobSection(job, recs));
+        .map(([job, recs]) => {
+          const problem = recs.find(r => PROBLEM_EVENTS.has(r.event));
+          return {
+            job,
+            recs,
+            prob: problem ? 1 : 0,
+            ts: Date.parse((problem ?? recs[0]).ts) || 0,
+          };
+        })
+        .sort((a, b) => (b.prob - a.prob) || (b.ts - a.ts) || a.job.localeCompare(b.job))
+        .map(({ job, recs }) => renderJobSection(job, recs));
       container.innerHTML = sections.join('');
     }
 
@@ -241,7 +343,9 @@
 
     async function refreshLogs() {
       try {
-        const params = new URLSearchParams({ limit: '100' });
+        // No limit: the server serves its whole retained list (log_list_max).
+        // A hardcoded number here silently truncated the wider age windows.
+        const params = new URLSearchParams();
         if (ageEl.value) params.set('max_age_seconds', ageEl.value);
         const r = await fetch('/jobs/logs?' + params.toString());
         lastRecords = await r.json();
