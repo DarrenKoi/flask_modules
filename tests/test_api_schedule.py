@@ -1,8 +1,11 @@
 import json
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from flask import Flask
 
@@ -151,6 +154,46 @@ class InitJobsTests(unittest.TestCase):
                 self.assertEqual(
                     self._ttl_used_by(app, lock_client, "ttl_probe"), cfg.lock_ttl
                 )
+
+
+class CronSlottingTests(unittest.TestCase):
+    """No two cron jobs may start at the same instant.
+
+    The executor holds max_workers=4, so simultaneous starts queue; a job
+    that waits past its misfire_grace_time is dropped by APScheduler with no
+    dashboard record at all. That failure is invisible from the UI, so it is
+    worth catching here instead. Interval triggers are excluded — they fire
+    relative to scheduler start and cannot be slotted.
+    """
+
+    def _fire_times(self, trigger, start, count: int) -> list:
+        prev, cursor, out = None, start, []
+        for _ in range(count):
+            nxt = trigger.get_next_fire_time(prev, cursor)
+            if nxt is None:
+                break
+            out.append(nxt)
+            prev, cursor = nxt, nxt + timedelta(seconds=1)
+        return out
+
+    def test_no_two_cron_jobs_fire_at_the_same_instant(self) -> None:
+        # A Monday, so weekday-restricted entries are live.
+        start = datetime(2026, 7, 27, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+        by_instant: dict = {}
+        for name, spec in schedule.JOB_FUNCTIONS.items():
+            if not isinstance(spec["trigger"], CronTrigger):
+                continue
+            for fire in self._fire_times(spec["trigger"], start, 300):
+                by_instant.setdefault(fire, set()).add(name)
+
+        clashes = {
+            fire.isoformat(): sorted(names)
+            for fire, names in by_instant.items()
+            if len(names) > 1
+        }
+        self.assertEqual(
+            clashes, {}, f"cron jobs sharing a start instant: {clashes}"
+        )
 
 
 class JobIdentityTests(unittest.TestCase):
