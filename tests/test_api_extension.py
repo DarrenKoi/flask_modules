@@ -103,8 +103,8 @@ class RedisLockTests(unittest.TestCase):
         inner.__name__ = "the_task"
         wrapped = redis_lock(self.client, key="k", ttl=30, on_skip=on_skip)(inner)
         wrapped()
-        name, info = on_skip.call_args.args
-        self.assertEqual(name, "the_task")
+        # Holder info only — redis_lock does not name the caller's job.
+        (info,) = on_skip.call_args.args
         self.assertEqual(info["holder"], "web-2:41")
         self.assertEqual(info["ttl_remaining"], 120)
 
@@ -311,7 +311,7 @@ class ComposedLockAndLogTests(unittest.TestCase):
             client,
             key="k",
             ttl=30,
-            on_skip=lambda name, info: logger.record(name, "skip", **info),
+            on_skip=lambda info: logger.record("task", "skip", **info),
         )(logger.wrap(task))
         wrapped()
 

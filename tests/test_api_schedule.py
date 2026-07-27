@@ -139,6 +139,61 @@ class InitJobsTests(unittest.TestCase):
                 )
 
 
+class JobIdentityTests(unittest.TestCase):
+    """The JOB_FUNCTIONS key is the job's identity everywhere. These cases all
+    have a registry key that differs from the function's __name__ — the shape
+    that any `fn.__name__`-derived identity gets wrong."""
+
+    def _register(self, entries: dict) -> tuple:
+        app, _, lock_client, _ = _build_test_app(self)
+        with patch.dict(schedule.JOB_FUNCTIONS, entries, clear=True):
+            schedule.init_jobs(app, register_with_scheduler=False)
+        return app, lock_client
+
+    def test_lock_key_uses_registry_name_not_function_name(self) -> None:
+        app, lock_client = self._register(
+            {"coverage_hourly": {"fn": MagicMock(__name__="run_coverage"),
+                                 "trigger": IntervalTrigger(seconds=30)}}
+        )
+        lock_client.set.return_value = True
+        app.config["WRAPPED_JOBS"]["coverage_hourly"]()
+        self.assertEqual(
+            lock_client.set.call_args.args[0], "api_skewnono:lock:coverage_hourly"
+        )
+
+    def test_log_records_use_registry_name_not_function_name(self) -> None:
+        # The dashboard builds its job dropdown from JOB_FUNCTIONS keys, so a
+        # record filed under the function name shows up there as "(orphan)".
+        app, lock_client = self._register(
+            {"coverage_hourly": {"fn": MagicMock(__name__="run_coverage"),
+                                 "trigger": IntervalTrigger(seconds=30)}}
+        )
+        lock_client.set.return_value = True
+        pipe = lock_client.pipeline.return_value.__enter__.return_value
+        app.config["WRAPPED_JOBS"]["coverage_hourly"]()
+        jobs = {json.loads(c.args[1])["job"] for c in pipe.lpush.call_args_list}
+        self.assertEqual(jobs, {"coverage_hourly"})
+
+    def test_two_entries_sharing_a_function_get_separate_locks(self) -> None:
+        # The latent trap: keyed on fn.__name__ these would share one lock,
+        # so the backfill run would skip whenever the hourly one was running.
+        shared = MagicMock(__name__="run_coverage")
+        app, lock_client = self._register(
+            {
+                "coverage_hourly": {"fn": shared, "trigger": IntervalTrigger(seconds=30)},
+                "coverage_backfill": {"fn": shared, "trigger": IntervalTrigger(seconds=30)},
+            }
+        )
+        lock_client.set.return_value = True
+        for job in ("coverage_hourly", "coverage_backfill"):
+            app.config["WRAPPED_JOBS"][job]()
+        keys = [c.args[0] for c in lock_client.set.call_args_list]
+        self.assertEqual(
+            keys,
+            ["api_skewnono:lock:coverage_hourly", "api_skewnono:lock:coverage_backfill"],
+        )
+
+
 class SkipRecordTests(unittest.TestCase):
     """A skipped run records the holder as structured fields. The dashboard's
     detailFor() renders them, so held_since goes through toKst like every

@@ -183,25 +183,34 @@ class TaskLogger:
         except Exception:
             log.exception("failed to push task-run record")
 
-    def wrap(self, fn: Callable) -> Callable:
-        """Emit start / end / error records around each invocation of ``fn``."""
+    def wrap(self, fn: Callable, name: str | None = None) -> Callable:
+        """Emit start / end / error records around each invocation of ``fn``.
+
+        ``name`` overrides the recorded job name; pass the JOB_FUNCTIONS key
+        so records, the lock key and the scheduler job id share one identity.
+        Falling back to ``fn.__name__`` splits them the moment a registry key
+        differs from its function's name — the dashboard builds its job list
+        from registry keys, so those records land under a name the dropdown
+        doesn't know and get labelled "(orphan)".
+        """
+        job = name or fn.__name__
 
         @wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            self.record(fn.__name__, "start")
+            self.record(job, "start")
             t0 = time.monotonic()
             try:
                 result = fn(*args, **kwargs)
             except Exception as exc:
                 self.record(
-                    fn.__name__,
+                    job,
                     "error",
                     duration_ms=int((time.monotonic() - t0) * 1000),
                     error=repr(exc),
                 )
                 raise
             self.record(
-                fn.__name__,
+                job,
                 "end",
                 duration_ms=int((time.monotonic() - t0) * 1000),
             )
@@ -384,7 +393,7 @@ def redis_lock(
     *,
     key: str,
     ttl: int,
-    on_skip: Callable[[str, dict[str, Any]], None] | None = None,
+    on_skip: Callable[[dict[str, Any]], None] | None = None,
 ) -> Callable[[Callable], Callable]:
     """Skip-if-held lock with owner-checked release and TTL renewal.
 
@@ -394,9 +403,10 @@ def redis_lock(
     orphaned lock outlives a killed process — not how long the job may take.
     Release runs a Lua CAS so we only DEL the key when we still hold it.
 
-    Optional ``on_skip(fn_name, holder_info)`` fires when another holder
-    already has the lock; ``holder_info`` comes from
-    :func:`describe_lock_holder`.
+    Optional ``on_skip(holder_info)`` fires when another holder already has
+    the lock; ``holder_info`` comes from :func:`describe_lock_holder`. It
+    takes no job name — a generic lock has no business naming the caller's
+    work, and the caller already knows which job it wrapped.
     """
     # register_script does no I/O — it just computes the sha1 locally and
     # defers EVALSHA + NOSCRIPT fallback to call time.
@@ -409,7 +419,7 @@ def redis_lock(
             token = lock_owner_token()
             if not client.set(key, token, nx=True, ex=ttl):
                 if on_skip is not None:
-                    on_skip(fn.__name__, describe_lock_holder(client, key))
+                    on_skip(describe_lock_holder(client, key))
                 return None
             stop = _start_renewal(client, key, token, ttl, renew)
             try:

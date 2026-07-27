@@ -72,6 +72,20 @@ JOB_FUNCTIONS: dict[str, dict[str, Any]] = {
 HEARTBEAT_JOB_ID = "_scheduler_heartbeat"
 
 
+def _skip_recorder(task_logger: TaskLogger, job: str) -> Callable:
+    """Build the ``on_skip`` callback that logs one ``skip`` record for ``job``.
+
+    A factory, not a closure written inline in ``init_jobs``' loop: a closure
+    would capture the loop *variable*, so by the time any job actually ran,
+    every callback would report the last-registered name.
+    """
+
+    def record_skip(info: dict[str, Any]) -> None:
+        task_logger.record(job, "skip", **info)
+
+    return record_skip
+
+
 def run_registered_job(name: str) -> Any:
     """Top-level entry point APScheduler stores by import path, not by value.
 
@@ -141,24 +155,23 @@ def init_jobs(app: Flask, *, register_with_scheduler: bool = True) -> None:
     lock_client = app.config["LOCK_CLIENT"]
     task_logger: TaskLogger = app.config["TASK_LOGGER"]
 
-    # A held lock emits one `skip` record carrying the holder's identity —
-    # wrapping this way (lock outside, logger inside) is what keeps it to a
-    # single record instead of start/skip/end.
-    def on_skip(name: str, info: dict[str, Any]) -> None:
-        task_logger.record(name, "skip", **info)
-
     wrapped: dict[str, Callable] = {}
     for name, spec in JOB_FUNCTIONS.items():
+        # The registry key is the job's identity everywhere: lock key,
+        # scheduler job id, WRAPPED_JOBS key and log records. Deriving any
+        # of them from `fn.__name__` instead splits that identity as soon as
+        # an entry is named differently from its function — and two entries
+        # sharing one function would silently share one lock.
         wrapped[name] = redis_lock(
             lock_client,
-            key=f"{cfg.lock_key_prefix}{spec['fn'].__name__}",
+            key=f"{cfg.lock_key_prefix}{name}",
             # `or` not `.get(key, default)`: an explicit `"lock_ttl": None`
             # must fall back too. Passing None through would reach
             # `SET ... ex=None`, i.e. a lock with NO expiry — one killed
             # process would then block the job forever.
             ttl=spec.get("lock_ttl") or cfg.lock_ttl,
-            on_skip=on_skip,
-        )(task_logger.wrap(spec["fn"]))
+            on_skip=_skip_recorder(task_logger, name),
+        )(task_logger.wrap(spec["fn"], name))
         if register_with_scheduler:
             # Optional per-job scheduler settings.
             optional = {
