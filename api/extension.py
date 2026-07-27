@@ -382,7 +382,7 @@ def redis_lock(
     takes no job name — a generic lock has no business naming the caller's
     work, and the caller already knows which job it wrapped.
     """
-    from redis.exceptions import LockError
+    from redis.exceptions import RedisError
     from redis.lock import Lock
 
     def decorator(fn: Callable) -> Callable:
@@ -409,11 +409,14 @@ def redis_lock(
                 stop.set()
                 try:
                     lock.release()
-                except LockError:
-                    # Covers LockNotOwnedError — the key expired mid-run and
-                    # someone else owns it now, so there is nothing of ours
-                    # to delete. Swallow-and-log like every other Redis call
-                    # here: observability never breaks the task.
+                except RedisError:
+                    # RedisError, not just LockError: LockNotOwnedError (the
+                    # key expired mid-run, nothing of ours to delete) and a
+                    # connection blip both land here. An exception escaping
+                    # this ``finally`` would replace the job's own result or
+                    # mask its real error, and the orphaned key expires on
+                    # its own within ``ttl`` anyway. Swallow-and-log like
+                    # every other Redis call here.
                     log.exception("failed to release lock %s", key)
 
         return wrapper

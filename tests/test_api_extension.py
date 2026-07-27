@@ -160,6 +160,17 @@ class RedisLockTests(unittest.TestCase):
         wrapped = redis_lock(self.client, key="k", ttl=30)(MagicMock(return_value="ok"))
         self.assertEqual(wrapped(), "ok")
 
+    def test_swallows_connection_error_on_release(self) -> None:
+        # A Redis blip at release time raises from the finally block, which
+        # would REPLACE the task's own result (or mask its real exception).
+        # The task already ran; the key expires on its own within ttl.
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        self.client.set.return_value = True
+        self.scripts.side_effect = RedisConnectionError("read timeout")
+        wrapped = redis_lock(self.client, key="k", ttl=30)(MagicMock(return_value="ok"))
+        self.assertEqual(wrapped(), "ok")
+
     def test_watchdog_thread_can_extend_the_lock(self) -> None:
         # Guards thread_local=False. redis-py's default stashes the
         # acquisition token in threading.local(), so the renewal thread would
