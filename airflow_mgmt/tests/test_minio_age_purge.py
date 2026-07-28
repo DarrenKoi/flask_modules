@@ -1,10 +1,10 @@
-"""Behavior tests for the last_modified-based image-cache purge."""
+"""Behavior tests for the last_modified-based age purge."""
 
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
-from scripts.minio_image_cache_purge import (
+from scripts.minio_age_purge import (
     SAMPLE_SIZE,
     iter_expired,
     purge_modified_before,
@@ -114,6 +114,49 @@ class PurgeModifiedBeforeTests(unittest.TestCase):
                     purge_modified_before(
                         _storage(), 7, prefix=prefix, dry_run=True, now=NOW
                     )
+
+
+class SuffixFilterTests(unittest.TestCase):
+    """A prefix is not always a retention unit — the MSR store keeps the raw
+    .MSR original next to the pickle, and only the pickle may be swept."""
+
+    def test_suffix_excludes_other_object_kinds(self):
+        storage = _storage(_aged("a.pkl", 70), _aged("a.MSR", 70))
+        result = purge_modified_before(
+            storage, 61, prefix="hitachi_sem/", suffix=".pkl", dry_run=False, now=NOW
+        )
+        storage.delete_many.assert_called_once_with(["2067928/image_cache/a.pkl"])
+        self.assertEqual(result["candidate_count"], 1)
+
+    def test_no_suffix_sweeps_every_kind(self):
+        storage = _storage(_aged("a.pkl", 70), _aged("a.MSR", 70))
+        result = purge_modified_before(
+            storage, 61, prefix="hitachi_sem/", dry_run=True, now=NOW
+        )
+        self.assertEqual(result["candidate_count"], 2)
+
+    def test_suffix_matching_nothing_deletes_nothing(self):
+        """A wrong suffix must fail closed, not fall back to sweeping everything."""
+        storage = _storage(_aged("a.pkl", 70))
+        result = purge_modified_before(
+            storage, 61, prefix="hitachi_sem/", suffix=".pickle", dry_run=False, now=NOW
+        )
+        storage.delete_many.assert_not_called()
+        self.assertEqual(result["candidate_count"], 0)
+
+    def test_suffix_is_reported_back(self):
+        result = purge_modified_before(
+            _storage(), 61, prefix="hitachi_sem/", suffix=".pkl", dry_run=True, now=NOW
+        )
+        self.assertEqual(result["suffix"], ".pkl")
+
+    def test_suffix_applies_before_the_age_test(self):
+        """Dry-run output must list only what a live run would touch."""
+        storage = _storage(_aged("young.pkl", 2), _aged("old.MSR", 70))
+        result = purge_modified_before(
+            storage, 61, prefix="hitachi_sem/", suffix=".pkl", dry_run=True, now=NOW
+        )
+        self.assertEqual(result["sample"], [])
 
 
 if __name__ == "__main__":

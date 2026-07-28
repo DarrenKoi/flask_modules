@@ -1,7 +1,7 @@
 """Delete SEM image-cache objects older than RETENTION_DAYS, nightly at 03:35 KST.
 
 Thin scheduler wrapper. The actual purge logic lives in
-scripts/minio_image_cache_purge.py so it can be tested from a plain
+scripts/minio_age_purge.py so it can be tested from a plain
 Python REPL without Airflow installed.
 
 Dry-run is controlled by the Airflow Variable `image_cache_purge_dry_run`:
@@ -51,7 +51,7 @@ if str(ROOT_DIR) not in sys.path:
 # ────────────────────────────────────────────────────────────────────────────
 
 from minio_handler import MinioObject  # noqa: E402
-from scripts.minio_image_cache_purge import purge_modified_before  # noqa: E402
+from scripts.minio_age_purge import purge_modified_before  # noqa: E402
 
 
 KST = ZoneInfo("Asia/Seoul")
