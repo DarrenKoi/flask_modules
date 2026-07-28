@@ -1,34 +1,41 @@
-"""Delete MSR pickles older than RETENTION_DAYS, nightly at 04:05 KST.
+"""Delete MSR pickle partitions older than RETENTION_DAYS, nightly at 04:05 KST.
 
-Thin scheduler wrapper. The purge logic lives in scripts/minio_age_purge.py
-so it can be tested from a plain Python REPL without Airflow installed.
+Thin scheduler wrapper. The purge logic lives in
+scripts/hitachi_sem_partition_purge.py so it can be run from a plain Python
+REPL without Airflow installed.
+
+Layout (bucket / key):
+    user / 2067928/hitachi_sem/{cdsem,hvsem}/{raw_msr,dict_pkl}/YYYY/MM/DD/...
+
+Because the tree is date-partitioned, this sweeps whole ``YYYY/MM/DD``
+partitions rather than testing every object's last_modified: the walk is one list
+call per partition level instead of one per file, which matters when a single
+day holds a large number of objects.
+
+KINDS is ``("dict_pkl",)`` — deliberately NOT both. ``raw_msr`` is the raw
+.MSR 원본; it has its own retention question and is not covered by the number
+below. Widening this tuple deletes originals.
 
 READ THIS BEFORE TURNING OFF DRY-RUN — this job deletes source data, not a
-cache. Unlike the image cache, nothing here re-creates a deleted object:
-skewnono only ever *reads* these pickles (msr_file's office adapter calls
-MinioObject().get_pickle and never puts), and re-deriving one from the raw
-.MSR text is explicitly out of scope for that app. Recovery means re-running
-the upstream post-processing pipeline.
+cache. skewnono only ever *reads* these pickles (msr_file's office adapter
+calls MinioObject().get_pickle and never puts), and re-deriving one from the
+raw .MSR text is explicitly out of scope for that app. Recovery means
+re-running the upstream post-processing pipeline.
 
-Two things make the default safe and the live run risky:
+RETENTION_DAYS must stay clear of meas_hist's consumer window. skewnono serves
+measurement history for 60 days and every meas_hist document holds the path to
+its pickle — delete the object and the MSR detail view breaks for a search hit
+the app still returns. 61 leaves one day of margin.
 
-1. RETENTION_DAYS must stay clear of meas_hist's consumer window. skewnono
-   serves measurement history for 60 days, and every meas_hist document holds
-   the path to its pickle — delete the object and the MSR detail view breaks
-   for a search hit the app still returns. 61 leaves one day of margin.
+That margin is thinner than it looks. The 60-day window is anchored on
+max(timestamp) across the meas_hist aliases, NOT on now. If ingestion lags L
+days, the window reaches back to now-60-L, so the true margin is 1-L days and
+any lag at all overruns it. Raise RETENTION_DAYS if ingestion is ever more than
+a day behind.
 
-   That margin is thinner than it looks. The 60-day window is anchored on
-   max(timestamp) across the meas_hist aliases, NOT on now. If ingestion lags
-   L days, the window reaches back to now-60-L, so the true margin is 1-L
-   days and any lag at all overruns it. Raise RETENTION_DAYS if ingestion is
-   ever more than a day behind.
-
-2. PREFIX is not a retention unit. The raw .MSR original (minio_msr) and the
-   post-processed pickle (minio_pkl) both live under hitachi_sem/, and the raw
-   text is the true 원본. SUFFIX narrows the sweep to pickles — but its value
-   below is a PLACEHOLDER, unverified against the real store. Leave dry-run on,
-   read the logged object names, set SUFFIX to whatever actually distinguishes
-   a pickle, and only then flip the Variable.
+Note the sibling one-off (scripts/hitachi_sem_partition_purge.py __main__)
+defaults to 30 days across BOTH kinds. That is a reclaim tool, not this policy —
+running it as-is would delete pickles the 60-day window still serves.
 
 Dry-run is controlled by the Airflow Variable `msr_pickle_purge_dry_run`:
   - 'true' (default): log what would be deleted, change nothing
@@ -65,19 +72,15 @@ if str(ROOT_DIR) not in sys.path:
 # ────────────────────────────────────────────────────────────────────────────
 
 from minio_handler import MinioObject  # noqa: E402
-from scripts.minio_age_purge import purge_modified_before  # noqa: E402
+from airflow_mgmt.scripts.hitachi_sem_partition_purge import (  # noqa: E402
+    BUCKET,
+    purge_hitachi_sem,
+)
 
 
 KST = ZoneInfo("Asia/Seoul")
-BUCKET = "user"
-# Relative to minio_config.PREFIX ("2067928/") — passing the full
-# "2067928/hitachi_sem/" would double the namespace and match nothing.
-PREFIX = "hitachi_sem/"
-# PLACEHOLDER — unverified against the office store. Confirm from a dry-run's
-# logged object names before trusting it; a wrong suffix silently selects
-# nothing (safe) or the raw .MSR originals (not safe).
-SUFFIX = ".pkl"
-# meas_hist serves 60 days; see the module docstring on why 61 is a thin margin.
+# Pickles only — raw_msr is the 원본 and is not covered by RETENTION_DAYS.
+KINDS = ("dict_pkl",)
 RETENTION_DAYS = 61
 DRY_RUN_VAR = "msr_pickle_purge_dry_run"
 
@@ -94,23 +97,22 @@ def _resolve_dry_run() -> bool:
 def purge() -> dict:
     dry_run = _resolve_dry_run()
     storage = MinioObject(bucket=BUCKET)
-    result = purge_modified_before(
+    result = purge_hitachi_sem(
         storage,
-        RETENTION_DAYS,
-        prefix=PREFIX,
-        suffix=SUFFIX,
+        retention_days=RETENTION_DAYS,
+        kinds=KINDS,
         dry_run=dry_run,
         logger=log,
     )
 
     log.info(
-        "%s: %d objects (%s) older than %dd under %s (cutoff %s)",
+        "%s: %d partitions %s older than %dd (cutoff %s, today KST %s)",
         "DRY-RUN" if dry_run else "DELETED",
-        result["candidate_count"],
-        SUFFIX,
+        result["deleted_count"],
+        result["kinds"],
         RETENTION_DAYS,
-        PREFIX,
         result["cutoff"],
+        result["today"],
     )
     if result["errors"]:
         raise RuntimeError(f"delete errors: {result['errors']}")
@@ -119,7 +121,7 @@ def purge() -> dict:
 
 with DAG(
     dag_id="minio_purge_old_pickles",
-    description=f"Nightly 04:05 KST purge of MSR pickles older than {RETENTION_DAYS} days",
+    description=f"Nightly 04:05 KST purge of MSR pickle partitions older than {RETENTION_DAYS} days",
     start_date=datetime(2026, 1, 1, tzinfo=KST),
     schedule="5 4 * * *",
     catchup=False,

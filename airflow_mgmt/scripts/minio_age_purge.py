@@ -1,9 +1,12 @@
 """Delete MinIO objects under a prefix whose last_modified is older than N days.
 
 Pure logic — no Airflow imports — so it is importable and runnable from a
-plain Python REPL. Two DAGs wrap it today:
-  dags/image_cache/minio_purge_image_cache_dag.py   (SEM image cache, 7d)
-  dags/msr_pickle/minio_purge_old_pickles_dag.py    (MSR pickles, 61d)
+plain Python REPL. Wrapped by dags/image_cache/minio_purge_image_cache_dag.py.
+
+Use this only for stores whose keys carry NO date. A date-partitioned tree
+(hitachi_sem/.../YYYY/MM/DD/) should use hitachi_sem_partition_purge instead:
+walking partition folders costs one list call per level, while the sweep here
+enumerates every object under the prefix.
 
 Why this sits next to scripts/minio_partition_purge.py rather than reusing it:
 that one walks ``YYYY/MM/DD`` partitions, and ``MinioObject.delete_older_than``
@@ -21,12 +24,6 @@ without an explicit prefix already carries it. ``prefix`` here is therefore
 ``list()`` resolves to ``2067928/2067928/image_cache/`` and quietly matches
 nothing. The full ``object_name`` values that come back are handed straight to
 ``delete_many``, which accepts already-prefixed keys.
-
-``suffix`` narrows a shared prefix to one kind of object. It exists because a
-prefix is not always a retention unit: the MSR store keeps the post-processed
-pickle and the raw ``.MSR`` original side by side under ``hitachi_sem/``, and a
-blind sweep would take both. When in doubt, run dry and read the logged names
-before setting it.
 
 Local dry-run from the repo root:
     python -m airflow_mgmt.scripts.minio_age_purge
@@ -48,7 +45,6 @@ def iter_expired(
     storage: MinioObject,
     cutoff: datetime,
     prefix: str,
-    suffix: str | None = None,
 ) -> Iterator[tuple[str, datetime]]:
     """Yield ``(object_name, last_modified)`` for objects older than ``cutoff``.
 
@@ -57,13 +53,8 @@ def iter_expired(
     timestamp is never *provably* stale — skip it rather than delete it. The
     check also keeps a ``None`` from reaching the comparison below, where it
     would raise and abort the whole sweep before anything is deleted.
-
-    ``suffix`` is applied before the age test so a dry run reports only the
-    objects the live run would actually touch.
     """
     for obj in storage.list(prefix=prefix, recursive=True):
-        if suffix is not None and not obj.object_name.endswith(suffix):
-            continue
         last_modified = getattr(obj, "last_modified", None)
         if last_modified is None:
             continue
@@ -79,7 +70,6 @@ def purge_modified_before(
     *,
     prefix: str,
     dry_run: bool,
-    suffix: str | None = None,
     now: datetime | None = None,
     logger: Any | None = None,
 ) -> dict:
@@ -95,10 +85,9 @@ def purge_modified_before(
     That is not the sort of environment-specific validation this repo avoids —
     a root prefix is catastrophic everywhere.
 
-    ``suffix``, when given, keeps only keys ending with it. ``logger`` is
-    optional — pass an Airflow task logger from the DAG, or leave None for
-    stdout (handy in a REPL). ``now`` is injectable so tests can pin the cutoff
-    without freezing the clock.
+    ``logger`` is optional — pass an Airflow task logger from the DAG, or leave
+    None for stdout (handy in a REPL). ``now`` is injectable so tests can pin
+    the cutoff without freezing the clock.
     """
     if not prefix.strip().strip("/"):
         raise ValueError(
@@ -108,7 +97,7 @@ def purge_modified_before(
     log = _make_logger(logger)
     cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=days)
 
-    expired = list(iter_expired(storage, cutoff, prefix, suffix))
+    expired = list(iter_expired(storage, cutoff, prefix))
     names = [name for name, _ in expired]
     errors: list[Any] = []
 
@@ -133,7 +122,6 @@ def purge_modified_before(
         "cutoff": cutoff.isoformat(),
         "dry_run": dry_run,
         "prefix": prefix,
-        "suffix": suffix,
         "candidate_count": len(names),
         "deleted_count": 0 if dry_run else len(names) - len(errors),
         "sample": names[:SAMPLE_SIZE],
@@ -152,19 +140,16 @@ def _make_logger(logger: Any | None):
 
 
 if __name__ == "__main__":
-    # Local dry-run. Bucket, prefix, suffix and retention are env-driven so this
-    # same invocation works against dev and prod MinIO without code edits.
+    # Local dry-run. Bucket, prefix and retention are env-driven so this same
+    # invocation works against dev and prod MinIO without code edits.
     import os
 
     bucket = os.getenv("MINIO_BUCKET", "user")
     prefix = os.getenv("PURGE_PREFIX", "image_cache/")
-    suffix = os.getenv("PURGE_SUFFIX") or None
     days = int(os.getenv("PURGE_DAYS", "7"))
 
     storage = MinioObject(bucket=bucket)
-    result = purge_modified_before(
-        storage, days, prefix=prefix, suffix=suffix, dry_run=True
-    )
+    result = purge_modified_before(storage, days, prefix=prefix, dry_run=True)
     print(
         f"\ncutoff={result['cutoff']} "
         f"candidates={result['candidate_count']} "

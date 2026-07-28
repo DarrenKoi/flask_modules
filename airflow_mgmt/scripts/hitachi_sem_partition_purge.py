@@ -1,10 +1,15 @@
-"""One-off: purge old YYYY/MM/DD partitions under the Hitachi SEM trees.
+"""Purge old YYYY/MM/DD partitions under the Hitachi SEM trees.
 
 Layout on MinIO (bucket / key):
-    2067928 / hitachi_sem/{cdsem,hvsem}/{raw_msr,dict_pkl}/YYYY/MM/DD/<files>
+    user / 2067928/hitachi_sem/{cdsem,hvsem}/{raw_msr,dict_pkl}/YYYY/MM/DD/<files>
 
 There are four parent folders (two sensor types x two data kinds); each is
-partitioned by date the same way, so all four are swept in one run.
+partitioned by date the same way, so all four are swept by default. Pass
+``kinds`` to sweep only one — the scheduled pickle job does, because
+``dict_pkl`` and ``raw_msr`` do not share a retention rule.
+
+Also wrapped by dags/msr_pickle/minio_purge_old_pickles_dag.py, so this is no
+longer only a one-off; keep purge_hitachi_sem importable and side-effect free.
 
 Keeps the most recent ``RETENTION_DAYS`` days and deletes every partition
 dated on or before ``today - RETENTION_DAYS``. "today" is resolved in KST
@@ -34,18 +39,36 @@ from airflow_mgmt.scripts.minio_partition_purge import (
     walk_date_partitions,
 )
 
-BUCKET = "2067928"
-PREFIX_ROOT = "hitachi_sem"
+# "2067928" is a PREFIX inside the "user" bucket, not a bucket of its own —
+# minio_config.BUCKET is "user" and minio_config.PREFIX is "2067928/" (office
+# confirmed 2026-07-24). MinioObject(bucket="2067928") asks for a bucket that
+# does not exist and MinIO answers InvalidBucketName; msr_file's office adapter
+# calls out that exact failure mode.
+BUCKET = "user"
+NAMESPACE = "2067928"
+# The namespace is spelled out here because _purge_one_parent calls
+# use_prefix(), which REPLACES default_prefix rather than appending to it — a
+# bare "hitachi_sem/..." would drop the namespace and address nothing.
+PREFIX_ROOT = f"{NAMESPACE}/hitachi_sem"
 SENSORS = ("cdsem", "hvsem")
 KINDS = ("raw_msr", "dict_pkl")
 RETENTION_DAYS = 30
 KST = ZoneInfo("Asia/Seoul")
 
 
-def parent_prefixes() -> list[str]:
-    """The four date-partitioned parents: sensor x data-kind under the root."""
+def parent_prefixes(
+    prefix_root: str = PREFIX_ROOT,
+    kinds: tuple[str, ...] = KINDS,
+) -> list[str]:
+    """The date-partitioned parents: sensor x data-kind under the root.
 
-    return [f"{PREFIX_ROOT}/{s}/{k}" for s in SENSORS for k in KINDS]
+    ``kinds`` narrows which data kinds are swept. The pickle and the raw .MSR
+    original have different retention rules — the pickle backs a 60-day
+    consumer window, the raw text is the 원본 — so a caller that means one must
+    be able to say so rather than getting both.
+    """
+
+    return [f"{prefix_root}/{s}/{k}" for s in SENSORS for k in kinds]
 
 
 def kst_today() -> date:
@@ -95,11 +118,13 @@ def purge_hitachi_sem(
     storage: MinioObject,
     *,
     retention_days: int = RETENTION_DAYS,
+    kinds: tuple[str, ...] = KINDS,
+    prefix_root: str = PREFIX_ROOT,
     today: date | None = None,
     dry_run: bool = True,
     logger: Any | None = None,
 ) -> dict:
-    """Purge all four parent folders, keeping the most recent N days.
+    """Purge the selected parent folders, keeping the most recent N days.
 
     A partition is deleted when ``(today - partition_date).days >=
     retention_days`` — so with the default 30, the partition dated exactly
@@ -107,6 +132,9 @@ def purge_hitachi_sem(
     defaults to KST today; pass an explicit ``date`` to make a run
     reproducible (handy in tests). The candidate list is always returned,
     even on a dry run, so callers can act on it.
+
+    ``kinds`` defaults to both data kinds, which is right for a one-off
+    reclaim but not for a scheduled job: see parent_prefixes.
     """
 
     log = _make_logger(logger)
@@ -115,7 +143,7 @@ def purge_hitachi_sem(
 
     deleted: list[str] = []
     errors: list[Any] = []
-    for base_prefix in parent_prefixes():
+    for base_prefix in parent_prefixes(prefix_root, kinds):
         outcome = _purge_one_parent(
             storage, base_prefix, cutoff, dry_run=dry_run, log=log
         )
@@ -126,6 +154,7 @@ def purge_hitachi_sem(
         "today": today.isoformat(),
         "cutoff": cutoff.isoformat(),
         "retention_days": retention_days,
+        "kinds": list(kinds),
         "dry_run": dry_run,
         "deleted_prefixes": deleted,
         "deleted_count": len(deleted),
