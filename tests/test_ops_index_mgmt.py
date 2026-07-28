@@ -207,6 +207,10 @@ class SemMsrInfoIndexMgmtTests(unittest.TestCase):
     def test_ensure_rollover_index_rejects_non_rollover_existing_index(self) -> None:
         client = Mock()
         client.indices.exists.return_value = True
+        # A plain index sitting where the alias should be, so the alias API
+        # says no. Needed explicitly now that describe() always asks: an
+        # unconfigured Mock is truthy and would fake an alias into existence.
+        client.indices.exists_alias.return_value = False
         client.indices.get.return_value = {
             "meas_hist_cdsem": {
                 "aliases": {},

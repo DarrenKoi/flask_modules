@@ -710,7 +710,11 @@ class OSIndexTests(unittest.TestCase):
 
     def test_describe_summarizes_alias_backing_indices_and_rollover(self) -> None:
         client = Mock()
-        client.indices.exists.return_value = False
+        # True, not False: `HEAD /<target>` resolves aliases, so a real
+        # cluster answers `exists` True for an existing alias. This used to
+        # say False, which is a state no cluster can produce, and it hid
+        # describe() reporting `is_alias: False` for every live alias.
+        client.indices.exists.return_value = True
         client.indices.exists_alias.return_value = True
         client.indices.get_alias.side_effect = [
             {
@@ -783,6 +787,9 @@ class OSIndexTests(unittest.TestCase):
     def test_describe_can_include_raw_metadata(self) -> None:
         client = Mock()
         client.indices.exists.return_value = True
+        # `logs-000002` is a concrete index that merely belongs to the `logs`
+        # alias, so the alias API says no for this name.
+        client.indices.exists_alias.return_value = False
         client.indices.get.return_value = {
             "logs-000002": {
                 "aliases": {"logs": {"is_write_index": True}},
@@ -806,6 +813,38 @@ class OSIndexTests(unittest.TestCase):
                     "settings": {"index": {"number_of_replicas": "0"}},
                     "mappings": {"properties": {"title": {"type": "text"}}},
                 }
+            },
+        )
+
+    def test_describe_reports_a_live_rollover_alias_as_ready(self) -> None:
+        """Regression: the minimal shape ops_index_mgmt provisions.
+
+        One alias over one `-000001` backing index, both existing. `exists`
+        and `exists_alias` each answer True, exactly as a cluster does. Callers
+        gate rollover writes on `is_alias` and `rollover.ready`; when describe()
+        skipped the alias check these came back False and a freshly provisioned
+        logging alias was rejected as unusable.
+        """
+        client = Mock()
+        client.indices.exists.return_value = True
+        client.indices.exists_alias.return_value = True
+        backing = {"logs-000001": {"aliases": {"logs": {"is_write_index": True}}}}
+        client.indices.get_alias.side_effect = [backing, backing]
+        service = OSIndex(client=client, index="logs")
+
+        description = service.describe()
+
+        self.assertTrue(description["is_alias"])
+        self.assertFalse(description["is_index"])
+        self.assertEqual(description["resource_type"], "alias")
+        self.assertEqual(
+            description["rollover"],
+            {
+                "alias": "logs",
+                "backing_indices": ["logs-000001"],
+                "write_index": "logs-000001",
+                "ready": True,
+                "uses_numbered_suffix": True,
             },
         )
 
