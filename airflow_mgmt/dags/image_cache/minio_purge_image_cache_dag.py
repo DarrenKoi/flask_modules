@@ -15,10 +15,17 @@ Timezone: start_date is KST-aware, so the cron below is read as KST no matter
 what `core.default_timezone` is set to. A naive start_date (what the other DAGs
 in this repo use) would let a UTC-defaulted scheduler fire this at 12:35 KST.
 
-Schedule vs retention: these are independent. The nightly run bounds how long a
-7-day-old object can linger before collection to ~1 day; a weekly run would let
-it reach ~14 days. Widen RETENTION_DAYS to change what "old" means; change the
-cron to change how promptly old objects are collected.
+Schedule vs retention: these are independent. The nightly run bounds how long an
+expired object can linger before collection to ~1 day; a weekly run would let it
+reach RETENTION_DAYS + 7. Widen RETENTION_DAYS to change what "old" means; change
+the cron to change how promptly old objects are collected.
+
+RETENTION_DAYS is HALF of a pair. The skewnono app's own APScheduler purge sweeps
+this same prefix on IMAGE_CACHE_TTL_HOURS (back_dev_home/msr_image/config.py),
+and this DAG is the safety net for when that app is down. The two windows must
+stay equal: if the app's is shorter, it always deletes first and this DAG becomes
+a permanent no-op that still reports success. Both moved 7d -> 3d together on
+2026-08-02 (user-confirmed).
 """
 
 import logging
@@ -60,7 +67,7 @@ BUCKET = "user"
 # docstring. Passing the full "2067928/image_cache/" here would double the
 # namespace and silently match nothing.
 PREFIX = "image_cache/"
-RETENTION_DAYS = 7
+RETENTION_DAYS = 3
 DRY_RUN_VAR = "image_cache_purge_dry_run"
 
 
