@@ -401,5 +401,83 @@ class MinioDeleteOlderThanTests(unittest.TestCase):
         self.assertEqual(result.errors, ["boom"])
 
 
+class ConnectionCheckTests(unittest.TestCase):
+    def test_ping_probes_default_bucket(self) -> None:
+        client = Mock()
+        client.bucket_exists.return_value = True
+        service = MinioObject(client=client, bucket="bucket")
+
+        self.assertTrue(service.ping())
+        client.bucket_exists.assert_called_once_with("bucket")
+        client.list_buckets.assert_not_called()
+
+    def test_ping_returns_false_when_endpoint_unreachable(self) -> None:
+        client = Mock()
+        client.bucket_exists.side_effect = ConnectionError("connection refused")
+        service = MinioObject(client=client, bucket="bucket")
+
+        self.assertFalse(service.ping())
+
+    def test_ping_is_true_for_a_reachable_endpoint_missing_the_bucket(self) -> None:
+        client = Mock()
+        client.bucket_exists.return_value = False
+        service = MinioObject(client=client, bucket="bucket")
+
+        status = service.check_connection()
+
+        self.assertTrue(service.ping())
+        self.assertTrue(status.ok)
+        self.assertFalse(status.detail["bucket_exists"])
+
+    def test_check_connection_uses_the_bucket_from_minio_config(self) -> None:
+        client = Mock()
+        client.bucket_exists.return_value = True
+        with patch(
+            "minio_handler.base._module_values", return_value={"bucket": "cfg-bucket"}
+        ):
+            service = MinioObject(client=client)
+
+        status = service.check_connection()
+
+        self.assertTrue(status.ok)
+        self.assertEqual(status.detail["bucket"], "cfg-bucket")
+        client.bucket_exists.assert_called_once_with("cfg-bucket")
+        client.list_buckets.assert_not_called()
+
+    def test_check_connection_reports_a_missing_bucket_name(self) -> None:
+        client = Mock()
+        with patch("minio_handler.base._module_values", return_value={}):
+            service = MinioObject(client=client)
+
+        status = service.check_connection()
+
+        self.assertFalse(status)
+        self.assertIn("bucket name is required", status.error)
+        client.bucket_exists.assert_not_called()
+        client.list_buckets.assert_not_called()
+
+    def test_check_connection_reports_error_without_raising(self) -> None:
+        client = Mock()
+        client.bucket_exists.side_effect = PermissionError("access denied")
+        service = MinioObject(client=client, bucket="bucket")
+
+        status = service.check_connection()
+
+        self.assertFalse(status)
+        self.assertEqual(status.error, "PermissionError: access denied")
+        self.assertEqual(status.detail, {})
+        self.assertGreaterEqual(status.elapsed_ms, 0)
+
+    def test_check_connection_accepts_an_explicit_bucket(self) -> None:
+        client = Mock()
+        client.bucket_exists.return_value = True
+        service = MinioObject(client=client, bucket="bucket")
+
+        status = service.check_connection("other")
+
+        self.assertEqual(status.detail["bucket"], "other")
+        client.bucket_exists.assert_called_once_with("other")
+
+
 if __name__ == "__main__":
     unittest.main()

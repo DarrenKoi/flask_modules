@@ -125,6 +125,46 @@ mo = MinioObject(config=load_config(), bucket="user", prefix="2067928/")
 mo = MinioObject(bucket="user", prefix="2067928/")
 ```
 
+## 연결 확인 (ping / check_connection)
+
+설정을 바꾼 직후나 서비스 기동 시점에 "이 endpoint와 key로 실제로 붙는가"를
+먼저 확인하고 싶을 때 씁니다. 두 메서드 모두 예외를 밖으로 던지지 않습니다.
+
+```python
+mo = MinioObject()   # bucket / prefix 생략 → minio_config.py의 BUCKET, PREFIX 사용
+
+mo.ping()            # True / False
+mo.ping("other")     # default bucket 대신 다른 bucket으로 확인
+```
+
+MinIO에는 ping API가 없기 때문에 bucket 하나에 `bucket_exists`를 한 번
+호출합니다. endpoint 왕복과 credential 검증을 동시에 하는 가장 싼 호출입니다.
+확인 대상 bucket은 평소 호출과 **같은 순서**로 정해집니다 — 인자로 넘긴
+bucket → instance의 default bucket → `minio_config.py`의 `BUCKET`. 즉
+`MinioObject()`를 그냥 만들면 설정 파일에 적어 둔 bucket으로 확인합니다.
+
+`list_buckets` fallback은 두지 않습니다. bucket 하나만 권한이 있는 계정은
+목록 조회가 막혀 있어서, 연결은 멀쩡한데 실패로 보이기 때문입니다. bucket
+이름을 어디에서도 못 찾으면 `ok=False`에 `error`로 그 사실을 알려 줍니다.
+
+실패 원인까지 알아야 하면 `check_connection()`을 씁니다.
+
+```python
+status = mo.check_connection()
+
+if not status:                      # ConnectionStatus 자체가 truthy/falsy
+    raise RuntimeError(f"MinIO 연결 실패: {status.error}")
+
+print(status.elapsed_ms)            # 왕복 시간 (ms)
+print(status.detail["bucket"])      # 'user' (minio_config.py의 BUCKET)
+print(status.detail["bucket_exists"])
+```
+
+`ConnectionStatus`는 `ok`, `elapsed_ms`, `detail`, `error` 네 필드를 가집니다.
+**bucket이 없는 것과 endpoint가 죽은 것은 다릅니다.** endpoint가 살아 있으면
+bucket이 없어도 `ok`는 True이고, `detail["bucket_exists"]`가 False로 그 사실을
+알려 줍니다. `ping()`도 같은 기준(연결 가능 여부)으로 판단합니다.
+
 ## Shared client를 직접 관리하는 경우
 
 여러 서비스 instance에 같은 client를 주입하고 싶다면 `create_client`로

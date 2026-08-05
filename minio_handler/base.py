@@ -2,6 +2,7 @@
 
 import importlib
 import os
+import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Self
 
@@ -18,6 +19,12 @@ _OBJECT_ATTRS = {
     "bucket": "BUCKET",
     "prefix": "PREFIX",
 }
+
+
+def _elapsed_ms(started: float) -> float:
+    """Milliseconds since a ``time.perf_counter()`` mark, rounded for logging."""
+
+    return round((time.perf_counter() - started) * 1000, 2)
 
 
 def _parse_bool(value: str) -> bool:
@@ -53,6 +60,26 @@ def _module_values(attr_map: dict[str, str]) -> dict[str, Any]:
             continue
         values[key] = value
     return values
+
+
+@dataclass(slots=True)
+class ConnectionStatus:
+    """Outcome of a connection check against the MinIO endpoint.
+
+    ``ok`` answers the only question most callers have, so the object is
+    truthy/falsy directly. ``detail`` carries whatever the probe learned (the
+    bucket it hit and whether that bucket exists, or the bucket listing) and
+    ``error`` holds the formatted exception when the probe failed, so a
+    startup gate can log something actionable instead of a bare False.
+    """
+
+    ok: bool
+    elapsed_ms: float
+    detail: dict[str, Any] = field(default_factory=dict)
+    error: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.ok
 
 
 @dataclass(slots=True)
@@ -177,6 +204,44 @@ class MinioBase:
         else:
             self.client = client
             self.config = config
+
+    def ping(self, bucket: str | None = None) -> bool:
+        """Return True when the endpoint answers and the credentials work.
+
+        Never raises: an unreachable endpoint, wrong keys, or a TLS failure
+        all come back as False, so this is safe to call from a startup gate or
+        a health endpoint. A bucket that simply does not exist still counts as
+        connected — use ``check_connection`` to tell the two apart.
+        """
+
+        return self.check_connection(bucket).ok
+
+    def check_connection(self, bucket: str | None = None) -> ConnectionStatus:
+        """Probe the endpoint and report why it failed when it does.
+
+        MinIO has no ping, so this hits ``bucket_exists`` on the resolved
+        bucket — ``bucket``, else the default bucket, which itself comes from
+        ``minio_config.BUCKET`` when the service was built without one. It is
+        the cheapest round trip that also exercises the credentials, and the
+        answer lands in ``detail["bucket_exists"]``. No ``list_buckets``
+        fallback: an account scoped to one bucket cannot list.
+        """
+
+        started = time.perf_counter()
+        try:
+            target = self._resolve_bucket(bucket)
+            detail: dict[str, Any] = {
+                "bucket": target,
+                "bucket_exists": bool(self.client.bucket_exists(target)),
+            }
+        except Exception as exc:
+            return ConnectionStatus(
+                ok=False,
+                elapsed_ms=_elapsed_ms(started),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+        return ConnectionStatus(ok=True, elapsed_ms=_elapsed_ms(started), detail=detail)
 
     def use_bucket(self, bucket: str) -> Self:
         """Set the default bucket and return the service for chaining."""

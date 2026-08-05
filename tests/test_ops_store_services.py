@@ -1884,5 +1884,52 @@ class OSSearchTests(unittest.TestCase):
                 service.to_dataframe({"hits": {"hits": []}})
 
 
+class ConnectionCheckTests(unittest.TestCase):
+    def test_ping_returns_true_when_cluster_answers(self) -> None:
+        client = Mock()
+        client.ping.return_value = True
+        service = OSDoc(client=client, index="knowledge")
+
+        self.assertTrue(service.ping())
+        client.ping.assert_called_once_with()
+
+    def test_ping_returns_false_when_client_raises(self) -> None:
+        client = Mock()
+        client.ping.side_effect = ConnectionError("no route to host")
+        service = OSDoc(client=client, index="knowledge")
+
+        self.assertFalse(service.ping())
+
+    def test_check_connection_reports_cluster_detail(self) -> None:
+        client = Mock()
+        client.info.return_value = {
+            "cluster_name": "ops-cluster",
+            "version": {"number": "2.11.0", "distribution": "opensearch"},
+        }
+        service = OSIndex(client=client)
+
+        status = service.check_connection()
+
+        self.assertTrue(status.ok)
+        self.assertTrue(status)
+        self.assertIsNone(status.error)
+        self.assertEqual(status.detail["cluster_name"], "ops-cluster")
+        self.assertEqual(status.detail["version"], "2.11.0")
+        self.assertEqual(status.detail["distribution"], "opensearch")
+        self.assertGreaterEqual(status.elapsed_ms, 0)
+
+    def test_check_connection_reports_error_without_raising(self) -> None:
+        client = Mock()
+        client.info.side_effect = ConnectionError("connection refused")
+        service = OSIndex(client=client)
+
+        status = service.check_connection()
+
+        self.assertFalse(status.ok)
+        self.assertFalse(status)
+        self.assertEqual(status.error, "ConnectionError: connection refused")
+        self.assertEqual(status.detail, {})
+
+
 if __name__ == "__main__":
     unittest.main()
