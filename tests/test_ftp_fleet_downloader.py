@@ -351,6 +351,92 @@ class FtpFleetDownloaderTests(_FakeFTPTestCase):
         self.assertEqual(report.ng, 2)
         self.assertTrue(all("host_timeout" in f.error for f in report.failures))
 
+    def test_on_file_stops_firing_once_a_host_is_abandoned(self):
+        # shutdown(wait=False) cannot kill the worker, so an abandoned host keeps
+        # running. Its on_file must not keep writing into caller state that
+        # download() has already reported as failed — a streaming caller that
+        # post-processes its results would otherwise race a thread it has no
+        # reason to know is still alive.
+        import threading
+        import time
+
+        released = threading.Event()
+        seen: list[str] = []
+        orig_fetch = FtpFleetDownloader._fetch_one
+
+        def blocking_fetch(self, ftp, host, remote_path, on_file, files, failures):
+            # The first file blocks past host_timeout; the rest then run with the
+            # future already abandoned, which is exactly the window under test.
+            if remote_path == "/a":
+                released.wait(2.0)
+            return orig_fetch(self, ftp, host, remote_path, on_file, files, failures)
+
+        FakeFTP.scripts = {"h1": {"files": {"/a": b"A", "/b": b"B", "/c": b"C"}}}
+        try:
+            with patch(FTP_PATCH_TARGET, FakeFTP), patch.object(
+                FtpFleetDownloader, "_fetch_one", blocking_fetch
+            ):
+                dl = FtpFleetDownloader(user="u", password="p", host_timeout=0.05)
+                report = dl.download(
+                    [HostSpec("h1", files=["/a", "/b", "/c"])],
+                    on_file=lambda h, p, d: seen.append(p),
+                )
+                self.assertEqual(report.ng, 1)
+                self.assertEqual(seen, [])  # nothing landed before the timeout
+                released.set()
+                time.sleep(0.3)  # let the abandoned thread run to completion
+        finally:
+            released.set()
+
+        self.assertEqual(seen, [], "on_file fired after download() returned")
+
+    def test_on_file_still_runs_normally_when_nothing_times_out(self):
+        # The gate must be invisible on the happy path: same callback, same
+        # order, same report as before it existed.
+        FakeFTP.scripts = {"h1": {"files": {"/a": b"A", "/b": b"B"}}}
+        seen = []
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p")
+            report = dl.download(
+                [HostSpec("h1", files=["/a", "/b"])],
+                on_file=lambda h, p, d: seen.append((h, p, d)),
+            )
+        self.assertEqual(seen, [("h1", "/a", b"A"), ("h1", "/b", b"B")])
+        self.assertEqual(report.ok, 2)
+        self.assertEqual([f.data for f in report.files], [b"", b""])
+
+    def test_same_host_specs_get_independent_gates(self):
+        # msr_image fans ONE tool's files over n same-host specs. Gates are keyed
+        # by spec index, not by host, so abandoning one connection must not
+        # silence the others.
+        import threading
+
+        released = threading.Event()
+        seen: list[str] = []
+        orig_fetch = FtpFleetDownloader._fetch_one
+
+        def blocking_fetch(self, ftp, host, remote_path, on_file, files, failures):
+            if remote_path == "/slow":
+                released.wait(2.0)
+            return orig_fetch(self, ftp, host, remote_path, on_file, files, failures)
+
+        FakeFTP.scripts = {"h1": {"files": {"/slow": b"S", "/fast": b"F"}}}
+        try:
+            with patch(FTP_PATCH_TARGET, FakeFTP), patch.object(
+                FtpFleetDownloader, "_fetch_one", blocking_fetch
+            ):
+                dl = FtpFleetDownloader(
+                    user="u", password="p", max_concurrency=2, host_timeout=0.3
+                )
+                report = dl.download(
+                    [HostSpec("h1", files=["/slow"]), HostSpec("h1", files=["/fast"])],
+                    on_file=lambda h, p, d: seen.append(p),
+                )
+        finally:
+            released.set()
+        self.assertEqual(seen, ["/fast"])
+        self.assertEqual(report.ng, 1)
+
     def test_download_fleet_helper(self):
         FakeFTP.scripts = {"h1": {"files": {"/log": b"data"}}}
         with patch(FTP_PATCH_TARGET, FakeFTP):
