@@ -221,6 +221,59 @@ class FtpProxyPairTests(unittest.TestCase):
         self.assertEqual(report.ng, 0)
         self.assertEqual(FakeFTP.logins, [("proxy-user", "proxy-password")])
 
+    def test_spec_without_override_serializes_no_credential_key(self):
+        # The shared fleet account must keep travelling nowhere. Absence of the
+        # key -- not an explicit null -- is what an older proxy needs to see.
+        downloader = self._make_dl(token=None)
+
+        entry = downloader._payload([HostSpec("h1", files=["/log"])])["specs"][0]
+
+        self.assertNotIn("user", entry)
+        self.assertNotIn("password", entry)
+
+    def test_per_host_override_reaches_the_proxys_login(self):
+        FakeFTP.scripts = {"h1": {"files": {"/log": b"hello"}}}
+
+        report = self._download(
+            [HostSpec("h1", files=["/log"], user="amat", password="secret")]
+        )
+
+        self.assertEqual(report.ng, 0)
+        # The override won over the proxy host's own environment.
+        self.assertEqual(FakeFTP.logins, [("amat", "secret")])
+
+    def test_mixed_fleet_authenticates_each_host_its_own_way(self):
+        FakeFTP.scripts = {
+            "shared": {"files": {"/log": b"A"}},
+            "other-vendor": {"files": {"/log": b"B"}},
+        }
+
+        report = self._download(
+            [
+                HostSpec("shared", files=["/log"]),
+                HostSpec("other-vendor", files=["/log"], user="amat", password="s"),
+            ]
+        )
+
+        self.assertEqual(report.ng, 0)
+        self.assertEqual(
+            sorted(FakeFTP.logins),
+            [("amat", "s"), ("proxy-user", "proxy-password")],
+        )
+
+    def test_a_pre_upgrade_client_payload_still_works(self):
+        # Deploy order between the two halves is not ours to dictate: the proxy
+        # may go out first and keep serving clients that predate this field.
+        # Their entries carry no `user` key at all, and must resolve to the
+        # proxy's environment rather than raising KeyError -> 500.
+        FakeFTP.scripts = {"h1": {"files": {"/log": b"hello"}}}
+        legacy_entry = {"host": "h1", "files": ["/log"], "listings": []}
+
+        spec = proxy_mod._spec_from_wire(legacy_entry)
+
+        self.assertIsNone(spec.user)
+        self.assertIsNone(spec.password)
+
     def test_listing_through_proxy(self):
         FakeFTP.scripts = {
             "h1": {

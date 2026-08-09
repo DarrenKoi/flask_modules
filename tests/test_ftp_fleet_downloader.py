@@ -60,6 +60,11 @@ class FakeFTP:
     """
 
     scripts: dict = {}
+    # (host, user, passwd) for every login, in order. The per-host credential
+    # override has no other observable effect -- the bytes come back the same
+    # either way -- so recording the login is the only way to assert WHICH
+    # account opened WHICH host.
+    logins: list = []
 
     def __init__(self, timeout=None):
         self.timeout = timeout
@@ -84,6 +89,7 @@ class FakeFTP:
         err = self._script().get("login_error")
         if err is not None:
             raise err
+        FakeFTP.logins.append((self.host, user, passwd))
 
     def set_pasv(self, value):
         self.passive = value
@@ -146,9 +152,11 @@ class _FakeFTPTestCase(unittest.TestCase):
 
     def setUp(self) -> None:
         FakeFTP.scripts = {}
+        FakeFTP.logins = []
 
     def tearDown(self) -> None:
         FakeFTP.scripts = {}
+        FakeFTP.logins = []
 
     def _run(self, specs, **kwargs) -> DownloadReport:
         with patch(FTP_PATCH_TARGET, FakeFTP):
@@ -169,6 +177,86 @@ class _FakeFTPTestCase(unittest.TestCase):
         with patch(FTP_PATCH_TARGET, FakeFTP):
             dl = FtpFleetDownloader(user="u", password="p", **kwargs)
             return dl.size_dirs(specs)
+
+
+class PerHostCredentialTests(_FakeFTPTestCase):
+    """A fleet is not always one account.
+
+    ``HostSpec.user``/``password`` name the account for one host; unset means
+    the downloader's own pair. The bytes come back identically either way, so
+    every assertion here reads ``FakeFTP.logins`` -- who authenticated where.
+    """
+
+    def test_a_spec_without_credentials_uses_the_downloaders(self):
+        FakeFTP.scripts = {"h1": {"files": {"/log.txt": b"x"}}}
+        self._run([HostSpec("h1", files=["/log.txt"])])
+
+        self.assertEqual(FakeFTP.logins, [("h1", "u", "p")])
+
+    def test_a_spec_credential_overrides_for_that_host_only(self):
+        # The mixed fleet this field exists for: one vendor's tools on the
+        # shared account, another vendor's on its own.
+        FakeFTP.scripts = {
+            "shared": {"files": {"/log.txt": b"x"}},
+            "other-vendor": {"files": {"/log.txt": b"y"}},
+        }
+        report = self._run(
+            [
+                HostSpec("shared", files=["/log.txt"]),
+                HostSpec(
+                    "other-vendor",
+                    files=["/log.txt"],
+                    user="amat",
+                    password="secret",
+                ),
+            ]
+        )
+
+        self.assertEqual(report.ok, 2)
+        self.assertEqual(
+            sorted(FakeFTP.logins),
+            [("other-vendor", "amat", "secret"), ("shared", "u", "p")],
+        )
+
+    def test_user_and_password_fall_back_independently(self):
+        # Same account name, different password per host is a real deployment
+        # shape (a rotated password on one tool). Each field falls back on its
+        # own, so naming one does not blank the other.
+        FakeFTP.scripts = {"h1": {"files": {"/log.txt": b"x"}}}
+        self._run([HostSpec("h1", files=["/log.txt"], password="rotated")])
+
+        self.assertEqual(FakeFTP.logins, [("h1", "u", "rotated")])
+
+    def test_listing_uses_the_hosts_credential_too(self):
+        # list_dirs opens its own session; it must authenticate the same way as
+        # download or a mixed fleet half-works.
+        FakeFTP.scripts = {"h1": {"listing": {"/MEAS": ["/MEAS/a.dat"]}}}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p")
+            dl.list_dirs(
+                [HostSpec("h1", listings=[ListDir("/MEAS")], user="amat", password="s")]
+            )
+
+        self.assertEqual(FakeFTP.logins, [("h1", "amat", "s")])
+
+    def test_upload_honours_the_hosts_credential(self):
+        # Symmetry: a fleet needing two accounts to read needs the same two to
+        # write. UploadSpec carries the identical field pair.
+        FakeFTP.scripts = {"h1": {}}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p")
+            dl.upload(
+                [
+                    UploadSpec(
+                        "h1",
+                        files=[UploadFile("/INBOX/a.cfg", b"A")],
+                        user="amat",
+                        password="s",
+                    )
+                ]
+            )
+
+        self.assertEqual(FakeFTP.logins, [("h1", "amat", "s")])
 
 
 class FtpFleetDownloaderTests(_FakeFTPTestCase):
