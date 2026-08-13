@@ -165,6 +165,65 @@ class OSDocTests(unittest.TestCase):
             body={"doc": {"title": "updated"}, "doc_as_upsert": True},
         )
 
+    def test_index_normalizes_document_when_requested(self) -> None:
+        self.service.index(
+            {"title": "hello", "measured": datetime(2026, 8, 13, 9, 30), "score": float("nan")},
+            doc_id="doc-1",
+            normalize=True,
+        )
+
+        self.client.index.assert_called_once_with(
+            index="articles",
+            body={"title": "hello", "measured": "2026-08-13T09:30:00", "score": None},
+            id="doc-1",
+        )
+
+    def test_update_normalizes_document_when_requested(self) -> None:
+        self.service.update(
+            "doc-1",
+            {"measured": date(2026, 8, 13), "ratio": Decimal("1.5")},
+            normalize=True,
+        )
+
+        self.client.update.assert_called_once_with(
+            index="articles",
+            id="doc-1",
+            body={"doc": {"measured": "2026-08-13", "ratio": 1.5}},
+        )
+
+    def test_upsert_normalizes_document_when_requested(self) -> None:
+        self.service.upsert(
+            "doc-1",
+            {"measured": datetime(2026, 8, 13, 9, 30), "score": float("nan")},
+            normalize=True,
+        )
+
+        self.client.update.assert_called_once_with(
+            index="articles",
+            id="doc-1",
+            body={
+                "doc": {"measured": "2026-08-13T09:30:00", "score": None},
+                "doc_as_upsert": True,
+            },
+        )
+
+    def test_single_document_methods_skip_normalization_by_default(self) -> None:
+        measured = datetime(2026, 8, 13, 9, 30)
+
+        self.service.index({"measured": measured}, doc_id="doc-1")
+        self.service.update("doc-1", {"measured": measured})
+        self.service.upsert("doc-1", {"measured": measured})
+
+        self.assertEqual(self.client.index.call_args.kwargs["body"], {"measured": measured})
+        self.assertEqual(
+            self.client.update.call_args_list[0].kwargs["body"],
+            {"doc": {"measured": measured}},
+        )
+        self.assertEqual(
+            self.client.update.call_args_list[1].kwargs["body"],
+            {"doc": {"measured": measured}, "doc_as_upsert": True},
+        )
+
     def test_exists_many_uses_mget_for_ids(self) -> None:
         self.client.mget.return_value = {
             "docs": [
