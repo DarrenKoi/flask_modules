@@ -281,11 +281,25 @@ class FtpProxyPairTests(unittest.TestCase):
 
         self.assertEqual(FakeFTP.logins, [("proxy-user", "proxy-password")])
 
+    def test_a_proxy_host_without_the_environment_pair_still_serves(self):
+        # The pair became optional on 2026-08-28: every current client sends its
+        # own account, so a host that has retired the variables must serve those
+        # clients rather than 500 at them. Only a spec naming no account at all
+        # is affected, and it then logs in with the empty default.
+        os.environ.pop("FTP_PROXY_FTP_USER", None)
+        os.environ.pop("FTP_PROXY_FTP_PASSWORD", None)
+        FakeFTP.scripts = {"h1": {"files": {"/log": b"hello"}}}
+
+        report = self._download([HostSpec("h1", files=["/log"])])
+
+        self.assertEqual(report.ng, 0)
+        self.assertEqual(FakeFTP.logins, [("u", "p")])
+
     def test_a_pre_upgrade_client_payload_still_works(self):
         # Deploy order between the two halves is not ours to dictate: the proxy
         # may go out first and keep serving clients that predate this field.
         # Their entries carry no `user` key at all, and must resolve to the
-        # proxy's environment rather than raising KeyError -> 500.
+        # proxy's environment rather than failing.
         FakeFTP.scripts = {"h1": {"files": {"/log": b"hello"}}}
         legacy_entry = {"host": "h1", "files": ["/log"], "listings": []}
 
