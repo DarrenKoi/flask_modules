@@ -213,23 +213,29 @@ class FtpProxyPairTests(unittest.TestCase):
         self.assertNotIn("user", payload)
         self.assertNotIn("password", payload)
 
-    def test_proxy_uses_server_environment_ftp_credentials(self):
+    def test_proxy_logs_in_as_the_clients_own_account(self):
+        # 2026-08-28: the client's constructor account reaches the proxy and is
+        # what the FTP login uses. Between 2026-08-09 and that date it did not,
+        # so the proxy logged in as its own environment account no matter which
+        # one the caller asked for -- invisible while one account served every
+        # tool, a wrong-account login the moment one did not.
         FakeFTP.scripts = {"h1": {"files": {"/log": b"hello"}}}
 
         report = self._download([HostSpec("h1", files=["/log"])])
 
         self.assertEqual(report.ng, 0)
-        self.assertEqual(FakeFTP.logins, [("proxy-user", "proxy-password")])
+        self.assertEqual(FakeFTP.logins, [("u", "p")])
 
-    def test_spec_without_override_serializes_no_credential_key(self):
-        # The shared fleet account must keep travelling nowhere. Absence of the
-        # key -- not an explicit null -- is what an older proxy needs to see.
+    def test_spec_without_override_carries_the_clients_account(self):
+        # The per-host override is still an override: a spec that names no
+        # account inherits the downloader's, exactly as the direct transport's
+        # `spec.user or self.user` does.
         downloader = self._make_dl(token=None)
 
         entry = downloader._payload([HostSpec("h1", files=["/log"])])["specs"][0]
 
-        self.assertNotIn("user", entry)
-        self.assertNotIn("password", entry)
+        self.assertEqual(entry["user"], "u")
+        self.assertEqual(entry["password"], "p")
 
     def test_per_host_override_reaches_the_proxys_login(self):
         FakeFTP.scripts = {"h1": {"files": {"/log": b"hello"}}}
@@ -258,8 +264,22 @@ class FtpProxyPairTests(unittest.TestCase):
         self.assertEqual(report.ng, 0)
         self.assertEqual(
             sorted(FakeFTP.logins),
-            [("amat", "s"), ("proxy-user", "proxy-password")],
+            [("amat", "s"), ("u", "p")],
         )
+
+    def test_the_proxy_environment_is_the_fallback_for_an_accountless_spec(self):
+        # The environment pair stayed put when the client account came back
+        # (2026-08-28): a spec that names no account at all -- a pre-2026-08-10
+        # client -- must still resolve to the proxy host's own login.
+        FakeFTP.scripts = {"h1": {"files": {"/log": b"hello"}}}
+        app = proxy_mod.create_app()
+        with patch.object(core, "FTP", FakeFTP):
+            app.test_client().post(
+                "/download_sknn_v3",
+                json={"specs": [{"host": "h1", "files": ["/log"], "listings": []}]},
+            )
+
+        self.assertEqual(FakeFTP.logins, [("proxy-user", "proxy-password")])
 
     def test_a_pre_upgrade_client_payload_still_works(self):
         # Deploy order between the two halves is not ours to dictate: the proxy
