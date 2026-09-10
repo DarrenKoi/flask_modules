@@ -158,6 +158,34 @@ class FakeFTP:
         raise error_perm(f"550 No such file: {remote_path}")
 
 
+class StrictFakeFTP(FakeFTP):
+    """A pyftpdlib-style server: ``nlst()`` flips the session to ASCII, exactly
+    as ``ftplib``'s does, and SIZE is refused until ``TYPE I`` is sent again."""
+
+    refuse_type_i = False
+
+    def __init__(self, timeout=None):
+        super().__init__(timeout)
+        self.mode = "A"
+
+    def voidcmd(self, cmd):
+        if cmd == "TYPE I":
+            if self.refuse_type_i:
+                raise error_perm("504 TYPE I not implemented")
+            self.mode = "I"
+            return "200 Type set to I"
+        return super().voidcmd(cmd)
+
+    def nlst(self, remote_dir):
+        self.mode = "A"
+        return super().nlst(remote_dir)
+
+    def size(self, remote_path):
+        if self.mode != "I":
+            raise error_perm("550 SIZE not allowed in ASCII mode.")
+        return super().size(remote_path)
+
+
 class _FakeFTPTestCase(unittest.TestCase):
     """Resets the shared FakeFTP script around every test."""
 
@@ -1269,6 +1297,36 @@ class SizingTests(_FakeFTPTestCase):
         self.assertEqual(report.ng, 1)
         self.assertIn("SIZE unsupported", report.failures[0].error)
         self.assertEqual(report.total_bytes, 0)
+
+    def test_a_listing_does_not_undo_binary_mode_before_sizing(self):
+        # TYPE I must follow the listings: nlst sends TYPE A on its own, and a
+        # strict server then refuses every SIZE, so a listing-driven sizing pass
+        # measured nothing at all.
+        FakeFTP.scripts = {
+            "h1": {"listing": {"/MEAS": ["a.dat", "b.dat"]},
+                   "files": {"/MEAS/a.dat": b"12", "/MEAS/b.dat": b"345"}}
+        }
+        with patch(FTP_PATCH_TARGET, StrictFakeFTP):
+            report = FtpFleetDownloader(user="u", password="p").size_dirs(
+                [HostSpec("h1", listings=[ListDir("/MEAS")])]
+            )
+        self.assertEqual(report.ng, 0)
+        self.assertEqual(report.total_bytes, 5)
+
+    def test_a_refused_type_i_does_not_sink_the_host(self):
+        # The refusal lands per file, in the same shape as any other SIZE failure.
+        FakeFTP.scripts = {
+            "h1": {"listing": {"/MEAS": ["a.dat", "b.dat"]},
+                   "files": {"/MEAS/a.dat": b"12", "/MEAS/b.dat": b"345"}}
+        }
+        refusing = type("Refusing", (StrictFakeFTP,), {"refuse_type_i": True})
+        with patch(FTP_PATCH_TARGET, refusing):
+            report = FtpFleetDownloader(user="u", password="p").size_dirs(
+                [HostSpec("h1", listings=[ListDir("/MEAS")])]
+            )
+        self.assertEqual(report.ok, 0)
+        self.assertEqual([f.remote_path for f in report.failures], ["/MEAS/a.dat", "/MEAS/b.dat"])
+        self.assertTrue(all(f.error.startswith("error_perm:") for f in report.failures))
 
     def test_per_host_connect_error_isolation(self):
         FakeFTP.scripts = {
