@@ -46,11 +46,8 @@ class FakeFTP:
     def __init__(self, timeout=None):
         self.host = None
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
+    def close(self):  # _session closes, it never QUITs
+        pass
 
     def _script(self):
         return FakeFTP.scripts.get(self.host, {})
