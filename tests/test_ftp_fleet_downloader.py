@@ -9,6 +9,7 @@ both discovery modes, on_file streaming, threshold math, and the disk helper.
 import socket
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from ftplib import error_perm
 from pathlib import Path
 from unittest.mock import patch
@@ -124,7 +125,17 @@ class FakeFTP:
         self._script().setdefault("stored", {})[remote_path] = fp.read()
 
     def voidcmd(self, cmd):
-        # size_dirs issues `TYPE I` before sizing; nothing to do for the fake.
+        # size_dirs issues `TYPE I` before sizing and one `MDTM` per file after.
+        # An `mtimes` entry is the raw reply body (or an Exception to raise); a
+        # path with no entry gets the generic "200 ok", which is what a server
+        # without MDTM effectively gives us -- unparseable, so mtime unknown.
+        if cmd.startswith("MDTM "):
+            remote_path = cmd.split(" ", 1)[1]
+            value = self._script().get("mtimes", {}).get(remote_path)
+            if isinstance(value, Exception):
+                raise value
+            if value is not None:
+                return f"213 {value}"
         return "200 ok"
 
     def size(self, remote_path):
@@ -1183,6 +1194,62 @@ class SizingTests(_FakeFTPTestCase):
         )
         self.assertEqual(report.total_bytes, 9)
         self.assertEqual(report.by_host(), {"h1": 3, "h2": 6})
+
+    def test_sizing_carries_the_files_utc_mtime(self):
+        # The pass that answers "how big" also answers "how old", in the same
+        # connection: MDTM rides along with SIZE, so a caller deciding what to
+        # pull needs no second trip. RFC 3659 fixes MDTM to GMT, so there is no
+        # server-timezone guess here the way there is when parsing LIST.
+        FakeFTP.scripts = {
+            "h1": {
+                "files": {"/log/a.log": b"AAAA"},
+                "mtimes": {"/log/a.log": "20260910123456"},
+            }
+        }
+        report = self._size([HostSpec("h1", files=["/log/a.log"])])
+
+        self.assertEqual(
+            report.files[0].modified,
+            datetime(2026, 9, 10, 12, 34, 56, tzinfo=timezone.utc),
+        )
+
+    def test_fractional_seconds_are_dropped(self):
+        # Some servers append a fraction; nothing here needs sub-second time.
+        FakeFTP.scripts = {
+            "h1": {"files": {"/a": b"A"}, "mtimes": {"/a": "20260910123456.789"}}
+        }
+        report = self._size([HostSpec("h1", files=["/a"])])
+
+        self.assertEqual(
+            report.files[0].modified,
+            datetime(2026, 9, 10, 12, 34, 56, tzinfo=timezone.utc),
+        )
+
+    def test_a_server_without_mdtm_still_yields_the_size(self):
+        # An older equipment server must not cost the caller the size it did
+        # give us: an unusable MDTM leaves `modified` None and records no
+        # failure, so the sizing pass degrades instead of breaking.
+        FakeFTP.scripts = {
+            "h1": {
+                "files": {"/a": b"AAA"},
+                "mtimes": {"/a": error_perm("500 Unknown command")},
+            }
+        }
+        report = self._size([HostSpec("h1", files=["/a"])])
+
+        self.assertEqual(report.total_bytes, 3)
+        self.assertEqual(report.ng, 0)
+        self.assertIsNone(report.files[0].modified)
+
+    def test_an_unparseable_mdtm_reply_is_unknown_not_an_error(self):
+        FakeFTP.scripts = {
+            "h1": {"files": {"/a": b"A"}, "mtimes": {"/a": "not-a-timestamp"}}
+        }
+        report = self._size([HostSpec("h1", files=["/a"])])
+
+        self.assertEqual(report.ok, 1)
+        self.assertEqual(report.ng, 0)
+        self.assertIsNone(report.files[0].modified)
 
     def test_per_file_size_failure_isolated(self):
         FakeFTP.scripts = {

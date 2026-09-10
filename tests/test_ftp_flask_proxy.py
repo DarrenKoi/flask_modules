@@ -18,6 +18,7 @@ import os
 import socket
 import sys
 import unittest
+from datetime import datetime, timezone
 from ftplib import error_perm
 from pathlib import Path
 from unittest.mock import patch
@@ -87,6 +88,12 @@ class FakeFTP:
         self._script().setdefault("stored", {})[remote_path] = fp.read()
 
     def voidcmd(self, cmd):
+        # `TYPE I` before sizing, one `MDTM` per file after. No `mtimes` entry
+        # means the generic reply, i.e. a server that cannot answer MDTM.
+        if cmd.startswith("MDTM "):
+            raw = self._script().get("mtimes", {}).get(cmd.split(" ", 1)[1])
+            if raw is not None:
+                return f"213 {raw}"
         return "200 ok"
 
     def size(self, remote_path):
@@ -479,6 +486,45 @@ class FtpProxyPairTests(unittest.TestCase):
         )
         report = self._download(sizing.to_specs())
         self.assertEqual(report.grouped(), {"h1": {"/MEAS/a.dat": b"DATA"}})
+
+    def test_size_dirs_carries_the_mtime_across_the_wire(self):
+        # The mtime is the half the caller cannot get any other way over the
+        # proxy: the listing route returns paths only, and there is no route
+        # that issues MDTM on its own. If it does not survive this serialization
+        # it does not exist for a client behind the firewall.
+        FakeFTP.scripts = {
+            "h1": {
+                "files": {"/MEAS/a.dat": b"AAAA"},
+                "mtimes": {"/MEAS/a.dat": "20260910123456"},
+            }
+        }
+
+        report = self._size_dirs([HostSpec("h1", files=["/MEAS/a.dat"])])
+
+        self.assertEqual(
+            report.files[0].modified,
+            datetime(2026, 9, 10, 12, 34, 56, tzinfo=timezone.utc),
+        )
+
+    def test_a_proxy_that_reports_no_mtime_leaves_it_unknown(self):
+        # Two different causes, one answer: an FTP server without MDTM (here),
+        # and a proxy deployed before this field existed (below). A caller that
+        # needs the distinction has to ask preflight, not the report.
+        FakeFTP.scripts = {"h1": {"files": {"/a": b"A"}}}
+
+        report = self._size_dirs([HostSpec("h1", files=["/a"])])
+
+        self.assertEqual(report.total_bytes, 1)
+        self.assertIsNone(report.files[0].modified)
+
+    def test_a_pre_upgrade_proxy_reply_still_parses(self):
+        # Deploy order is not ours to dictate: a client may be upgraded first
+        # and talk to a proxy whose reply has no `modified` key at all. That
+        # must read as unknown, never crash the sizing pass.
+        legacy = {"host": "h1", "remote_path": "/a", "size": 3}
+
+        self.assertIsNone(client_mod._parse_modified(legacy.get("modified")))
+        self.assertIsNone(client_mod._parse_modified(None))
 
     def test_size_dirs_batch_transport_failure_isolated(self):
         FakeFTP.scripts = {
