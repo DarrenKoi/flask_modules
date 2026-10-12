@@ -1449,19 +1449,14 @@ class OSSearchTests(unittest.TestCase):
             ],
         )
 
-    def test_range_dataframe_all_scrolls_with_range_filter_and_sort(self) -> None:
+    def test_range_dataframe_all_pages_with_range_filter_and_sort(self) -> None:
         client = Mock()
         client.search.return_value = {
-            "_scroll_id": "scroll-1",
             "hits": {
                 "hits": [
                     {"_id": "a", "_source": {"timestamp": "2026-05-10", "v": 1}},
                 ]
             },
-        }
-        client.scroll.return_value = {
-            "_scroll_id": "scroll-1",
-            "hits": {"hits": []},
         }
         service = OSSearch(client=client, index="events")
 
@@ -1472,16 +1467,18 @@ class OSSearchTests(unittest.TestCase):
                 max_rows=1000,
             )
 
+        # The newest-first sort is kept (max_rows means "the latest N"); _id is
+        # only appended as the search_after tiebreaker.
         client.search.assert_called_once_with(
             index="events",
             body={
                 "query": {
                     "range": {"timestamp": {"gte": "now-14d", "lte": "now"}}
                 },
-                "sort": [{"timestamp": {"order": "desc"}}],
+                "sort": [{"timestamp": {"order": "desc"}}, {"_id": "asc"}],
                 "size": 500,
+                "track_total_hits": False,
             },
-            scroll="2m",
         )
         self.assertEqual(
             dataframe.records,
@@ -1491,7 +1488,6 @@ class OSSearchTests(unittest.TestCase):
     def test_range_dataframe_all_wraps_caller_query_in_bool_filter(self) -> None:
         client = Mock()
         client.search.return_value = {
-            "_scroll_id": "scroll-1",
             "hits": {"hits": []},
         }
         service = OSSearch(client=client, index="events")
@@ -1509,7 +1505,9 @@ class OSSearchTests(unittest.TestCase):
             body["query"]["bool"]["filter"],
             [{"range": {"event_tm": {"gte": "now-3d", "lte": "now"}}}],
         )
-        self.assertEqual(body["sort"], [{"event_tm": {"order": "desc"}}])
+        self.assertEqual(
+            body["sort"], [{"event_tm": {"order": "desc"}}, {"_id": "asc"}]
+        )
 
     def test_sample_uses_random_score_with_match_all(self) -> None:
         client = Mock()
@@ -1749,24 +1747,23 @@ class OSSearchTests(unittest.TestCase):
             ],
         )
 
-    def test_search_dataframe_all_collects_scroll_pages(self) -> None:
+    def test_search_dataframe_all_collects_search_after_pages(self) -> None:
         client = Mock()
-        client.search.return_value = {
-            "_scroll_id": "scroll-1",
-            "hits": {
-                "hits": [
-                    {
-                        "_id": "doc-1",
-                        "_index": "knowledge",
-                        "_score": 1.25,
-                        "_source": {"title": "Flask Guide", "status": "published"},
-                    }
-                ]
-            },
-        }
-        client.scroll.side_effect = [
+        client.search.side_effect = [
             {
-                "_scroll_id": "scroll-1",
+                "hits": {
+                    "hits": [
+                        {
+                            "_id": "doc-1",
+                            "_index": "knowledge",
+                            "_score": 1.25,
+                            "_source": {"title": "Flask Guide", "status": "published"},
+                            "sort": ["doc-1"],
+                        }
+                    ]
+                },
+            },
+            {
                 "hits": {
                     "hits": [
                         {
@@ -1774,14 +1771,12 @@ class OSSearchTests(unittest.TestCase):
                             "_index": "knowledge",
                             "_score": 0.9,
                             "_source": {"title": "FastAPI Guide", "status": "draft"},
+                            "sort": ["doc-2"],
                         }
                     ]
                 },
             },
-            {
-                "_scroll_id": "scroll-1",
-                "hits": {"hits": []},
-            },
+            {"hits": {"hits": []}},
         ]
         service = OSSearch(client=client, index="knowledge")
 
@@ -1791,13 +1786,21 @@ class OSSearchTests(unittest.TestCase):
                 batch_size=1,
             )
 
-        client.search.assert_called_once_with(
-            index="knowledge",
-            body={"query": {"match_all": {}}, "size": 1},
-            scroll="2m",
+        page = {
+            "query": {"match_all": {}},
+            "size": 1,
+            "track_total_hits": False,
+            "sort": [{"_id": "asc"}],
+        }
+        self.assertEqual(
+            [call.kwargs for call in client.search.call_args_list],
+            [
+                {"index": "knowledge", "body": page},
+                {"index": "knowledge", "body": {**page, "search_after": ["doc-1"]}},
+                {"index": "knowledge", "body": {**page, "search_after": ["doc-2"]}},
+            ],
         )
-        self.assertEqual(client.scroll.call_count, 2)
-        client.clear_scroll.assert_called_once_with(scroll_id="scroll-1")
+        client.scroll.assert_not_called()
         self.assertEqual(
             dataframe.records,
             [
@@ -1809,7 +1812,6 @@ class OSSearchTests(unittest.TestCase):
     def test_match_dataframe_all_builds_match_query_and_includes_meta(self) -> None:
         client = Mock()
         client.search.return_value = {
-            "_scroll_id": "scroll-1",
             "hits": {
                 "hits": [
                     {
@@ -1820,10 +1822,6 @@ class OSSearchTests(unittest.TestCase):
                     }
                 ]
             },
-        }
-        client.scroll.return_value = {
-            "_scroll_id": "scroll-1",
-            "hits": {"hits": []},
         }
         service = OSSearch(client=client, index="knowledge")
 
@@ -1837,8 +1835,12 @@ class OSSearchTests(unittest.TestCase):
 
         client.search.assert_called_once_with(
             index="knowledge",
-            body={"query": {"match": {"title": "flask"}}, "size": 50},
-            scroll="2m",
+            body={
+                "query": {"match": {"title": "flask"}},
+                "size": 50,
+                "track_total_hits": False,
+                "sort": [{"_id": "asc"}],
+            },
         )
         self.assertEqual(
             dataframe.records,
@@ -1852,36 +1854,20 @@ class OSSearchTests(unittest.TestCase):
                 }
             ],
         )
-        client.clear_scroll.assert_called_once_with(scroll_id="scroll-1")
 
     def test_search_dataframe_all_caps_results_at_max_rows(self) -> None:
+        def page(start: int) -> dict:
+            return {
+                "hits": {
+                    "hits": [
+                        {"_id": f"doc-{i}", "_source": {"v": i}, "sort": [f"doc-{i}"]}
+                        for i in range(start, start + 2)
+                    ]
+                },
+            }
+
         client = Mock()
-        client.search.return_value = {
-            "_scroll_id": "scroll-1",
-            "hits": {
-                "hits": [
-                    {"_id": f"doc-{i}", "_source": {"v": i}} for i in range(2)
-                ]
-            },
-        }
-        client.scroll.side_effect = [
-            {
-                "_scroll_id": "scroll-1",
-                "hits": {
-                    "hits": [
-                        {"_id": f"doc-{i}", "_source": {"v": i}} for i in range(2, 4)
-                    ]
-                },
-            },
-            {
-                "_scroll_id": "scroll-1",
-                "hits": {
-                    "hits": [
-                        {"_id": f"doc-{i}", "_source": {"v": i}} for i in range(4, 6)
-                    ]
-                },
-            },
-        ]
+        client.search.side_effect = [page(0), page(2), page(4)]
         service = OSSearch(client=client, index="events")
 
         with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
@@ -1891,39 +1877,24 @@ class OSSearchTests(unittest.TestCase):
                 max_rows=3,
             )
 
-        self.assertEqual(len(dataframe.records), 3)
         self.assertEqual([r["v"] for r in dataframe.records], [0, 1, 2])
-        # Should stop scrolling once cap is reached — only one scroll call
-        # after the initial search (which already filled 2 of 3).
-        self.assertEqual(client.scroll.call_count, 1)
-        client.clear_scroll.assert_called_once_with(scroll_id="scroll-1")
+        # Should stop paging once the cap is reached — the third page is never
+        # requested.
+        self.assertEqual(client.search.call_count, 2)
 
-    def test_search_dataframe_all_clears_scroll_on_error(self) -> None:
+    def test_search_dataframe_all_page_size_is_capped_by_max_rows(self) -> None:
         client = Mock()
-        client.search.return_value = {
-            "_scroll_id": "scroll-1",
-            "hits": {
-                "hits": [
-                    {
-                        "_id": "doc-1",
-                        "_index": "knowledge",
-                        "_score": 1.25,
-                        "_source": {"title": "Flask Guide"},
-                    }
-                ]
-            },
-        }
-        client.scroll.side_effect = RuntimeError("scroll failed")
-        service = OSSearch(client=client, index="knowledge")
+        client.search.return_value = {"hits": {"hits": []}}
+        service = OSSearch(client=client, index="events")
 
         with patch("ops_store.search._pandas_module", return_value=FakePandasModule()):
-            with self.assertRaisesRegex(RuntimeError, "scroll failed"):
-                service.search_dataframe_all(
-                    {"query": {"match_all": {}}},
-                    batch_size=1,
-                )
+            service.search_dataframe_all(
+                {"query": {"match_all": {}}},
+                batch_size=1000,
+                max_rows=3,
+            )
 
-        client.clear_scroll.assert_called_once_with(scroll_id="scroll-1")
+        self.assertEqual(client.search.call_args.kwargs["body"]["size"], 3)
 
     def test_search_dataframe_all_requires_pandas_before_search(self) -> None:
         client = Mock()
