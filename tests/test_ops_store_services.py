@@ -1370,7 +1370,7 @@ class OSSearchTests(unittest.TestCase):
             index="events",
             body={
                 "query": {
-                    "range": {"timestamp": {"gte": "now-7d", "lte": "now"}}
+                    "range": {"timestamp": {"gte": "now-7d"}}
                 },
                 "size": 10000,
                 "sort": [{"timestamp": {"order": "desc"}}],
@@ -1385,7 +1385,7 @@ class OSSearchTests(unittest.TestCase):
 
         body = client.search.call_args.kwargs["body"]
         self.assertEqual(
-            body["query"]["range"], {"event_tm": {"gte": "now-30d", "lte": "now"}}
+            body["query"]["range"], {"event_tm": {"gte": "now-30d"}}
         )
         self.assertEqual(body["sort"], [{"event_tm": {"order": "desc"}}])
         self.assertEqual(body["size"], 50)
@@ -1398,7 +1398,7 @@ class OSSearchTests(unittest.TestCase):
 
         body = client.search.call_args.kwargs["body"]
         self.assertEqual(
-            body["query"]["range"], {"timestamp": {"gte": "now-4h", "lte": "now"}}
+            body["query"]["range"], {"timestamp": {"gte": "now-4h"}}
         )
 
     def test_range_search_combines_days_and_hours(self) -> None:
@@ -1410,7 +1410,7 @@ class OSSearchTests(unittest.TestCase):
         body = client.search.call_args.kwargs["body"]
         self.assertEqual(
             body["query"]["range"],
-            {"timestamp": {"gte": "now-1d-12h", "lte": "now"}},
+            {"timestamp": {"gte": "now-1d-12h"}},
         )
 
     def test_range_search_wraps_caller_query_in_bool_filter(self) -> None:
@@ -1423,7 +1423,7 @@ class OSSearchTests(unittest.TestCase):
         self.assertEqual(body["query"]["bool"]["must"], [{"term": {"status": "ok"}}])
         self.assertEqual(
             body["query"]["bool"]["filter"],
-            [{"range": {"timestamp": {"gte": "now-7d", "lte": "now"}}}],
+            [{"range": {"timestamp": {"gte": "now-7d"}}}],
         )
 
     def test_range_dataframe_returns_dataframe_from_hits(self) -> None:
@@ -1473,7 +1473,7 @@ class OSSearchTests(unittest.TestCase):
             index="events",
             body={
                 "query": {
-                    "range": {"timestamp": {"gte": "now-14d", "lte": "now"}}
+                    "range": {"timestamp": {"gte": "now-14d"}}
                 },
                 "sort": [{"timestamp": {"order": "desc"}}, {"_id": "asc"}],
                 "size": 500,
@@ -1503,7 +1503,7 @@ class OSSearchTests(unittest.TestCase):
         self.assertEqual(body["query"]["bool"]["must"], [{"term": {"status": "ok"}}])
         self.assertEqual(
             body["query"]["bool"]["filter"],
-            [{"range": {"event_tm": {"gte": "now-3d", "lte": "now"}}}],
+            [{"range": {"event_tm": {"gte": "now-3d"}}}],
         )
         self.assertEqual(
             body["sort"], [{"event_tm": {"order": "desc"}}, {"_id": "asc"}]
