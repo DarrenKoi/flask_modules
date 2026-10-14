@@ -67,7 +67,7 @@ class FakeFTP:
     # account opened WHICH host.
     logins: list = []
 
-    def __init__(self, timeout=None):
+    def __init__(self, timeout=None, encoding="utf-8"):
         self.timeout = timeout
         self.host = None
 
@@ -161,7 +161,7 @@ class StrictFakeFTP(FakeFTP):
 
     refuse_type_i = False
 
-    def __init__(self, timeout=None):
+    def __init__(self, timeout=None, encoding="utf-8"):
         super().__init__(timeout)
         self.mode = "A"
 

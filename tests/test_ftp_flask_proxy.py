@@ -43,7 +43,7 @@ class FakeFTP:
     scripts: dict = {}
     logins: list[tuple[str, str]] = []
 
-    def __init__(self, timeout=None):
+    def __init__(self, timeout=None, encoding="utf-8"):
         self.host = None
 
     def close(self):  # _session closes, it never QUITs

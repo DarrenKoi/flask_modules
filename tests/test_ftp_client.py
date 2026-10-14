@@ -38,7 +38,7 @@ class FakeFTP:
     deleted: list = []
     events: list = []
 
-    def __init__(self, timeout=None):
+    def __init__(self, timeout=None, encoding="utf-8"):
         self.timeout = timeout
 
     def connect(self, host, port, timeout=None):
