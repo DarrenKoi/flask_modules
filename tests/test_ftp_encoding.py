@@ -11,6 +11,11 @@ the server reads as a missing file (550).
 So this suite runs a tiny cp949-speaking FTP server on loopback and drives the
 real ftplib through every transport: direct fleet, FtpClient, and the proxy
 pair (client -> Flask blueprint -> FTP).
+
+The second half covers what the office actually found (2026-10-14): the
+non-ASCII names on the tools were not Korean at all but corrupted bytes, valid
+in neither cp949 nor utf-8. No text codec can list those; latin-1 can, because
+it maps every byte to one character and back.
 """
 
 import socket
@@ -36,8 +41,11 @@ FILES = {KOREAN: b"korean-bytes", "/MEAS/plain.tif": b"plain-bytes"}
 class _Cp949FtpHandler(socketserver.StreamRequestHandler):
     """Just enough FTP for login, PASV, NLST, SIZE, MDTM and RETR, in cp949."""
 
+    files = FILES
+    codec = "cp949"
+
     def _reply(self, line: str) -> None:
-        self.wfile.write(f"{line}\r\n".encode("cp949"))
+        self.wfile.write(f"{line}\r\n".encode(self.codec))
 
     def _data(self, payload: bytes) -> None:
         conn, _ = self._pasv.accept()
@@ -57,7 +65,7 @@ class _Cp949FtpHandler(socketserver.StreamRequestHandler):
             # Strict on purpose: a client that sends utf-8 bytes fails here
             # exactly as the real server fails to find the file.
             try:
-                cmd, _, arg = raw.decode("cp949").rstrip("\r\n").partition(" ")
+                cmd, _, arg = raw.decode(self.codec).rstrip("\r\n").partition(" ")
             except UnicodeDecodeError:
                 self._reply("550 undecodable name")
                 continue
@@ -74,19 +82,19 @@ class _Cp949FtpHandler(socketserver.StreamRequestHandler):
                 self._reply(f"227 Entering (127,0,0,1,{port >> 8},{port & 255})")
             elif cmd == "NLST":
                 self._reply("150 listing")
-                self._data("\r\n".join(FILES).encode("cp949") + b"\r\n")
+                self._data("\r\n".join(self.files).encode(self.codec) + b"\r\n")
                 self._reply("226 done")
             elif cmd == "SIZE":
-                if arg in FILES:
-                    self._reply(f"213 {len(FILES[arg])}")
+                if arg in self.files:
+                    self._reply(f"213 {len(self.files[arg])}")
                 else:
                     self._reply("550 no such file")
             elif cmd == "RETR":
-                if arg not in FILES:
+                if arg not in self.files:
                     self._reply("550 no such file")
                     continue
                 self._reply("150 sending")
-                self._data(FILES[arg])
+                self._data(self.files[arg])
                 self._reply("226 done")
             elif cmd == "QUIT":
                 self._reply("221 bye")
@@ -176,6 +184,54 @@ class Cp949FilenameTests(unittest.TestCase):
             report = dl.download(self._spec())
         self.assertEqual(report.failures, [])
         self.assertEqual({f.remote_path: f.data for f in report.files}, FILES)
+
+
+# Valid in neither utf-8 (0xff, a bare 0x80) nor cp949 (0xff, 0x80 lead bytes).
+GARBAGE_BYTES = b"/MEAS/\xff\x80\xc7\x8e\xa0\xfe\x81.tif"
+GARBAGE = GARBAGE_BYTES.decode("latin-1")
+
+
+class _RawBytesFtpHandler(_Cp949FtpHandler):
+    """Same server, but names are raw bytes: the wire codec is latin-1, so the
+    garbage name above goes out and comes back byte for byte."""
+
+    files = {GARBAGE: b"junk-bytes", "/MEAS/plain.tif": b"plain-bytes"}
+    codec = "latin-1"
+
+
+class CorruptedFilenameTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = _Server(("127.0.0.1", 0), _RawBytesFtpHandler)
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def _download(self, encoding):
+        dl = FtpFleetDownloader(
+            user="u", password="p", port=self.port, encoding=encoding
+        )
+        return dl.download([HostSpec("127.0.0.1", listings=[ListDir("/MEAS")])])
+
+    def test_no_text_codec_can_list_a_corrupted_name(self):
+        for encoding in ("utf-8", "cp949"):
+            with self.subTest(encoding=encoding):
+                report = self._download(encoding)
+                self.assertEqual(report.files, [])
+                self.assertIn("UnicodeDecodeError", report.failures[0].error)
+
+    def test_latin1_lists_and_downloads_it_byte_for_byte(self):
+        report = self._download("latin-1")
+        self.assertEqual(report.failures, [])
+        self.assertEqual(
+            {f.remote_path: f.data for f in report.files}, _RawBytesFtpHandler.files
+        )
+        # The listed name re-encodes to exactly what the server holds.
+        self.assertIn(GARBAGE_BYTES, {f.remote_path.encode("latin-1") for f in report.files})
 
 
 if __name__ == "__main__":
