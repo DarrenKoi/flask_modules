@@ -47,7 +47,10 @@ class FakeFTP:
     pause = 0.0
     login_error = None
     connect_error = None
+    pwd_error = None
+    list_error = None
     logins: ClassVar[list] = []
+    listed: ClassVar[list] = []
 
     def __init__(self, timeout=None, encoding="utf-8"):
         pass
@@ -65,6 +68,8 @@ class FakeFTP:
         pass
 
     def pwd(self):
+        if FakeFTP.pwd_error is not None:
+            raise FakeFTP.pwd_error
         return FakeFTP.home
 
     def retrbinary(self, cmd, callback):
@@ -78,6 +83,9 @@ class FakeFTP:
 
     def retrlines(self, cmd, callback):
         path = cmd.split(" ", 1)[1]
+        FakeFTP.listed.append(path)
+        if FakeFTP.list_error is not None:
+            raise FakeFTP.list_error
         if path not in FakeFTP.list_lines:
             raise error_perm(f"550 {path}: No such file or directory")
         for line in FakeFTP.list_lines[path]:
@@ -113,6 +121,7 @@ def _bridge(flask_client, rewrite=None):
     """A stand-in for requests.post that routes to the Flask test client."""
 
     def post(url, json=None, headers=None, timeout=None, stream=False):
+        _bridge.last_timeout = timeout
         body = rewrite(dict(json)) if rewrite else json
         resp = flask_client.post(urlsplit(url).path, json=body, headers=headers or {})
         return FakeResponse(resp.status_code, resp.get_data())
@@ -135,7 +144,10 @@ class ProxyClientParityTests(unittest.TestCase):
         FakeFTP.pause = 0.0
         FakeFTP.login_error = None
         FakeFTP.connect_error = None
+        FakeFTP.pwd_error = None
+        FakeFTP.list_error = None
         FakeFTP.logins = []
+        FakeFTP.listed = []
         patcher = patch(FTP_PATCH_TARGET, FakeFTP)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -276,13 +288,75 @@ class ProxyClientParityTests(unittest.TestCase):
             ftp.home()
         self.assertEqual(FakeFTP.logins, [("u", "p")])
 
-    def test_a_request_without_a_host_is_value_error(self):
+    def test_a_request_without_a_host_is_proxy_error(self):
+        # A malformed request is a client/proxy version mismatch, not a value
+        # the caller passed: it must read as the proxy failing, never as a bare
+        # ValueError a caller's handlers do not expect.
         resp = self.flask.post(flask_proxy.URL_FETCH, json={"remote_path": "/a"})
         self.assertEqual(resp.status_code, 422)
         self.assertEqual(resp.get_json()["code"], "bad_request")
         self._use(_canned(422, resp.get_data()))
-        with self._proxied() as ftp, self.assertRaises(ValueError):
+        with self._proxied() as ftp, self.assertRaises(ProxyError):
             ftp.download("/a")
+
+    # -- home() is a PWD, never a LIST --------------------------------------
+
+    def test_home_does_not_list_the_home_folder(self):
+        # No LIST lines scripted for the home dir: a LIST there would 550.
+        FakeFTP.home = "/home/ftpuser"
+        self.assertEqual(
+            self._both(lambda ftp: ftp.home()),
+            [("ok", "/home/ftpuser"), ("ok", "/home/ftpuser")],
+        )
+        self.assertEqual(FakeFTP.listed, [])
+
+    def test_home_waits_a_finite_time_for_the_proxy(self):
+        FakeFTP.home = "/"
+        with self._proxied() as ftp:
+            ftp.home()
+        connect, read = _bridge.last_timeout
+        self.assertIsNotNone(read)
+        self.assertLessEqual(read, 2 * ftp.timeout)
+
+    def test_the_home_only_route_answers_home_and_no_entries(self):
+        FakeFTP.home = "/home/ftpuser"
+        resp = self.flask.post(
+            flask_proxy.URL_LIST_DETAILS,
+            json={"host": "h1", "remote_dir": None, "home_only": True},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json(), {"home": "/home/ftpuser", "entries": []})
+        self.assertEqual(FakeFTP.listed, [])
+
+    def test_an_older_caller_without_home_only_still_lists_home(self):
+        FakeFTP.home = "/home/ftpuser"
+        FakeFTP.list_lines = {"/home/ftpuser": ["-rw-r--r-- 1 ftp ftp 1 Feb 03 2024 a"]}
+        resp = self.flask.post(
+            flask_proxy.URL_LIST_DETAILS, json={"host": "h1", "remote_dir": None}
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body["home"], "/home/ftpuser")
+        self.assertEqual([e["path"] for e in body["entries"]], ["/home/ftpuser/a"])
+
+    # -- encoding errors are UnicodeDecodeError on both ---------------------
+
+    def test_an_undecodable_listing_is_unicode_decode_error_on_both(self):
+        FakeFTP.list_error = UnicodeDecodeError("utf-8", b"\xb0", 0, 1, "bad byte")
+        self.assertSameRaise(lambda ftp: ftp.list_details("/log"), UnicodeDecodeError)
+
+    def test_an_undecodable_pwd_is_unicode_decode_error_on_both(self):
+        FakeFTP.pwd_error = UnicodeDecodeError("utf-8", b"\xb0", 0, 1, "bad byte")
+        self.assertSameRaise(lambda ftp: ftp.home(), UnicodeDecodeError)
+
+    def test_an_undecodable_banner_is_unicode_decode_error_on_both(self):
+        FakeFTP.connect_error = UnicodeDecodeError("utf-8", b"\xb0", 0, 1, "bad byte")
+        self.assertSameRaise(lambda ftp: ftp.list_details("/log"), UnicodeDecodeError)
+        resp = self.flask.post(
+            flask_proxy.URL_LIST_DETAILS, json={"host": "h1", "remote_dir": "/log"}
+        )
+        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(resp.get_json()["code"], "encoding")
 
     # -- the proxy's own failures are ProxyError ----------------------------
 
