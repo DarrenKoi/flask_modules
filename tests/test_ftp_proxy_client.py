@@ -314,7 +314,7 @@ class ProxyClientParityTests(unittest.TestCase):
         FakeFTP.home = "/"
         with self._proxied() as ftp:
             ftp.home()
-        connect, read = _bridge.last_timeout
+        _, read = _bridge.last_timeout
         self.assertIsNotNone(read)
         self.assertLessEqual(read, 2 * ftp.timeout)
 
