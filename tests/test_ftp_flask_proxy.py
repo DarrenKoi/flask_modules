@@ -36,7 +36,14 @@ for _sub in ("core", "direct_downloader", "proxy"):
 import fleet_downloader as core  # noqa: E402
 import proxy_downloader as client_mod  # noqa: E402
 import flask_proxy as proxy_mod  # noqa: E402
-from fleet_downloader import HostSpec, ListDir, MkdirSpec, UploadFile, UploadSpec  # noqa: E402
+from fleet_downloader import (  # noqa: E402
+    DeleteSpec,
+    HostSpec,
+    ListDir,
+    MkdirSpec,
+    UploadFile,
+    UploadSpec,
+)
 
 
 class FakeFTP:
@@ -112,6 +119,25 @@ class FakeFTP:
         if full != "/home" and full not in self._script().get("dirs", set()):
             raise error_perm(f"550 {path}")
         self.cur = full
+
+    def delete(self, path):
+        # DELE: removes a key of `files`; absent or listed in `dele_errors` -> 550.
+        script = self._script()
+        files = script.setdefault("files", {})
+        full = self._abs(path)
+        if full not in files or path in script.get("dele_errors", ()):
+            raise error_perm(f"550 {path}")
+        del files[full]
+
+    def rmd(self, path):
+        # RMD: only an existing, EMPTY directory; anything under it -> 550.
+        script = self._script()
+        dirs = script.setdefault("dirs", set())
+        full = self._abs(path)
+        inside = [p for p in (*dirs, *script.get("files", {})) if p.startswith(full + "/")]
+        if full not in dirs or inside or path in script.get("rmd_errors", ()):
+            raise error_perm(f"550 {path}")
+        dirs.discard(full)
 
     def voidcmd(self, cmd):
         # `TYPE I` before sizing, one `MDTM` per file after. No `mtimes` entry
@@ -223,6 +249,14 @@ class FtpProxyPairTests(unittest.TestCase):
             client_mod.requests, "post", _bridge(fclient, fail_hosts)
         ):
             return self._make_dl(token, **kw).upload(specs)
+
+    def _delete(self, specs, *, fail_hosts=None, token=None, **kw):
+        app = proxy_mod.create_app()
+        fclient = app.test_client()
+        with patch.object(core, "FTP", FakeFTP), patch.object(
+            client_mod.requests, "post", _bridge(fclient, fail_hosts)
+        ):
+            return self._make_dl(token, **kw).delete(specs)
 
     def _mkdir(self, specs, *, fail_hosts=None, token=None, **kw):
         app = proxy_mod.create_app()
@@ -448,7 +482,7 @@ class FtpProxyPairTests(unittest.TestCase):
         for adapter in (core.FtpFleetDownloader, client_mod.FtpFleetDownloader):
             with self.subTest(adapter=adapter.__module__):
                 self.assertTrue(issubclass(adapter, core.FleetTransport))
-                for name in ("download", "list_dirs", "size_dirs", "upload", "mkdir"):
+                for name in ("download", "list_dirs", "size_dirs", "upload", "mkdir", "delete"):
                     self.assertEqual(
                         _seam_params(getattr(adapter, name)),
                         _seam_params(getattr(core.FleetTransport, name)),
@@ -621,6 +655,41 @@ class FtpProxyPairTests(unittest.TestCase):
         )
         self.assertEqual(report.grouped(), {"h1": ["/a"]})
         self.assertIn("proxy request failed", report.failures[0].error)
+
+    def test_delete_round_trip_on_proxy_side(self):
+        FakeFTP.scripts = {
+            "h1": {"files": {"/D/a": b"A", "/keep": b"K"}, "dirs": {"/D"}, "dele_errors": {"/keep"}}
+        }
+        report = self._delete(
+            [DeleteSpec("h1", files=["/D/a", "/gone", "/keep"], dirs=["/D"])]
+        )
+        self.assertEqual(report.grouped(), {"h1": ["/D/a", "/gone", "/D"]})
+        self.assertEqual(report.failures[0].remote_path, "/keep")
+        self.assertEqual(FakeFTP.scripts["h1"]["dirs"], set())
+
+    def test_delete_batch_transport_failure_isolated(self):
+        FakeFTP.scripts = {"h1": {}, "h2": {}}
+        report = self._delete(
+            [DeleteSpec("h1", files=["/a"]), DeleteSpec("h2", files=["/a"])],
+            fail_hosts={"h2"},
+            request_batch=1,
+        )
+        self.assertEqual(report.grouped(), {"h1": ["/a"]})
+        self.assertIn("proxy request failed", report.failures[0].error)
+
+    def test_delete_empty_specs_short_circuits(self):
+        self.assertEqual(self._delete([]).ok, 0)
+
+    def test_delete_fleet_helper_through_proxy(self):
+        FakeFTP.scripts = {"h1": {"files": {"/a": b"A"}}}
+        app = proxy_mod.create_app()
+        with patch.object(core, "FTP", FakeFTP), patch.object(
+            client_mod.requests, "post", _bridge(app.test_client())
+        ):
+            report = client_mod.delete_fleet(
+                [DeleteSpec("h1", files=["/a"])], user="u", password="p"
+            )
+        self.assertEqual(report.grouped(), {"h1": ["/a"]})
 
     def test_mkdir_empty_specs_short_circuits(self):
         self.assertEqual(self._mkdir([]).ok, 0)

@@ -16,6 +16,8 @@ from unittest.mock import patch
 
 from ftp_handler.direct_downloader.collect import build_host_specs, collect_fleet
 from ftp_handler.direct_downloader.fleet_downloader import (
+    DeleteReport,
+    DeleteSpec,
     DownloadReport,
     FtpFleetDownloader,
     HostSpec,
@@ -30,6 +32,7 @@ from ftp_handler.direct_downloader.fleet_downloader import (
     _keep_last_components,
     _safe_relative,
     _strip_components,
+    delete_fleet,
     download_fleet,
     group_files_by_host,
     image_sidecar_target,
@@ -153,6 +156,25 @@ class FakeFTP:
             raise error_perm(f"550 {path}")
         self.cur = full
 
+    def delete(self, path):
+        # DELE: removes a key of `files`; absent or listed in `dele_errors` -> 550.
+        script = self._script()
+        files = script.setdefault("files", {})
+        full = self._abs(path)
+        if full not in files or path in script.get("dele_errors", ()):
+            raise error_perm(f"550 {path}")
+        del files[full]
+
+    def rmd(self, path):
+        # RMD: only an existing, EMPTY directory; anything under it -> 550.
+        script = self._script()
+        dirs = script.setdefault("dirs", set())
+        full = self._abs(path)
+        inside = [p for p in (*dirs, *script.get("files", {})) if p.startswith(full + "/")]
+        if full not in dirs or inside or path in script.get("rmd_errors", ()):
+            raise error_perm(f"550 {path}")
+        dirs.discard(full)
+
     def voidcmd(self, cmd):
         # size_dirs issues `TYPE I` before sizing and one `MDTM` per file after.
         # An `mtimes` entry is the raw reply body (or an Exception to raise); a
@@ -240,6 +262,11 @@ class _FakeFTPTestCase(unittest.TestCase):
         with patch(FTP_PATCH_TARGET, FakeFTP):
             dl = FtpFleetDownloader(user="u", password="p", **kwargs)
             return dl.upload(specs)
+
+    def _delete(self, specs, **kwargs) -> DeleteReport:
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p", **kwargs)
+            return dl.delete(specs)
 
     def _mkdir(self, specs, **kwargs) -> MkdirReport:
         with patch(FTP_PATCH_TARGET, FakeFTP):
@@ -1519,6 +1546,84 @@ class MkdirTests(_FakeFTPTestCase):
             report = mkdir_fleet(
                 [MkdirSpec("h1", dirs=["/a"])], user="u", password="p", max_concurrency=4
             )
+        self.assertEqual(report.grouped(), {"h1": ["/a"]})
+
+
+class DeleteTests(_FakeFTPTestCase):
+    def test_deletes_files_then_empties_dirs(self):
+        # Files go first, so a dir emptied by this same spec can then be RMD'd.
+        FakeFTP.scripts = {"h1": {"files": {"/D/a": b"A"}, "dirs": {"/D"}}}
+        report = self._delete([DeleteSpec("h1", files=["/D/a"], dirs=["/D"])])
+        self.assertEqual(report.grouped(), {"h1": ["/D/a", "/D"]})
+        self.assertEqual(FakeFTP.scripts["h1"]["files"], {})
+        self.assertEqual(FakeFTP.scripts["h1"]["dirs"], set())
+
+    def test_already_absent_file_and_dir_are_success(self):
+        FakeFTP.scripts = {"h1": {}}
+        report = self._delete([DeleteSpec("h1", files=["/gone"], dirs=["/nodir"])])
+        self.assertEqual(report.ng, 0)
+        self.assertEqual(report.grouped(), {"h1": ["/gone", "/nodir"]})
+
+    def test_refused_dele_of_existing_file_is_a_failure(self):
+        FakeFTP.scripts = {"h1": {"files": {"/keep": b"K", "/x": b"X"}, "dele_errors": {"/keep"}}}
+        report = self._delete([DeleteSpec("h1", files=["/keep", "/x"])])
+        self.assertEqual(report.grouped(), {"h1": ["/x"]})
+        self.assertEqual(report.failures[0].remote_path, "/keep")
+        self.assertIn("/keep", FakeFTP.scripts["h1"]["files"])
+
+    def test_non_empty_dir_is_a_failure_not_absent(self):
+        FakeFTP.scripts = {"h1": {"files": {"/D/a": b"A"}, "dirs": {"/D"}}}
+        report = self._delete([DeleteSpec("h1", dirs=["/D"])])
+        self.assertEqual(report.ok, 0)
+        self.assertEqual(report.failures[0].remote_path, "/D")
+        self.assertIn("/D", FakeFTP.scripts["h1"]["dirs"])
+
+    def test_directory_named_as_a_file_is_a_failure(self):
+        # DELE on a directory is 550 and SIZE on it is 550 too; only the CWD
+        # check tells "it is a directory" from "it is gone".
+        FakeFTP.scripts = {"h1": {"dirs": {"/D"}}}
+        report = self._delete([DeleteSpec("h1", files=["/D"])])
+        self.assertEqual(report.ok, 0)
+        self.assertIn("/D", FakeFTP.scripts["h1"]["dirs"])
+
+    def test_file_named_as_a_dir_is_a_failure(self):
+        FakeFTP.scripts = {"h1": {"files": {"/f": b"F"}}}
+        report = self._delete([DeleteSpec("h1", dirs=["/f"])])
+        self.assertEqual(report.ok, 0)
+        self.assertIn("/f", FakeFTP.scripts["h1"]["files"])
+
+    def test_relative_paths_still_resolve_at_home_after_a_dir_check(self):
+        # The existence check CWDs into /home/D (non-empty) and must come back,
+        # or the following relative "x" would resolve under /home/D.
+        FakeFTP.scripts = {
+            "h1": {"files": {"/home/D/a": b"A"}, "dirs": {"/home/D", "/home/x2"}}
+        }
+        report = self._delete([DeleteSpec("h1", dirs=["D", "x2"])])
+        self.assertEqual(report.grouped(), {"h1": ["x2"]})
+        self.assertEqual(FakeFTP.scripts["h1"]["dirs"], {"/home/D"})
+
+    def test_lost_cwd_stops_the_host(self):
+        # D is non-empty: the check CWDs in, the CWD back fails, and "E" would
+        # then be judged inside /home/D. Every remaining entry fails instead.
+        FakeFTP.scripts = {
+            "h1": {"files": {"/home/D/a": b"A"}, "dirs": {"/home/D"}, "cwd_errors": {"/home"}}
+        }
+        report = self._delete([DeleteSpec("h1", dirs=["D", "E"])])
+        self.assertEqual(report.ok, 0)
+        self.assertEqual([f.remote_path for f in report.failures], ["D", "E"])
+
+    def test_connect_failure_sinks_only_that_host(self):
+        FakeFTP.scripts = {"h1": {"connect_error": socket.timeout("t")}, "h2": {}}
+        report = self._delete(
+            [DeleteSpec("h1", files=["/a"]), DeleteSpec("h2", files=["/a"])]
+        )
+        self.assertEqual(report.grouped(), {"h2": ["/a"]})
+        self.assertIsNone(report.failures[0].remote_path)
+
+    def test_delete_fleet_helper(self):
+        FakeFTP.scripts = {"h1": {"files": {"/a": b"A"}}}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            report = delete_fleet([DeleteSpec("h1", files=["/a"])], user="u", password="p")
         self.assertEqual(report.grouped(), {"h1": ["/a"]})
 
 
