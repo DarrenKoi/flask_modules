@@ -19,7 +19,7 @@ import socket
 import sys
 import unittest
 from datetime import datetime, timezone
-from ftplib import error_perm
+from ftplib import error_perm, error_temp
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -84,25 +84,34 @@ class FakeFTP:
             raise err
         self._script().setdefault("stored", {})[remote_path] = fp.read()
 
+    def _abs(self, path):
+        # Relative paths resolve against the CURRENT directory, as on a real
+        # server -- so a CWD that is never undone shows up in later MKDs.
+        return path if path.startswith("/") else f"{getattr(self, 'cur', '/home')}/{path}"
+
     def pwd(self):
-        return "/home"
+        return getattr(self, "cur", "/home")
 
     def mkd(self, path):
-        # `dirs` is the host's set of existing directories (relative paths
-        # resolve under /home, the pwd). A path in `mkd_errors` is refused
-        # even though it is absent -- the "permission denied" 550.
+        # `dirs` is the host's set of existing directories (login PWD /home).
+        # A path in `mkd_errors` is refused even though it is absent -- the
+        # "permission denied" 550.
         script = self._script()
         dirs = script.setdefault("dirs", set())
-        full = path if path.startswith("/") else f"/home/{path}"
+        full = self._abs(path)
         if full in dirs or path in script.get("mkd_errors", ()):
             raise error_perm(f"550 {path}")
         dirs.add(full)
         return path
 
     def cwd(self, path):
-        full = path if path.startswith("/") else f"/home/{path}"
+        # A path in `cwd_errors` fails transiently (450), e.g. the CWD back home.
+        if path in self._script().get("cwd_errors", ()):
+            raise error_temp(f"450 {path}")
+        full = self._abs(path)
         if full != "/home" and full not in self._script().get("dirs", set()):
             raise error_perm(f"550 {path}")
+        self.cur = full
 
     def voidcmd(self, cmd):
         # `TYPE I` before sizing, one `MDTM` per file after. No `mtimes` entry

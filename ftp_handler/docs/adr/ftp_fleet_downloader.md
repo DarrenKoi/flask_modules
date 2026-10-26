@@ -70,7 +70,9 @@ an existing directory counts as success, so callers run it before an upload
 without looking first. FTP answers MKD with the same 550 for "already exists"
 and for "permission denied", so a refused MKD is settled by CWD into that path
 (enter it → it exists; then CWD back to the login PWD so relative paths keep
-resolving there).
+resolving there). If that CWD back fails, the session sits in an unknown
+directory, so the host's remaining dirs are all reported failed rather than
+created in the wrong place.
 
 ## Proxy pair
 
