@@ -74,9 +74,8 @@ direct(`ftp_handler.direct_downloader`)와 proxy(`ftp_handler.proxy`)가 아래 
   블루프린트(`/download_sknn_v3`, `/list_dirs_sknn_v3`, `/size_dirs_sknn_v3`,
   `/upload_sknn_v3`, `/mkdir_sknn_v3`, `/healthz_sknn_v3`),
   선택적 `FTP_PROXY_TOKEN`. 실제 FTP 는 `FtpFleetDownloader`를 재사용한다.
-  로그인 계정은 spec 이 실어 보낸 `user`/`password`를 쓰고(클라이언트 생성자
-  계정이 기본, 호스트별 override 가 우선), 둘 다 없을 때만 서버 환경 변수
-  `FTP_PROXY_FTP_USER` / `FTP_PROXY_FTP_PASSWORD`로 되돌아간다.
+  로그인 계정은 `user`/`password` 필드마다 따로 spec → 클라이언트 생성자 → 서버
+  환경 변수 `FTP_PROXY_FTP_USER` / `FTP_PROXY_FTP_PASSWORD` 순으로 정해진다.
 - **`proxy_downloader.py`** (클라이언트): 패키지가 이 모듈의 `FtpFleetDownloader`를
   re-export 한다 — `direct_downloader`와 같은 이름·같은 데이터클래스를 HTTP로
   제공한다. 스펙을 배치로 묶어 동시에 POST 하며, `on_file`은 로컬에서 실행된다.

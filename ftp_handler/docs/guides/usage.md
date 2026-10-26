@@ -240,7 +240,7 @@ app.register_blueprint(ftp_proxy_sknn_v3)
 ```
 
 플릿 하나가 계정 하나인 것은 아니다. 계열이 섞여 계정이 갈리는 경우에는 그 호스트의
-spec 에만 계정을 실으면 되고, 나머지는 위 환경 변수를 그대로 쓴다:
+spec 에만 계정을 실으면 되고, 나머지는 클라이언트 생성자의 공용 계정을 쓴다:
 
 ```python
 specs = [
@@ -262,8 +262,10 @@ dl = FtpFleetDownloader(user="u", password="p")   # 프록시 위치는 PROXY_UR
 report = dl.download(specs, on_file=save_to_dir(r"C:\eqp"))  # on_file은 로컬에서 실행
 ```
 
-생성자의 `user` / `password`는 각 spec에 실려 프록시로 간다(spec의 호스트별 계정이
-우선). 프록시 호스트 환경 변수의 계정은 둘 다 없을 때만 쓰인다.
+계정은 `user`와 `password` **각각 따로** spec 값 → 클라이언트 생성자 값 → 프록시
+호스트 환경 변수 순으로 정해진다. 그래서 한쪽만 비면 그 필드만 환경 변수에서 채워진다
+(예: spec이 `password`만 주면 `FTP_PROXY_FTP_USER`와 짝지어진다). 프록시 환경 계정을
+쓰려면 spec과 생성자 양쪽에서 그 필드를 빈 문자열로 둔다.
 
 데이터클래스(`HostSpec`, `DownloadReport`, …)는 direct 다운로더의 것과 동일한
 객체라서 `report.grouped()`, `to_specs()` 등이 똑같이 동작한다. copy-out: 이 쌍에

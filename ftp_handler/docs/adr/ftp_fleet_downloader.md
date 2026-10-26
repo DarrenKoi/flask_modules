@@ -84,10 +84,11 @@ exposes the same `FtpFleetDownloader` surface over HTTP.
   test asserts both adapters match it method by method, so a call site swaps
   one import line. Proxy location/auth are module constants (`PROXY_URL`,
   `PROXY_TOKEN`), not constructor args, so the constructor stays identical.
-- **Credentials travel with the spec.** Each wire spec carries the spec's own
-  `user`/`password`, else the client constructor's. The proxy host's
-  `FTP_PROXY_FTP_USER` / `FTP_PROXY_FTP_PASSWORD` apply only to a spec naming
-  neither — which also lets the two halves deploy in either order. Bytes and
+- **Credentials travel with the spec.** `user` and `password` resolve
+  **independently**, each as spec value → client constructor value → the proxy
+  host's `FTP_PROXY_FTP_USER` / `FTP_PROXY_FTP_PASSWORD`; a field missing from
+  the wire falls back alone. That fallback also lets the two halves deploy in
+  either order. Bytes and
   credentials both cross the HTTP hop: serve it behind HTTPS and set
   `FTP_PROXY_TOKEN`.
 - **Small batches.** The proxy holds a whole batch in memory and
