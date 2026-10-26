@@ -7,6 +7,7 @@ Personal toolbox of work-supporting Python modules. Each top-level package is in
 - `ops_store/` — class-based OpenSearch helpers (`base.py`, `document.py`, `index.py`, `search.py`)
 - `minio_handler/` — class-based MinIO / S3-compatible client (`base.py`, `object.py`, `minio_config.py`)
 - `ops_index_mgmt/` — operational scripts that materialize specific OpenSearch indices
+- `ftp_handler/` — equipment FTP collection (single server, direct fleet, HTTP proxy); start at `ftp_handler/docs/guides/summary.md`
 - `airflow_mgmt/` — Airflow 3.1.8 DAGs, repo-local helpers, vendored `minio_handler`, templates, scripts (see `airflow_mgmt/README.md`)
 - `tests/` — unit tests for the top-level modules
 
