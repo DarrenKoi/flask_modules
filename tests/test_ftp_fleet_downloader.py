@@ -21,6 +21,8 @@ from ftp_handler.direct_downloader.fleet_downloader import (
     HostSpec,
     ListDir,
     ListingReport,
+    MkdirReport,
+    MkdirSpec,
     SizingReport,
     UploadFile,
     UploadReport,
@@ -121,6 +123,26 @@ class FakeFTP:
             raise err
         self._script().setdefault("stored", {})[remote_path] = fp.read()
 
+    def pwd(self):
+        return "/home"
+
+    def mkd(self, path):
+        # `dirs` is the host's set of existing directories (relative paths
+        # resolve under /home, the pwd). A path in `mkd_errors` is refused
+        # even though it is absent -- the "permission denied" 550.
+        script = self._script()
+        dirs = script.setdefault("dirs", set())
+        full = path if path.startswith("/") else f"/home/{path}"
+        if full in dirs or path in script.get("mkd_errors", ()):
+            raise error_perm(f"550 {path}")
+        dirs.add(full)
+        return path
+
+    def cwd(self, path):
+        full = path if path.startswith("/") else f"/home/{path}"
+        if full != "/home" and full not in self._script().get("dirs", set()):
+            raise error_perm(f"550 {path}")
+
     def voidcmd(self, cmd):
         # size_dirs issues `TYPE I` before sizing and one `MDTM` per file after.
         # An `mtimes` entry is the raw reply body (or an Exception to raise); a
@@ -208,6 +230,11 @@ class _FakeFTPTestCase(unittest.TestCase):
         with patch(FTP_PATCH_TARGET, FakeFTP):
             dl = FtpFleetDownloader(user="u", password="p", **kwargs)
             return dl.upload(specs)
+
+    def _mkdir(self, specs, **kwargs) -> MkdirReport:
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            dl = FtpFleetDownloader(user="u", password="p", **kwargs)
+            return dl.mkdir(specs)
 
     def _size(self, specs, **kwargs) -> SizingReport:
         with patch(FTP_PATCH_TARGET, FakeFTP):
@@ -1434,6 +1461,37 @@ class UploadTests(_FakeFTPTestCase):
                 max_concurrency=4,
             )
         self.assertEqual(report.grouped(), {"h1": ["/a"]})
+
+
+class MkdirTests(_FakeFTPTestCase):
+    def test_creates_missing_parents_like_mkdir_p(self):
+        FakeFTP.scripts = {"h1": {"dirs": {"/A"}}}
+        report = self._mkdir([MkdirSpec("h1", dirs=["/A/B/C/"])])
+        self.assertEqual(report.grouped(), {"h1": ["/A/B/C/"]})
+        self.assertEqual(FakeFTP.scripts["h1"]["dirs"], {"/A", "/A/B", "/A/B/C"})
+
+    def test_existing_directory_is_success(self):
+        FakeFTP.scripts = {"h1": {"dirs": {"/A", "/home/rel"}}}
+        report = self._mkdir([MkdirSpec("h1", dirs=["/A", "rel"])])
+        self.assertEqual(report.ng, 0)
+        self.assertEqual(report.grouped(), {"h1": ["/A", "rel"]})
+
+    def test_refused_dir_isolated_from_hosts_other_dirs(self):
+        # MKD refused AND not enterable: a real failure, recorded against that
+        # dir; the host's next dir is still made.
+        FakeFTP.scripts = {"h1": {"mkd_errors": {"/deny"}}}
+        report = self._mkdir([MkdirSpec("h1", dirs=["/deny/x", "/ok"])])
+        self.assertEqual(report.grouped(), {"h1": ["/ok"]})
+        self.assertEqual(report.failures[0].remote_path, "/deny/x")
+        self.assertIn("550", report.failures[0].error)
+
+    def test_connect_failure_sinks_only_that_host(self):
+        FakeFTP.scripts = {"h1": {"connect_error": socket.timeout("t")}, "h2": {}}
+        report = self._mkdir(
+            [MkdirSpec("h1", dirs=["/a"]), MkdirSpec("h2", dirs=["/a"])]
+        )
+        self.assertEqual(report.grouped(), {"h2": ["/a"]})
+        self.assertIsNone(report.failures[0].remote_path)
 
 
 if __name__ == "__main__":

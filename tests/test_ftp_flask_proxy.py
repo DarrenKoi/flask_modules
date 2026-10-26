@@ -36,7 +36,7 @@ for _sub in ("core", "direct_downloader", "proxy"):
 import fleet_downloader as core  # noqa: E402
 import proxy_downloader as client_mod  # noqa: E402
 import flask_proxy as proxy_mod  # noqa: E402
-from fleet_downloader import HostSpec, ListDir, UploadFile, UploadSpec  # noqa: E402
+from fleet_downloader import HostSpec, ListDir, MkdirSpec, UploadFile, UploadSpec  # noqa: E402
 
 
 class FakeFTP:
@@ -83,6 +83,26 @@ class FakeFTP:
         if err is not None:
             raise err
         self._script().setdefault("stored", {})[remote_path] = fp.read()
+
+    def pwd(self):
+        return "/home"
+
+    def mkd(self, path):
+        # `dirs` is the host's set of existing directories (relative paths
+        # resolve under /home, the pwd). A path in `mkd_errors` is refused
+        # even though it is absent -- the "permission denied" 550.
+        script = self._script()
+        dirs = script.setdefault("dirs", set())
+        full = path if path.startswith("/") else f"/home/{path}"
+        if full in dirs or path in script.get("mkd_errors", ()):
+            raise error_perm(f"550 {path}")
+        dirs.add(full)
+        return path
+
+    def cwd(self, path):
+        full = path if path.startswith("/") else f"/home/{path}"
+        if full != "/home" and full not in self._script().get("dirs", set()):
+            raise error_perm(f"550 {path}")
 
     def voidcmd(self, cmd):
         # `TYPE I` before sizing, one `MDTM` per file after. No `mtimes` entry
@@ -194,6 +214,14 @@ class FtpProxyPairTests(unittest.TestCase):
             client_mod.requests, "post", _bridge(fclient, fail_hosts)
         ):
             return self._make_dl(token, **kw).upload(specs)
+
+    def _mkdir(self, specs, *, fail_hosts=None, token=None, **kw):
+        app = proxy_mod.create_app()
+        fclient = app.test_client()
+        with patch.object(core, "FTP", FakeFTP), patch.object(
+            client_mod.requests, "post", _bridge(fclient, fail_hosts)
+        ):
+            return self._make_dl(token, **kw).mkdir(specs)
 
     def _size_dirs(self, specs, *, fail_hosts=None, token=None, **kw):
         app = proxy_mod.create_app()
@@ -411,7 +439,7 @@ class FtpProxyPairTests(unittest.TestCase):
         for adapter in (core.FtpFleetDownloader, client_mod.FtpFleetDownloader):
             with self.subTest(adapter=adapter.__module__):
                 self.assertTrue(issubclass(adapter, core.FleetTransport))
-                for name in ("download", "list_dirs", "size_dirs", "upload"):
+                for name in ("download", "list_dirs", "size_dirs", "upload", "mkdir"):
                     self.assertEqual(
                         _seam_params(getattr(adapter, name)),
                         _seam_params(getattr(core.FleetTransport, name)),
@@ -567,6 +595,26 @@ class FtpProxyPairTests(unittest.TestCase):
         self.assertEqual(report.ng, 1)
         self.assertEqual(report.failures[0].host, "h2")
         self.assertIn("proxy request failed", report.failures[0].error)
+
+    def test_mkdir_round_trip_creates_dirs_on_proxy_side(self):
+        FakeFTP.scripts = {"h1": {"mkd_errors": {"/deny"}}}
+        report = self._mkdir([MkdirSpec("h1", dirs=["/A/B", "/deny"])])
+        self.assertEqual(report.grouped(), {"h1": ["/A/B"]})
+        self.assertEqual(FakeFTP.scripts["h1"]["dirs"], {"/A", "/A/B"})
+        self.assertEqual(report.failures[0].remote_path, "/deny")
+
+    def test_mkdir_batch_transport_failure_isolated(self):
+        FakeFTP.scripts = {"h1": {}, "h2": {}}
+        report = self._mkdir(
+            [MkdirSpec("h1", dirs=["/a"]), MkdirSpec("h2", dirs=["/a"])],
+            fail_hosts={"h2"},
+            request_batch=1,
+        )
+        self.assertEqual(report.grouped(), {"h1": ["/a"]})
+        self.assertIn("proxy request failed", report.failures[0].error)
+
+    def test_mkdir_empty_specs_short_circuits(self):
+        self.assertEqual(self._mkdir([]).ok, 0)
 
     def test_upload_empty_specs_short_circuits(self):
         report = self._upload([])
