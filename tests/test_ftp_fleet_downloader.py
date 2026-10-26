@@ -35,6 +35,7 @@ from ftp_handler.direct_downloader.fleet_downloader import (
     image_sidecar_target,
     list_fleet,
     local_target,
+    mkdir_fleet,
     save_image_with_sidecar,
     put_bytes_to_minio,
     put_parquet_to_minio,
@@ -1492,6 +1493,14 @@ class MkdirTests(_FakeFTPTestCase):
         )
         self.assertEqual(report.grouped(), {"h2": ["/a"]})
         self.assertIsNone(report.failures[0].remote_path)
+
+    def test_mkdir_fleet_helper(self):
+        FakeFTP.scripts = {"h1": {}}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            report = mkdir_fleet(
+                [MkdirSpec("h1", dirs=["/a"])], user="u", password="p", max_concurrency=4
+            )
+        self.assertEqual(report.grouped(), {"h1": ["/a"]})
 
 
 if __name__ == "__main__":

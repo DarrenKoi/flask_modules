@@ -616,6 +616,17 @@ class FtpProxyPairTests(unittest.TestCase):
     def test_mkdir_empty_specs_short_circuits(self):
         self.assertEqual(self._mkdir([]).ok, 0)
 
+    def test_mkdir_fleet_helper_through_proxy(self):
+        FakeFTP.scripts = {"h1": {}}
+        app = proxy_mod.create_app()
+        with patch.object(core, "FTP", FakeFTP), patch.object(
+            client_mod.requests, "post", _bridge(app.test_client())
+        ):
+            report = client_mod.mkdir_fleet(
+                [MkdirSpec("h1", dirs=["/a"])], user="u", password="p"
+            )
+        self.assertEqual(report.grouped(), {"h1": ["/a"]})
+
     def test_upload_empty_specs_short_circuits(self):
         report = self._upload([])
         self.assertEqual(report.ok, 0)

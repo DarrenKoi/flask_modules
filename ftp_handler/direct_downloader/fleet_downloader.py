@@ -1192,6 +1192,19 @@ def upload_fleet(
     return downloader.upload(specs)
 
 
+def mkdir_fleet(
+    specs: list[MkdirSpec],
+    *,
+    user: str,
+    password: str,
+    **kwargs: object,
+) -> MkdirReport:
+    """One-call convenience wrapper around ``FtpFleetDownloader.mkdir``; extra
+    keyword args are forwarded to the constructor, as for ``upload_fleet``."""
+    downloader = FtpFleetDownloader(user=user, password=password, **kwargs)  # type: ignore[arg-type]
+    return downloader.mkdir(specs)
+
+
 def download_fleet(
     specs: list[HostSpec],
     *,
