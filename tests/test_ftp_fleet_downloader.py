@@ -8,6 +8,8 @@ both discovery modes, on_file streaming, threshold math, and the disk helper.
 
 import socket
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from ftplib import error_perm, error_temp
@@ -133,7 +135,8 @@ class FakeFTP:
         return path if path.startswith("/") else f"{getattr(self, 'cur', '/home')}/{path}"
 
     def pwd(self):
-        return getattr(self, "cur", "/home")
+        # `pwd` in the script mimics ftplib's "" for a non-257 PWD reply.
+        return self._script().get("pwd", getattr(self, "cur", "/home"))
 
     def mkd(self, path):
         # `dirs` is the host's set of existing directories (login PWD /home).
@@ -151,6 +154,8 @@ class FakeFTP:
         # A path in `cwd_errors` fails transiently (450), e.g. the CWD back home.
         if path in self._script().get("cwd_errors", ()):
             raise error_temp(f"450 {path}")
+        if path in ("", "."):  # ftplib sends CWD . for "" -- stays put
+            return
         full = self._abs(path)
         if full != "/home" and full not in self._script().get("dirs", set()):
             raise error_perm(f"550 {path}")
@@ -158,7 +163,10 @@ class FakeFTP:
 
     def delete(self, path):
         # DELE: removes a key of `files`; absent or listed in `dele_errors` -> 550.
+        # A `dele_block` Event holds the command until the test releases it.
         script = self._script()
+        if path in script.get("dele_block", {}):
+            script["dele_block"][path].wait(5)
         files = script.setdefault("files", {})
         full = self._abs(path)
         if full not in files or path in script.get("dele_errors", ()):
@@ -201,6 +209,7 @@ class FakeFTP:
                 raise value
             return value
         files = self._script().get("files", {})
+        remote_path = self._abs(remote_path)
         if remote_path in files:
             value = files[remote_path]
             if isinstance(value, Exception):
@@ -1611,6 +1620,53 @@ class DeleteTests(_FakeFTPTestCase):
         report = self._delete([DeleteSpec("h1", dirs=["D", "E"])])
         self.assertEqual(report.ok, 0)
         self.assertEqual([f.remote_path for f in report.failures], ["D", "E"])
+
+    def test_empty_login_pwd_never_lets_a_relative_delete_land_elsewhere(self):
+        # PWD gave no path, so after the CWD probe into D there is no way back:
+        # "victim" would hit /home/D/victim. Stop the host instead.
+        FakeFTP.scripts = {
+            "h1": {
+                "pwd": "",
+                "files": {"/home/D/a": b"A", "/home/victim": b"V", "/home/D/victim": b"W"},
+                "dirs": {"/home/D"},
+            }
+        }
+        report = self._delete([DeleteSpec("h1", files=["D", "victim"])])
+        self.assertEqual(report.ok, 0)
+        self.assertEqual([f.remote_path for f in report.failures], ["D", "victim"])
+        files = FakeFTP.scripts["h1"]["files"]
+        self.assertIn("/home/victim", files)
+        self.assertIn("/home/D/victim", files)
+
+    def test_size_refused_for_a_reason_other_than_550_keeps_the_failure(self):
+        # 502 says SIZE is unsupported, not that /keep is gone.
+        FakeFTP.scripts = {
+            "h1": {
+                "files": {"/keep": b"K"},
+                "dele_errors": {"/keep"},
+                "sizes": {"/keep": error_perm("502 SIZE not implemented")},
+            }
+        }
+        report = self._delete([DeleteSpec("h1", files=["/keep"])])
+        self.assertEqual(report.ok, 0)
+        self.assertIn("/keep", FakeFTP.scripts["h1"]["files"])
+
+    def test_abandoned_host_sends_no_further_deletes(self):
+        # /slow outlives host_timeout; once delete() has reported the host
+        # failed, the stranded thread must not go on to DELE /later.
+        release = threading.Event()
+        FakeFTP.scripts = {
+            "h1": {"files": {"/slow": b"S", "/later": b"L"}, "dele_block": {"/slow": release}}
+        }
+        report = self._delete(
+            [DeleteSpec("h1", files=["/slow", "/later"])], host_timeout=0.2
+        )
+        self.assertEqual(report.ok, 0)
+        release.set()
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and "/later" in FakeFTP.scripts["h1"]["files"]:
+            time.sleep(0.01)
+        self.assertIn("/later", FakeFTP.scripts["h1"]["files"])
 
     def test_connect_failure_sinks_only_that_host(self):
         FakeFTP.scripts = {"h1": {"connect_error": socket.timeout("t")}, "h2": {}}

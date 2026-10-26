@@ -83,13 +83,25 @@ differs per server, for a destructive operation. A path already gone is a
 success, so a retried run is harmless.
 
 That needs the 550 settled again: after a refused DELE/RMD the path counts as
-gone only if `SIZE` refuses it (not a file) **and** `CWD` cannot enter it (not a
+gone only if `SIZE` answers 550 (not a file) **and** `CWD` answers 550 (not a
 directory). Either check finding something re-raises the original refusal —
 which is how a non-empty directory, a directory named as a file, and a file
-named as a directory all stay failures. The CWD probe returns to the login PWD
-exactly as `mkdir` does, with the same stop-the-host rule if that fails. The
-known ceiling: a server that also refuses SIZE on an existing file with 550
-makes that file read as gone.
+named as a directory all stay failures. A probe refused with anything but 550
+(502 "SIZE not implemented", 530, …) proves nothing about the path, so it keeps
+the failure too. The known ceiling: a server that refuses SIZE on an existing
+file with 550 makes that file read as gone.
+
+Two rules keep a delete from landing on the wrong path or the wrong time:
+
+- **The CWD probe must be undoable.** It returns to the login PWD exactly as
+  `mkdir` does, and stops the host if that fails. An empty login PWD (ftplib's
+  answer to a PWD reply it cannot parse) counts as a failed return, because
+  `cwd("")` sends `CWD .` and would "succeed" in place — leaving the next
+  relative DELE inside the probed directory.
+- **An abandoned host stops deleting.** A host given up on at `host_timeout`
+  keeps its thread, and `delete` sets that host's stop flag, so it sends no
+  further DELE/RMD after the caller has been told it failed. The command
+  already in flight cannot be recalled; its outcome is unknown.
 
 ## Proxy pair
 

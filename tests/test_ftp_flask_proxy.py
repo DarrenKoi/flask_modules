@@ -97,7 +97,8 @@ class FakeFTP:
         return path if path.startswith("/") else f"{getattr(self, 'cur', '/home')}/{path}"
 
     def pwd(self):
-        return getattr(self, "cur", "/home")
+        # `pwd` in the script mimics ftplib's "" for a non-257 PWD reply.
+        return self._script().get("pwd", getattr(self, "cur", "/home"))
 
     def mkd(self, path):
         # `dirs` is the host's set of existing directories (login PWD /home).
@@ -115,6 +116,8 @@ class FakeFTP:
         # A path in `cwd_errors` fails transiently (450), e.g. the CWD back home.
         if path in self._script().get("cwd_errors", ()):
             raise error_temp(f"450 {path}")
+        if path in ("", "."):  # ftplib sends CWD . for "" -- stays put
+            return
         full = self._abs(path)
         if full != "/home" and full not in self._script().get("dirs", set()):
             raise error_perm(f"550 {path}")
@@ -122,7 +125,10 @@ class FakeFTP:
 
     def delete(self, path):
         # DELE: removes a key of `files`; absent or listed in `dele_errors` -> 550.
+        # A `dele_block` Event holds the command until the test releases it.
         script = self._script()
+        if path in script.get("dele_block", {}):
+            script["dele_block"][path].wait(5)
         files = script.setdefault("files", {})
         full = self._abs(path)
         if full not in files or path in script.get("dele_errors", ()):
@@ -151,8 +157,12 @@ class FakeFTP:
     def size(self, remote_path):
         sizes = self._script().get("sizes", {})
         if remote_path in sizes:
-            return sizes[remote_path]
+            value = sizes[remote_path]
+            if isinstance(value, Exception):
+                raise value
+            return value
         files = self._script().get("files", {})
+        remote_path = self._abs(remote_path)
         if remote_path in files:
             return len(files[remote_path])
         raise error_perm(f"550 {remote_path}")

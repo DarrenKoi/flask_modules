@@ -783,9 +783,18 @@ class FtpFleetDownloader:
         concurrency cap, ``host_timeout`` backstop and per-host AND per-path
         failure isolation as ``upload``.
         """
-        results, failures = self._run_fleet(
-            specs, lambda spec, _idx: self._delete_worker(spec)
-        )
+        # A host abandoned at host_timeout keeps its thread; its stop flag makes
+        # it send no further DELE/RMD once the caller has been told it failed.
+        stops = [threading.Event() for _ in specs]
+        try:
+            results, failures = self._run_fleet(
+                specs,
+                lambda spec, idx: self._delete_worker(spec, stops[idx]),
+                on_abandon=lambda idx: stops[idx].set(),
+            )
+        finally:
+            for stop in stops:
+                stop.set()
         return DeleteReport(results=results, failures=failures)
 
     # ── concurrent orchestration (private) ──────────────────────────────────
@@ -1115,8 +1124,10 @@ class FtpFleetDownloader:
     def _delete_worker(
         self,
         spec: "DeleteSpec",
+        stop: threading.Event,
     ) -> tuple[list[DeleteResult], list[HostFailure]]:
-        # Same isolation and lost-CWD handling as _mkdir_worker.
+        # Same isolation and lost-CWD handling as _mkdir_worker. ``stop`` is set
+        # once the host is abandoned; nothing it returns after that is used.
         results: list[DeleteResult] = []
         failures: list[HostFailure] = []
         try:
@@ -1125,6 +1136,8 @@ class FtpFleetDownloader:
                 items = [(p, ftp.delete) for p in spec.files]
                 items += [(d, ftp.rmd) for d in spec.dirs]
                 for i, (path, remove) in enumerate(items):
+                    if stop.is_set():
+                        break
                     try:
                         _remove_or_absent(ftp, path, remove, home)
                     except _CwdLost as exc:
@@ -1237,7 +1250,14 @@ def _makedirs(ftp: FTP, remote_dir: str, home: str) -> None:
 
 
 def _cwd_home(ftp: FTP, home: str) -> None:
-    """CWD back to the login PWD after an existence check, or raise ``_CwdLost``."""
+    """CWD back to the login PWD after an existence check, or raise ``_CwdLost``.
+
+    An empty ``home`` is ftplib's answer to a PWD reply it could not parse;
+    ``cwd("")`` would send ``CWD .`` and "succeed" without moving, so it counts
+    as lost too.
+    """
+    if not home:
+        raise _CwdLost("login PWD unknown (unparseable PWD reply), cannot CWD back")
     try:
         ftp.cwd(home)
     except _FTP_ERRORS as exc:
@@ -1253,7 +1273,9 @@ def _remove_or_absent(
     by looking: the path is gone only if it is neither a file (``SIZE``
     answers) nor a directory (``CWD`` enters, then CWD back to ``home``).
     Anything still there re-raises the original refusal — a non-empty
-    directory, a directory given as a file, a file given as a directory.
+    directory, a directory given as a file, a file given as a directory. Only
+    a 550 from a probe counts as "not there"; any other refusal (502 SIZE
+    unsupported, 530, …) says nothing about the path and keeps the failure.
     Best-effort: a file whose SIZE is itself refused with 550 reads as gone.
     """
     try:
@@ -1263,16 +1285,23 @@ def _remove_or_absent(
         ftp.voidcmd("TYPE I")
         try:
             ftp.size(path)
-        except error_perm:
-            pass
+        except error_perm as probe:
+            if not _is_550(probe):
+                raise exc from None
         else:
             raise exc from None
         try:
             ftp.cwd(path)
-        except error_perm:
+        except error_perm as probe:
+            if not _is_550(probe):
+                raise exc from None
             return
         _cwd_home(ftp, home)
         raise exc from None
+
+
+def _is_550(exc: error_perm) -> bool:
+    return str(exc).startswith("550")
 
 
 def specs_from_hosts(
