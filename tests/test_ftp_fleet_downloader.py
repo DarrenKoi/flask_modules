@@ -80,7 +80,10 @@ class FakeFTP:
         self.host = None
 
     def close(self):  # _session closes, it never QUITs
-        pass
+        # A `closed` Event lets a test wait for a worker to actually finish.
+        closed = FakeFTP.scripts.get(self.host, {}).get("closed")
+        if closed is not None:
+            closed.set()
 
     def _script(self) -> dict:
         return FakeFTP.scripts.get(self.host, {})
@@ -1654,19 +1657,22 @@ class DeleteTests(_FakeFTPTestCase):
     def test_abandoned_host_sends_no_further_deletes(self):
         # /slow outlives host_timeout; once delete() has reported the host
         # failed, the stranded thread must not go on to DELE /later.
-        release = threading.Event()
+        release, closed = threading.Event(), threading.Event()
+        files = {"/slow": b"S", "/later": b"L"}
         FakeFTP.scripts = {
-            "h1": {"files": {"/slow": b"S", "/later": b"L"}, "dele_block": {"/slow": release}}
+            "h1": {"files": files, "dele_block": {"/slow": release}, "closed": closed}
         }
-        report = self._delete(
-            [DeleteSpec("h1", files=["/slow", "/later"])], host_timeout=0.2
-        )
-        self.assertEqual(report.ok, 0)
-        release.set()
-        deadline = time.monotonic() + 0.5
-        while time.monotonic() < deadline and "/later" in FakeFTP.scripts["h1"]["files"]:
-            time.sleep(0.01)
-        self.assertIn("/later", FakeFTP.scripts["h1"]["files"])
+        try:
+            report = self._delete(
+                [DeleteSpec("h1", files=["/slow", "/later"])], host_timeout=0.2
+            )
+            self.assertEqual(report.ok, 0)
+        finally:
+            release.set()
+        # Judge only once the stranded worker has closed its session: an
+        # unfinished worker is not evidence that it stopped.
+        self.assertTrue(closed.wait(5), "abandoned worker never finished")
+        self.assertIn("/later", files)
 
     def test_connect_failure_sinks_only_that_host(self):
         FakeFTP.scripts = {"h1": {"connect_error": socket.timeout("t")}, "h2": {}}
