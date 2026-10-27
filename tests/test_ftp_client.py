@@ -8,7 +8,7 @@ enter, close on exit) runs.
 
 import unittest
 from datetime import datetime
-from ftplib import error_perm
+from ftplib import error_perm, error_temp
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -37,6 +37,12 @@ class FakeFTP:
     stored: dict = {}
     deleted: list = []
     events: list = []
+    # Directory state for mkdir/rmdir: existing dirs, injected MKD/CWD
+    # refusals, and the PWD reply ("" = ftplib's answer to an unparseable one).
+    dirs: set = set()
+    mkd_errors: dict = {}
+    cwd_errors: dict = {}
+    pwd_reply = "/home"
 
     def __init__(self, timeout=None, encoding="utf-8"):
         self.timeout = timeout
@@ -79,6 +85,29 @@ class FakeFTP:
     def delete(self, path):
         FakeFTP.deleted.append(path)
 
+    def mkd(self, path):
+        if path in FakeFTP.mkd_errors:
+            raise FakeFTP.mkd_errors[path]
+        if path in FakeFTP.dirs:
+            raise error_perm(f"550 {path}: File exists")
+        FakeFTP.dirs.add(path)
+        return path
+
+    def rmd(self, path):
+        if path not in FakeFTP.dirs:
+            raise error_perm(f"550 {path}: No such file or directory")
+        FakeFTP.dirs.discard(path)
+
+    def pwd(self):
+        return FakeFTP.pwd_reply
+
+    def cwd(self, path):
+        FakeFTP.events.append(("cwd", path))
+        if path in FakeFTP.cwd_errors:
+            raise FakeFTP.cwd_errors[path]
+        if path != FakeFTP.pwd_reply and path not in FakeFTP.dirs:
+            raise error_perm(f"550 {path}: No such directory")
+
     def close(self):
         FakeFTP.events.append(("close",))
 
@@ -96,6 +125,10 @@ class FtpClientTests(unittest.TestCase):
         FakeFTP.stored = {}
         FakeFTP.deleted = []
         FakeFTP.events = []
+        FakeFTP.dirs = set()
+        FakeFTP.mkd_errors = {}
+        FakeFTP.cwd_errors = {}
+        FakeFTP.pwd_reply = "/home"
 
     def test_context_manager_connects_logs_in_and_closes(self):
         with patch(FTP_PATCH_TARGET, FakeFTP):
@@ -204,6 +237,74 @@ class FtpClientTests(unittest.TestCase):
             with _client() as ftp:
                 ftp.remove("/MEAS/stale.dat")
         self.assertEqual(FakeFTP.deleted, ["/MEAS/stale.dat"])
+
+    def test_mkdir_creates_directory(self):
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            with _client() as ftp:
+                ftp.mkdir("/INBOX/2026")
+        self.assertEqual(FakeFTP.dirs, {"/INBOX/2026"})
+
+    def test_mkdir_existing_directory_is_success_and_returns_to_pwd(self):
+        # 550 "exists" is settled by CWD into it -- and the session must come
+        # back, or later relative paths would resolve inside /INBOX.
+        FakeFTP.dirs = {"/INBOX"}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            with _client() as ftp:
+                ftp.mkdir("/INBOX")
+        self.assertEqual(
+            [e for e in FakeFTP.events if e[0] == "cwd"],
+            [("cwd", "/INBOX"), ("cwd", "/home")],
+        )
+
+    def test_mkdir_550_for_a_path_that_is_not_a_directory_raises(self):
+        # "Permission denied" also comes as 550; nothing to CWD into -> raise.
+        FakeFTP.mkd_errors = {"/deny": error_perm("550 Permission denied")}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            with _client() as ftp:
+                with self.assertRaisesRegex(error_perm, "Permission denied"):
+                    ftp.mkdir("/deny")
+
+    def test_mkdir_other_error_perm_raises_without_probing(self):
+        FakeFTP.dirs = {"/x"}
+        FakeFTP.mkd_errors = {"/x": error_perm("553 Not allowed")}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            with _client() as ftp:
+                with self.assertRaisesRegex(error_perm, "553"):
+                    ftp.mkdir("/x")
+        self.assertNotIn(("cwd", "/x"), FakeFTP.events)
+
+    def test_mkdir_with_unparseable_pwd_keeps_the_550(self):
+        # pwd() == "" means there is no known way back after a CWD probe
+        # (cwd("") is CWD .), so the probe is skipped and the 550 stands.
+        FakeFTP.dirs = {"/INBOX"}
+        FakeFTP.pwd_reply = ""
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            with _client() as ftp:
+                with self.assertRaises(error_perm):
+                    ftp.mkdir("/INBOX")
+        self.assertNotIn(("cwd", "/INBOX"), FakeFTP.events)
+
+    def test_mkdir_failed_return_to_pwd_discards_the_connection(self):
+        FakeFTP.dirs = {"/INBOX"}
+        FakeFTP.cwd_errors = {"/home": error_temp("450 try later")}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            with _client() as ftp:
+                with self.assertRaises(error_temp):
+                    ftp.mkdir("/INBOX")
+                self.assertIsNone(ftp._ftp)
+
+    def test_rmdir_removes_directory(self):
+        FakeFTP.dirs = {"/INBOX/old"}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            with _client() as ftp:
+                ftp.rmdir("/INBOX/old")
+        self.assertEqual(FakeFTP.dirs, set())
+
+    def test_rmdir_error_propagates(self):
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            with _client() as ftp:
+                with self.assertRaises(error_perm):
+                    ftp.rmdir("/missing")
 
     def test_server_error_propagates(self):
         # Single-server caller wants the real exception, not a swallowed report.

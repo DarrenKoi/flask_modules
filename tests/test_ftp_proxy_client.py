@@ -410,6 +410,10 @@ class ProxyClientSurfaceTests(unittest.TestCase):
                 ftp.put("/a.txt", b"x")
             with self.assertRaises(WriteNotSupported):
                 ftp.remove("/a.txt")
+            with self.assertRaises(WriteNotSupported):
+                ftp.mkdir("/d")
+            with self.assertRaises(WriteNotSupported):
+                ftp.rmdir("/d")
 
     def test_the_package_exports_the_proxy_client(self):
         from ftp_handler import proxy
