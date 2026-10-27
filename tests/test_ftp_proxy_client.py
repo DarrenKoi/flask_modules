@@ -6,6 +6,7 @@ fake server behind both transports. Every scenario is run direct and through
 the proxy, and the two must agree: same values, same exception types.
 """
 
+import copy
 import inspect
 import json
 import subprocess
@@ -23,26 +24,37 @@ from ftp_handler.core import client as core_client
 from ftp_handler.core.client import (
     FileInfo,
     ListingTooLarge,
+    TargetExists,
     TransferTimeout,
     TransferTooLarge,
+    TransferUncertain,
 )
 from ftp_handler.proxy import flask_proxy, proxy_client
 from ftp_handler.proxy.proxy_client import (
     FileUnavailable,
     ProxyError,
     ToolUnreachable,
-    WriteNotSupported,
 )
 
 FTP_PATCH_TARGET = "ftp_handler.core.client.FTP"
 _ROOT = Path(__file__).resolve().parents[1]
 
 
+def _fresh(exc: BaseException) -> BaseException:
+    # A real server's error is a new object per reply; reusing one instance
+    # across the direct and proxied runs would let put's temp_path on one
+    # leak onto the other's result.
+    return type(exc)(*exc.args)
+
+
 class FakeFTP:
-    """One scripted server: home, LIST lines, RETR chunks, optional faults."""
+    """One scripted server: home, LIST lines, RETR chunks, a writable tree, faults."""
 
     home = "/"
     files: ClassVar[dict] = {}
+    dirs: ClassVar[set] = set()
+    rename_error = None
+    delete_error = None
     list_lines: ClassVar[dict] = {}
     pause = 0.0
     login_error = None
@@ -93,6 +105,44 @@ class FakeFTP:
                 time.sleep(FakeFTP.pause)
             callback(line)
 
+    def storbinary(self, cmd, fp, callback=None):
+        path = cmd.split(" ", 1)[1]
+        FakeFTP.files[path] = [fp.read()]
+
+    def voidcmd(self, cmd):
+        pass
+
+    def size(self, path):
+        if path not in FakeFTP.files:
+            raise error_perm(f"550 {path}: No such file or directory")
+        return sum(len(c) for c in FakeFTP.files[path])
+
+    def rename(self, src, dst):
+        if FakeFTP.rename_error is not None:
+            raise _fresh(FakeFTP.rename_error)
+        FakeFTP.files[dst] = FakeFTP.files.pop(src)
+
+    def delete(self, path):
+        if FakeFTP.delete_error is not None:
+            raise _fresh(FakeFTP.delete_error)
+        if path not in FakeFTP.files:
+            raise error_perm(f"550 {path}: No such file or directory")
+        del FakeFTP.files[path]
+
+    def mkd(self, path):
+        if path in FakeFTP.dirs:
+            raise error_perm(f"550 {path}: File exists")
+        FakeFTP.dirs.add(path)
+
+    def rmd(self, path):
+        if path not in FakeFTP.dirs:
+            raise error_perm(f"550 {path}: No such file or directory")
+        FakeFTP.dirs.remove(path)
+
+    def cwd(self, path):
+        if path not in FakeFTP.dirs and path != FakeFTP.home:
+            raise error_perm(f"550 {path}: No such file or directory")
+
     def close(self):
         pass
 
@@ -140,6 +190,9 @@ class ProxyClientParityTests(unittest.TestCase):
     def setUp(self) -> None:
         FakeFTP.home = "/"
         FakeFTP.files = {}
+        FakeFTP.dirs = set()
+        FakeFTP.rename_error = None
+        FakeFTP.delete_error = None
         FakeFTP.list_lines = {}
         FakeFTP.pause = 0.0
         FakeFTP.login_error = None
@@ -167,14 +220,39 @@ class ProxyClientParityTests(unittest.TestCase):
 
     def _both(self, op):
         """Run ``op(ftp)`` on each transport and return both outcomes."""
+        return [self._run(make, op) for make in (self._direct, self._proxied)]
+
+    def _run(self, make, op):
+        try:
+            with make() as ftp:
+                return ("ok", op(ftp))
+        except Exception as exc:  # noqa: BLE001 - the type is the result
+            return ("raised", exc)
+
+    def _both_writes(self, op):
+        """``_both`` for a write: each transport starts from the same tree.
+
+        Returns ``(outcome, files, dirs)`` per transport, the tree as the
+        write left it, so a parity check covers the server side too.
+        """
+        start = (copy.deepcopy(FakeFTP.files), set(FakeFTP.dirs))
         out = []
         for make in (self._direct, self._proxied):
-            try:
-                with make() as ftp:
-                    out.append(("ok", op(ftp)))
-            except Exception as exc:  # noqa: BLE001 - the type is the result
-                out.append(("raised", exc))
+            FakeFTP.files, FakeFTP.dirs = copy.deepcopy(start[0]), set(start[1])
+            out.append((self._run(make, op), FakeFTP.files, FakeFTP.dirs))
         return out
+
+    def assertSameWrite(self, op, exc_type=None):
+        direct, proxied = self._both_writes(op)
+        self.assertEqual(direct[1:], proxied[1:])  # same tree afterwards
+        if exc_type is None:
+            self.assertEqual(direct[0], ("ok", None))
+            self.assertEqual(proxied[0], ("ok", None))
+            return direct[1:]
+        for outcome in (direct[0], proxied[0]):
+            self.assertEqual(outcome[0], "raised", outcome)
+            self.assertIsInstance(outcome[1], exc_type)
+        return proxied[0][1]
 
     def assertSameRaise(self, op, exc_type):
         direct, proxied = self._both(op)
@@ -358,6 +436,82 @@ class ProxyClientParityTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 422)
         self.assertEqual(resp.get_json()["code"], "encoding")
 
+    # -- writes match the direct client -------------------------------------
+
+    def test_upload_overwrites_on_both(self):
+        FakeFTP.files = {"/in/a.bin": [b"old"]}
+        files, _ = self.assertSameWrite(lambda ftp: ftp.upload("/in/a.bin", b"\x00\xffnew"))
+        self.assertEqual(files, {"/in/a.bin": [b"\x00\xffnew"]})
+
+    def test_put_writes_a_new_file_and_leaves_no_temp_on_both(self):
+        files, _ = self.assertSameWrite(lambda ftp: ftp.put("/in/a.bin", b"\r\nraw"))
+        self.assertEqual(files, {"/in/a.bin": [b"\r\nraw"]})
+
+    def test_put_onto_an_existing_file_is_target_exists_on_both(self):
+        FakeFTP.files = {"/in/a.bin": [b"keep"]}
+        self.assertSameWrite(lambda ftp: ftp.put("/in/a.bin", b"new"), TargetExists)
+        self.assertEqual(FakeFTP.files, {"/in/a.bin": [b"keep"]})
+
+    def test_a_lost_rename_reply_is_transfer_uncertain_with_its_temp_on_both(self):
+        # The temp name is random per call, so each side is checked against
+        # the temp it reported rather than the two trees against each other.
+        FakeFTP.rename_error = EOFError()
+        for (kind, exc), files, _ in self._both_writes(lambda ftp: ftp.put("/in/a.bin", b"x")):
+            self.assertEqual(kind, "raised")
+            self.assertIsInstance(exc, TransferUncertain)
+            self.assertRegex(exc.temp_path, r"^/in/a\.bin\.[0-9a-f]{12}\.part$")
+            self.assertEqual(files, {exc.temp_path: [b"x"]})
+
+    def test_a_refused_rename_names_the_temp_it_could_not_delete_on_both(self):
+        FakeFTP.rename_error = error_perm("553 rename refused")
+        FakeFTP.delete_error = error_perm("550 delete refused")
+        for (kind, exc), files, _ in self._both_writes(lambda ftp: ftp.put("/in/a.bin", b"x")):
+            self.assertEqual(kind, "raised")
+            self.assertIsInstance(exc, error_perm)
+            self.assertTrue(str(exc).startswith("553"))
+            self.assertEqual(files, {exc.temp_path: [b"x"]})
+            self.assertIn(f"temp file left on server: {exc.temp_path}", exc.__notes__)
+
+    def test_remove_deletes_and_a_missing_file_is_error_perm_on_both(self):
+        FakeFTP.files = {"/in/a.bin": [b"x"]}
+        files, _ = self.assertSameWrite(lambda ftp: ftp.remove("/in/a.bin"))
+        self.assertEqual(files, {})
+        exc = self.assertSameWrite(lambda ftp: ftp.remove("/nope"), error_perm)
+        self.assertTrue(str(exc).startswith("550"))
+
+    def test_mkdir_accepts_an_existing_directory_on_both(self):
+        _, dirs = self.assertSameWrite(lambda ftp: ftp.mkdir("/in/new"))
+        self.assertEqual(dirs, {"/in/new"})
+        FakeFTP.dirs = {"/in/new"}
+        self.assertSameWrite(lambda ftp: ftp.mkdir("/in/new"))
+
+    def test_rmdir_removes_and_a_missing_directory_is_error_perm_on_both(self):
+        FakeFTP.dirs = {"/in/old"}
+        _, dirs = self.assertSameWrite(lambda ftp: ftp.rmdir("/in/old"))
+        self.assertEqual(dirs, set())
+        self.assertSameWrite(lambda ftp: ftp.rmdir("/nope"), error_perm)
+
+    def test_a_refused_login_on_a_write_is_tool_unreachable(self):
+        FakeFTP.login_error = error_perm("530 Login incorrect")
+        with self._proxied() as ftp, self.assertRaises(ToolUnreachable):
+            ftp.put("/in/a.bin", b"x")
+        self.assertEqual(FakeFTP.files, {})
+
+    def test_a_write_answered_by_a_login_page_is_proxy_error(self):
+        # A 200 that is not the write route's answer must never read as success.
+        for data in (b"<html>login page</html>", b'{"files": []}'):
+            with self.subTest(data):
+                self._use(_canned(200, data))
+                with self._proxied() as ftp, self.assertRaises(ProxyError):
+                    ftp.upload("/in/a.bin", b"x")
+
+    def test_an_unknown_write_op_is_bad_request(self):
+        resp = self.flask.post(
+            flask_proxy.URL_WRITE, json={"host": "h1", "op": "chmod", "remote_path": "/a"}
+        )
+        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(resp.get_json()["code"], "bad_request")
+
     # -- the proxy's own failures are ProxyError ----------------------------
 
     def test_proxy_failures_are_proxy_error(self):
@@ -396,24 +550,15 @@ class ProxyClientParityTests(unittest.TestCase):
 
 
 class ProxyClientSurfaceTests(unittest.TestCase):
-    def test_read_methods_have_the_direct_clients_exact_signature(self):
-        for name in ("__init__", "home", "list_details", "download"):
+    def test_methods_have_the_direct_clients_exact_signature(self):
+        names = ("__init__", "home", "list_details", "download",
+                 "upload", "put", "remove", "mkdir", "rmdir")
+        for name in names:
             with self.subTest(name):
                 self.assertEqual(
                     inspect.signature(getattr(proxy_client.FtpClient, name)),
                     inspect.signature(getattr(core_client.FtpClient, name)),
                 )
-
-    def test_writes_raise_write_not_supported(self):
-        with proxy_client.FtpClient(host="h1", user="u", password="p") as ftp:
-            with self.assertRaises(WriteNotSupported):
-                ftp.put("/a.txt", b"x")
-            with self.assertRaises(WriteNotSupported):
-                ftp.remove("/a.txt")
-            with self.assertRaises(WriteNotSupported):
-                ftp.mkdir("/d")
-            with self.assertRaises(WriteNotSupported):
-                ftp.rmdir("/d")
 
     def test_the_package_exports_the_proxy_client(self):
         from ftp_handler import proxy
