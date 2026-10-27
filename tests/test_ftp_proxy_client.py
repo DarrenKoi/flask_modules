@@ -65,7 +65,7 @@ class FakeFTP:
     listed: ClassVar[list] = []
 
     def __init__(self, timeout=None, encoding="utf-8"):
-        pass
+        self.encoding = encoding
 
     def connect(self, host, port, timeout=None):
         if FakeFTP.connect_error is not None:
@@ -106,6 +106,7 @@ class FakeFTP:
             callback(line)
 
     def storbinary(self, cmd, fp, callback=None):
+        cmd.encode(self.encoding)  # ftplib sends the command in the server charset
         path = cmd.split(" ", 1)[1]
         FakeFTP.files[path] = [fp.read()]
 
@@ -472,6 +473,35 @@ class ProxyClientParityTests(unittest.TestCase):
             self.assertEqual(files, {exc.temp_path: [b"x"]})
             self.assertIn(f"temp file left on server: {exc.temp_path}", exc.__notes__)
 
+    def test_an_undecodable_rename_reply_keeps_the_temp_on_both(self):
+        FakeFTP.rename_error = UnicodeDecodeError("utf-8", b"\xb0", 0, 1, "bad byte")
+        FakeFTP.delete_error = error_perm("550 delete refused")
+        for (kind, exc), files, _ in self._both_writes(lambda ftp: ftp.put("/in/a.bin", b"x")):
+            self.assertEqual(kind, "raised")
+            self.assertIsInstance(exc, UnicodeDecodeError)
+            self.assertEqual(files, {exc.temp_path: [b"x"]})
+
+    def test_an_unencodable_path_is_unicode_encode_error_on_both(self):
+        def run(cls):
+            return self._run(
+                lambda: cls(host="h1", user="u", password="p", encoding="latin-1"),
+                lambda ftp: ftp.upload("/in/측정.bin", b"x"),
+            )
+
+        for kind, exc in (run(core_client.FtpClient), run(proxy_client.FtpClient)):
+            self.assertEqual(kind, "raised")
+            self.assertIsInstance(exc, UnicodeEncodeError)
+
+    def test_small_writes_wait_a_finite_time_for_the_proxy(self):
+        FakeFTP.files = {"/in/a.bin": [b"x"]}
+        FakeFTP.dirs = {"/in/old"}
+        for op in (lambda f: f.remove("/in/a.bin"), lambda f: f.mkdir("/in/new"),
+                   lambda f: f.rmdir("/in/old")):
+            with self._proxied() as ftp:
+                op(ftp)
+            _, read = _bridge.last_timeout
+            self.assertIsNotNone(read)
+
     def test_remove_deletes_and_a_missing_file_is_error_perm_on_both(self):
         FakeFTP.files = {"/in/a.bin": [b"x"]}
         files, _ = self.assertSameWrite(lambda ftp: ftp.remove("/in/a.bin"))
@@ -529,6 +559,19 @@ class ProxyClientParityTests(unittest.TestCase):
                 self._use(_canned(status, data))
                 with self._proxied() as ftp, self.assertRaises(ProxyError):
                     ftp.list_details("/log")
+
+    def test_a_body_lost_after_the_headers_is_proxy_error(self):
+        # The write may already have run; the caller must still get the
+        # documented ProxyError, not a requests exception it does not expect.
+        class Broken(FakeResponse):
+            def json(self):
+                raise proxy_client.requests.ConnectionError("connection reset")
+
+        for status in (200, 422):
+            with self.subTest(status):
+                self._use(lambda *a, status=status, **k: Broken(status, b""))
+                with self._proxied() as ftp, self.assertRaises(ProxyError):
+                    ftp.remove("/in/a.bin")
 
     def test_an_unreachable_proxy_is_proxy_error(self):
         def down(*args, **kwargs):
