@@ -163,6 +163,10 @@ class FakeFTP:
         if full != "/home" and full not in self._script().get("dirs", set()):
             raise error_perm(f"550 {path}")
         self.cur = full
+        # `cwd_moves_then_raises`: the server changed dir, the reply read failed.
+        err = self._script().get("cwd_moves_then_raises", {}).get(path)
+        if err is not None:
+            raise err
 
     def delete(self, path):
         # DELE: removes a key of `files`; absent or listed in `dele_errors` -> 550.
@@ -1552,6 +1556,22 @@ class MkdirTests(_FakeFTPTestCase):
         self.assertEqual([f.remote_path for f in report.failures], ["existing/child", "next"])
         self.assertNotIn("/home/existing/next", FakeFTP.scripts["h1"]["dirs"])
 
+    def test_mkdir_probe_that_moves_then_fails_stops_the_host(self):
+        # MKD "existing" refused; CWD into it lands but its reply is undecodable.
+        # The session may now sit in /home/existing: "next" must not be made.
+        FakeFTP.scripts = {
+            "h1": {
+                "dirs": {"/home/existing"},
+                "cwd_moves_then_raises": {
+                    "existing": UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")
+                },
+            }
+        }
+        report = self._mkdir([MkdirSpec("h1", dirs=["existing", "next"])])
+        self.assertEqual(report.ok, 0)
+        self.assertEqual([f.remote_path for f in report.failures], ["existing", "next"])
+        self.assertNotIn("/home/existing/next", FakeFTP.scripts["h1"]["dirs"])
+
     def test_mkdir_fleet_helper(self):
         FakeFTP.scripts = {"h1": {}}
         with patch(FTP_PATCH_TARGET, FakeFTP):
@@ -1681,6 +1701,24 @@ class DeleteTests(_FakeFTPTestCase):
         )
         self.assertEqual(report.grouped(), {"h2": ["/a"]})
         self.assertIsNone(report.failures[0].remote_path)
+
+    def test_delete_probe_that_moves_then_fails_stops_the_host(self):
+        # RMD D refused (non-empty); CWD probe lands in /home/D, reply undecodable.
+        # A following relative DELE "victim" would hit /home/D/victim.
+        FakeFTP.scripts = {
+            "h1": {
+                "files": {"/home/D/a": b"A", "/home/D/victim": b"W", "/home/victim": b"V"},
+                "dirs": {"/home/D"},
+                "cwd_moves_then_raises": {
+                    "D": UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")
+                },
+            }
+        }
+        report = self._delete([DeleteSpec("h1", files=["D", "victim"])])
+        self.assertEqual(report.ok, 0)
+        files = FakeFTP.scripts["h1"]["files"]
+        self.assertIn("/home/D/victim", files)
+        self.assertIn("/home/victim", files)
 
     def test_delete_fleet_helper(self):
         FakeFTP.scripts = {"h1": {"files": {"/a": b"A"}}}

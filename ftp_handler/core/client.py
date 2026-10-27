@@ -506,8 +506,10 @@ class FtpClient:
     def _is_dir(self, remote_dir: str) -> bool:
         # CWD in and straight back to PWD. An unparseable PWD reply comes back
         # as "" and cwd("") is CWD . -- no way back -- so skip the probe then.
-        # If the way back fails, the session sits inside remote_dir and later
-        # relative paths would land there: drop the connection instead.
+        # Only a clean refusal (error_perm) proves the session did not move.
+        # Anything else from either CWD -- an undecodable reply, a lost one --
+        # may leave it inside remote_dir, where later relative paths would
+        # land: drop the connection instead.
         here = self._ftp.pwd()
         if not here:
             return False
@@ -515,6 +517,9 @@ class FtpClient:
             self._ftp.cwd(remote_dir)
         except error_perm:
             return False
+        except BaseException:
+            self._discard()
+            raise
         try:
             self._ftp.cwd(here)
         except BaseException:

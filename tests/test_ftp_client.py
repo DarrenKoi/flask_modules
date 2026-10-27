@@ -42,7 +42,9 @@ class FakeFTP:
     dirs: set = set()
     mkd_errors: dict = {}
     cwd_errors: dict = {}
+    cwd_moves_then_raises: dict = {}  # server changes dir, reply read fails
     pwd_reply = "/home"
+    cur = "/home"
 
     def __init__(self, timeout=None, encoding="utf-8"):
         self.timeout = timeout
@@ -107,6 +109,9 @@ class FakeFTP:
             raise FakeFTP.cwd_errors[path]
         if path != FakeFTP.pwd_reply and path not in FakeFTP.dirs:
             raise error_perm(f"550 {path}: No such directory")
+        FakeFTP.cur = path
+        if path in FakeFTP.cwd_moves_then_raises:
+            raise FakeFTP.cwd_moves_then_raises[path]
 
     def close(self):
         FakeFTP.events.append(("close",))
@@ -128,7 +133,9 @@ class FtpClientTests(unittest.TestCase):
         FakeFTP.dirs = set()
         FakeFTP.mkd_errors = {}
         FakeFTP.cwd_errors = {}
+        FakeFTP.cwd_moves_then_raises = {}
         FakeFTP.pwd_reply = "/home"
+        FakeFTP.cur = "/home"
 
     def test_context_manager_connects_logs_in_and_closes(self):
         with patch(FTP_PATCH_TARGET, FakeFTP):
@@ -290,6 +297,19 @@ class FtpClientTests(unittest.TestCase):
         with patch(FTP_PATCH_TARGET, FakeFTP):
             with _client() as ftp:
                 with self.assertRaises(error_temp):
+                    ftp.mkdir("/INBOX")
+                self.assertIsNone(ftp._ftp)
+
+    def test_mkdir_probe_that_moves_then_fails_discards_the_connection(self):
+        # The server ran CWD /INBOX but the reply could not be decoded: the
+        # session may sit in /INBOX, so it must not be used again.
+        FakeFTP.dirs = {"/INBOX"}
+        FakeFTP.cwd_moves_then_raises = {
+            "/INBOX": UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        }
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            with _client() as ftp:
+                with self.assertRaises(UnicodeDecodeError):
                     ftp.mkdir("/INBOX")
                 self.assertIsNone(ftp._ftp)
 
