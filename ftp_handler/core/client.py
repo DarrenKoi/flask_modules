@@ -30,7 +30,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
-from ftplib import FTP, error_perm
+from ftplib import FTP, error_perm, error_temp
 from io import BytesIO
 
 # Shared NLST normalization lives in core.listing so single-server and fan-out
@@ -59,6 +59,30 @@ class TransferTimeout(Exception):
 
 class ListingTooLarge(Exception):
     """A LIST reply outgrew its line or byte cap; nothing was returned."""
+
+
+def _mkdir_levels(remote_dir: str, floor: str | None) -> tuple[list[str], int]:
+    """The paths ``mkdir`` walks, shallowest first, and how many ``floor`` covers.
+
+    ``floor`` must be ``remote_dir`` itself or a real ancestor: same absolute or
+    relative base, equal component by component, no ``..`` in either. Anything
+    else raises ``ValueError`` before a single MKD -- compared by depth alone,
+    ``..`` could climb above the floor and an unrelated floor would skip levels.
+    """
+    root = "/" if remote_dir.startswith("/") else ""
+    parts = [p for p in remote_dir.split("/") if p]
+    levels = [root + "/".join(parts[: i + 1]) for i in range(len(parts))]
+    if floor is None:
+        return levels, 0
+    floor_parts = [p for p in floor.split("/") if p]
+    if (
+        floor.startswith("/") != bool(root)
+        or ".." in parts
+        or ".." in floor_parts
+        or parts[: len(floor_parts)] != floor_parts
+    ):
+        raise ValueError(f"floor {floor!r} is not {remote_dir!r} or an ancestor of it")
+    return levels, len(floor_parts)
 
 
 def _name_temp(exc: Exception, temp: str) -> None:
@@ -467,9 +491,21 @@ class FtpClient:
         deleted = False
         try:
             if overwrite and self._exists(remote_path):
-                self._ftp.delete(remote_path)
+                try:
+                    self._ftp.delete(remote_path)
+                except (error_perm, error_temp):
+                    raise  # a clean refusal: the old target is still there
+                except Exception as exc:
+                    # The DELE may have run with only its reply lost or
+                    # unreadable: the temp may be the only copy left.
+                    self._discard()
+                    raise TransferUncertain(
+                        f"DELE {remote_path}: outcome unknown", temp_path=temp
+                    ) from exc
                 deleted = True
             self._ftp.rename(temp, remote_path)
+        except TransferUncertain:
+            raise
         except (OSError, EOFError) as exc:
             # The command may have reached the server and run; only the reply
             # is missing, so neither "renamed" nor "not renamed" is knowable.
@@ -523,13 +559,18 @@ class FtpClient:
         ``floor`` (an ancestor of ``remote_dir``) is never created, nor is
         anything above it: only the levels below it are MKD'd, so a missing
         ``floor`` makes the first MKD below it fail instead of bringing it
-        back. Use it for a folder the caller is not allowed to recreate.
+        back. Use it for a folder the caller is not allowed to recreate. It
+        must be ``remote_dir`` or a real ancestor of it (``ValueError``
+        otherwise, before any MKD); when it is ``remote_dir`` itself, nothing
+        is created and a CWD checks it is a directory (550 ``error_perm`` if not).
         """
-        parts = [p for p in remote_dir.split("/") if p]
-        root = "/" if remote_dir.startswith("/") else ""
-        start = len([p for p in floor.split("/") if p]) if floor else 0
-        for i in range(start, len(parts)):
-            level = root + "/".join(parts[: i + 1])
+        levels, start = _mkdir_levels(remote_dir, floor)
+        if start == len(levels):
+            target = levels[-1] if levels else remote_dir
+            if not self._is_dir(target):
+                raise error_perm(f"550 {target}: not a directory (floor, not created)")
+            return
+        for level in levels[start:]:
             try:
                 self._ftp.mkd(level)
             except error_perm:

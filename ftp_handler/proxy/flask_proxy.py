@@ -557,7 +557,7 @@ def _write(ftp, body: dict):
         else:
             overwrite = body.get("overwrite") is True  # only an explicit true replaces
             ftp.put(remote_path, data, deadline=body.get("deadline_s"), overwrite=overwrite)
-    elif op == "mkdir":
+    elif op in ("makedirs", "mkdir"):  # the client sends makedirs; see proxy_client
         floor = body.get("floor")
         if floor is not None and not isinstance(floor, str):
             raise _BadRequest("floor must be a string")

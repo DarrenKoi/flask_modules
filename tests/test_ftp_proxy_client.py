@@ -525,6 +525,22 @@ class ProxyClientParityTests(unittest.TestCase):
         _, dirs = self.assertSameWrite(lambda ftp: ftp.mkdir("/in/new/sub", floor="/in"))
         self.assertEqual(dirs, {"/in", "/in/new", "/in/new/sub"})
 
+    def test_a_bad_floor_is_value_error_on_both_before_anything_is_sent(self):
+        sent = []
+        self._use(_bridge(self.flask, rewrite=lambda b: sent.append(b) or b))
+        self.assertSameWrite(lambda ftp: ftp.mkdir("/in/../x", floor="/in"), ValueError)
+        self.assertEqual(sent, [])
+
+    def test_mkdir_uses_an_op_a_pre_mkdir_p_proxy_refuses(self):
+        # A proxy from before mkdir -p ignored floor and made one level, so
+        # mkdir("/CLS/data", floor="/CLS/data") would recreate the floor.
+        # Sending an op name it does not know makes it refuse instead.
+        ops = []
+        self._use(_bridge(self.flask, rewrite=lambda b: ops.append(b["op"]) or b))
+        with self._proxied() as ftp:
+            ftp.mkdir("/in")
+        self.assertNotIn(ops[0], {"upload", "put", "remove", "mkdir", "rmdir"})
+
     def test_put_with_overwrite_replaces_the_target_on_both(self):
         FakeFTP.files = {"/in/a.bin": [b"old"]}
         files, _ = self.assertSameWrite(lambda ftp: ftp.put("/in/a.bin", b"new", overwrite=True))

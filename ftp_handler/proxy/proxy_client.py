@@ -22,10 +22,14 @@ reached the proxy (a lost answer, a 5xx after the work): list before retrying.
 ``remove``, ``mkdir`` and ``rmdir`` wait a bounded time for the answer. ``upload``
 and ``put`` without a ``deadline`` wait as long as the proxy takes: it says
 nothing until the STOR is done, so no fixed wait fits every file size. Pass
-``put(deadline=...)`` to bound it. A proxy older than 2026-10-29 ignores
-``overwrite`` (its ``put`` then refuses an existing target with
-``TargetExists``) and ``floor`` (its ``mkdir`` makes one level only, never
-the parents), so neither fails open.
+``put(deadline=...)`` to bound it.
+
+Against a proxy older than 2026-10-29 both new options fail closed. Its ``put``
+ignores ``overwrite`` and refuses an existing target with ``TargetExists``.
+``mkdir`` goes out as op ``makedirs``, which that proxy rejects as a bad
+request (``ProxyError``): its ``mkdir`` op ignored ``floor`` and made one
+level, so ``mkdir("/CLS/data", floor="/CLS/data")`` would have recreated the
+very folder the floor protects.
 
 Proxy location and auth are ``proxy_downloader.PROXY_URL`` / ``PROXY_TOKEN``,
 read when the client is built, the same constants ``FtpFleetDownloader`` uses.
@@ -38,7 +42,7 @@ Wire (``POST``, JSON body = credentials envelope + operation fields):
         answers ``{home, entries: []}`` after the PWD with no LIST at all.
     /fetch_sknn_v3         {remote_path, max_bytes, deadline_s}
         200 application/octet-stream, the raw file bytes
-    /write_sknn_v3         {op: upload|put|remove|mkdir|rmdir, remote_path,
+    /write_sknn_v3         {op: upload|put|remove|makedirs|rmdir, remote_path,
                             data_b64 (upload, put), deadline_s, overwrite (put),
                             floor (mkdir)}
         200 {ok: true}
@@ -70,6 +74,7 @@ from ..core.client import (
     TransferTooLarge,
     TransferUncertain,
     _check_deadline,
+    _mkdir_levels,
 )
 from ..direct_downloader.fleet_downloader import HostSpec
 from . import proxy_downloader as _dl
@@ -294,7 +299,7 @@ class FtpClient:
             payload["data_b64"] = base64.b64encode(data).decode("ascii")
             wait = deadline
         else:
-            levels = len([p for p in remote_path.split("/") if p]) if op == "mkdir" else 0
+            levels = len(_mkdir_levels(remote_path, None)[0]) if op == "makedirs" else 0
             replies = _LOGIN_REPLIES + max(1, _MKDIR_REPLIES_PER_LEVEL * levels)
             # _post adds one more timeout on top as slack.
             wait = replies * self.timeout
@@ -325,7 +330,8 @@ class FtpClient:
 
     def mkdir(self, remote_dir: str, *, floor: str | None = None) -> None:
         """``core.FtpClient.mkdir`` (``mkdir -p``, never creating ``floor``)."""
-        self._write("mkdir", remote_dir, floor=floor)
+        _mkdir_levels(remote_dir, floor)  # ValueError here, as direct, before any request
+        self._write("makedirs", remote_dir, floor=floor)
 
     def rmdir(self, remote_dir: str) -> None:
         """``core.FtpClient.rmdir`` (RMD, empty directories only)."""

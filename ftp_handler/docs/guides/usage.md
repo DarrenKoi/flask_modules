@@ -51,7 +51,10 @@ rename 한다 — 기존 파일 위로의 RNTO를 거절하는 서버가 있어�
 위치로 돌아온다. "이미 있음" 거절 코드가 서버마다 달라(550, 521) 모든 `error_perm`을
 이렇게 확인하며, 폴더가 아니면(권한 거절 등) 원래 거절이 그대로 올라온다. `floor`를
 주면 `floor`와 그 위는 MKD 하지 않는다 — `floor`가 없으면 그 아래 첫 MKD가 실패할 뿐
-되살리지 않으므로, 다시 만들면 안 되는 폴더를 지킬 때 쓴다. 서버의 PWD 응답을 해석할 수
+되살리지 않으므로, 다시 만들면 안 되는 폴더를 지킬 때 쓴다. `floor`는 `remote_dir` 자신이거나
+실제 상위 폴더여야 한다(같은 절대/상대 기준, 구성 요소 단위 일치, `..` 금지). 아니면 MKD
+전에 `ValueError`다. `remote_dir`가 `floor` 자신이면 아무것도 만들지 않고 `CWD`로 폴더인지만
+확인한다(아니면 550 `error_perm`). 서버의 PWD 응답을 해석할 수
 없으면 돌아올 위치를 몰라 확인하지 않고 거절을 그대로 올린다. 확인용 `CWD`가 거절(`error_perm`)이 아닌 이유로
 실패하거나(응답 디코딩 실패, 응답 유실 — 서버는 이미 이동했을 수 있다) 돌아오는 `CWD`가
 실패하면 연결을 버린다 — 다음 상대 경로가 엉뚱한 폴더에서 실행되지 않게 하기 위해서다. `rmdir`은 오류를 그대로 올린다.
@@ -60,8 +63,11 @@ proxy의 `FtpClient`(`from ftp_handler.proxy import FtpClient`)도 `upload`·`pu
 `WriteNotSupported`를 냈다). 호출마다 proxy가 `/write_sknn_v3`에서 새 연결로
 `core.FtpClient`의 같은 메서드를 실행하므로 동작과 예외(`TargetExists`,
 `TransferUncertain`과 그 `temp_path`, 550의 `error_perm`)가 직접 연결과 같다.
-`overwrite`·`floor`도 그대로 전달된다. 2026-10-29 이전 proxy는 둘을 무시하지만
-안전한 쪽으로 실패한다(`put`은 `TargetExists`, `mkdir`은 한 단계만 만든다). 요청이
+`overwrite`·`floor`도 그대로 전달되고, 잘못된 `floor`는 요청을 보내기 전에 같은
+`ValueError`가 난다. 2026-10-29 이전 proxy에서는 둘 다 안전한 쪽으로 실패한다. `put`은
+`overwrite`를 무시해 기존 대상에 `TargetExists`를 낸다. `mkdir`은 op `makedirs`로 보내므로
+그 proxy가 모르는 op로 거절한다(`ProxyError`) — 그 proxy의 `mkdir`은 `floor`를 무시하고 한
+단계만 만들어, `mkdir("/CLS/data", floor="/CLS/data")`가 지켜야 할 폴더를 되살렸을 것이다. 요청이
 proxy에 닿은 뒤 난 `ProxyError`(응답 유실, 5xx)는 쓰기가 됐는지 알 수 없으니 재시도 전에
 목록을 확인한다.
 

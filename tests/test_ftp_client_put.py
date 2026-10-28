@@ -153,6 +153,23 @@ class PutTests(unittest.TestCase):
                     ftp.put("/rcp/a.rcp", b"replacement", overwrite=True)
         self.assertEqual(StoreFTP.files, {"/rcp/a.rcp": b"original"})
 
+    def test_overwrite_with_an_undecodable_dele_reply_keeps_the_new_copy(self):
+        # The server ran the DELE; only its reply was unreadable. The old
+        # target may be gone, so the temp must survive.
+        StoreFTP.files = {"/rcp/a.rcp": b"original"}
+        real_delete = StoreFTP.delete
+
+        def dele_then_garble(self, path):
+            real_delete(self, path)
+            if path == "/rcp/a.rcp":
+                raise UnicodeDecodeError("utf-8", b"\xb0", 0, 1, "bad byte")
+
+        with patch.object(StoreFTP, "delete", dele_then_garble):
+            with self._client() as ftp:
+                with self.assertRaises(TransferUncertain) as caught:
+                    ftp.put("/rcp/a.rcp", b"replacement", overwrite=True)
+        self.assertEqual(StoreFTP.files, {caught.exception.temp_path: b"replacement"})
+
     def test_overwrite_with_a_lost_rnto_reply_is_transfer_uncertain(self):
         StoreFTP.files = {"/rcp/a.rcp": b"original"}
 

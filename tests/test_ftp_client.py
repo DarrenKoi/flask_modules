@@ -296,6 +296,37 @@ class FtpClientTests(unittest.TestCase):
                 with self.assertRaisesRegex(error_perm, "Permission denied"):
                     ftp.mkdir("/deny")
 
+    def test_mkdir_refuses_a_floor_that_is_not_a_component_prefix(self):
+        # Checked before any MKD: a floor compared by depth alone would let
+        # ".." climb above it or an unrelated floor skip levels silently.
+        cases = [
+            ("/CLS/data/../../NEW", "/CLS/data"),
+            ("/A/B", "/X"),
+            ("/CLS/database/x", "/CLS/data"),
+            ("CLS/data/x", "/CLS/data"),
+            ("/CLS/data/x", "CLS/data"),
+        ]
+        FakeFTP.dirs = {"/CLS", "/CLS/data"}
+        for remote_dir, floor in cases:
+            with self.subTest(remote_dir=remote_dir, floor=floor):
+                with patch(FTP_PATCH_TARGET, FakeFTP):
+                    with _client() as ftp:
+                        with self.assertRaises(ValueError):
+                            ftp.mkdir(remote_dir, floor=floor)
+        self.assertEqual([e for e in FakeFTP.events if e[0] == "mkd"], [])
+
+    def test_mkdir_of_the_floor_itself_checks_it_is_a_directory(self):
+        FakeFTP.dirs = {"/CLS", "/CLS/data"}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            with _client() as ftp:
+                ftp.mkdir("/CLS/data/", floor="/CLS/data")
+        FakeFTP.dirs = {"/CLS"}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            with _client() as ftp:
+                with self.assertRaisesRegex(error_perm, "^550"):
+                    ftp.mkdir("/CLS/data", floor="/CLS/data")
+        self.assertEqual([e for e in FakeFTP.events if e[0] == "mkd"], [])
+
     def test_mkdir_settles_any_refusal_code_for_an_existing_directory(self):
         # "Exists" is 550 on most servers and 521 on some; like the fleet
         # mkdir, any refusal is settled by CWD-ing into the path.
