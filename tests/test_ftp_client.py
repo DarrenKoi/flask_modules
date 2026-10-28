@@ -88,10 +88,14 @@ class FakeFTP:
         FakeFTP.deleted.append(path)
 
     def mkd(self, path):
+        FakeFTP.events.append(("mkd", path))
         if path in FakeFTP.mkd_errors:
             raise FakeFTP.mkd_errors[path]
         if path in FakeFTP.dirs:
             raise error_perm(f"550 {path}: File exists")
+        parent = path.rsplit("/", 1)[0]
+        if parent and parent not in FakeFTP.dirs:  # real servers need the parent
+            raise error_perm(f"550 {parent}: No such directory")
         FakeFTP.dirs.add(path)
         return path
 
@@ -245,11 +249,32 @@ class FtpClientTests(unittest.TestCase):
                 ftp.remove("/MEAS/stale.dat")
         self.assertEqual(FakeFTP.deleted, ["/MEAS/stale.dat"])
 
-    def test_mkdir_creates_directory(self):
+    def test_mkdir_creates_missing_parents(self):
         with patch(FTP_PATCH_TARGET, FakeFTP):
             with _client() as ftp:
-                ftp.mkdir("/INBOX/2026")
-        self.assertEqual(FakeFTP.dirs, {"/INBOX/2026"})
+                ftp.mkdir("/INBOX/2026/10")
+        self.assertEqual(FakeFTP.dirs, {"/INBOX", "/INBOX/2026", "/INBOX/2026/10"})
+
+    def test_mkdir_never_creates_the_floor_or_above_it(self):
+        # The floor is the folder the caller may not recreate: when it is
+        # missing, the first MKD below it fails instead.
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            with _client() as ftp:
+                with self.assertRaises(error_perm):
+                    ftp.mkdir("/CLS/data/W1", floor="/CLS/data")
+        self.assertEqual(FakeFTP.dirs, set())
+        self.assertEqual([e for e in FakeFTP.events if e[0] == "mkd"], [("mkd", "/CLS/data/W1")])
+
+    def test_mkdir_below_an_existing_floor_creates_only_the_levels_below(self):
+        FakeFTP.dirs = {"/CLS", "/CLS/data"}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            with _client() as ftp:
+                ftp.mkdir("/CLS/data/W1/P1", floor="/CLS/data")
+        self.assertEqual(FakeFTP.dirs, {"/CLS", "/CLS/data", "/CLS/data/W1", "/CLS/data/W1/P1"})
+        self.assertEqual(
+            [e for e in FakeFTP.events if e[0] == "mkd"],
+            [("mkd", "/CLS/data/W1"), ("mkd", "/CLS/data/W1/P1")],
+        )
 
     def test_mkdir_existing_directory_is_success_and_returns_to_pwd(self):
         # 550 "exists" is settled by CWD into it -- and the session must come
@@ -271,14 +296,15 @@ class FtpClientTests(unittest.TestCase):
                 with self.assertRaisesRegex(error_perm, "Permission denied"):
                     ftp.mkdir("/deny")
 
-    def test_mkdir_other_error_perm_raises_without_probing(self):
+    def test_mkdir_settles_any_refusal_code_for_an_existing_directory(self):
+        # "Exists" is 550 on most servers and 521 on some; like the fleet
+        # mkdir, any refusal is settled by CWD-ing into the path.
         FakeFTP.dirs = {"/x"}
-        FakeFTP.mkd_errors = {"/x": error_perm("553 Not allowed")}
+        FakeFTP.mkd_errors = {"/x": error_perm("521 Directory already exists")}
         with patch(FTP_PATCH_TARGET, FakeFTP):
             with _client() as ftp:
-                with self.assertRaisesRegex(error_perm, "553"):
-                    ftp.mkdir("/x")
-        self.assertNotIn(("cwd", "/x"), FakeFTP.events)
+                ftp.mkdir("/x")
+        self.assertIn(("cwd", "/x"), FakeFTP.events)
 
     def test_mkdir_with_unparseable_pwd_keeps_the_550(self):
         # pwd() == "" means there is no known way back after a CWD probe

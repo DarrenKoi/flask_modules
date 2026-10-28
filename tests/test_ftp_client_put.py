@@ -97,6 +97,74 @@ class PutTests(unittest.TestCase):
                 ftp.put("/rcp/a.rcp", b"replacement")
         self.assertEqual(StoreFTP.files, {"/rcp/a.rcp": b"original"})
 
+    def test_overwrite_replaces_an_existing_target_and_leaves_no_temp(self):
+        StoreFTP.files = {"/rcp/a.rcp": b"original"}
+        with self._client() as ftp:
+            ftp.put("/rcp/a.rcp", b"replacement", overwrite=True)
+        self.assertEqual(StoreFTP.files, {"/rcp/a.rcp": b"replacement"})
+
+    def test_overwrite_of_a_new_target_just_writes_it(self):
+        with self._client() as ftp:
+            ftp.put("/rcp/new.rcp", b"body", overwrite=True)
+        self.assertEqual(StoreFTP.files, {"/rcp/new.rcp": b"body"})
+
+    def test_overwrite_deletes_the_target_before_the_rename(self):
+        # Some servers refuse RNTO onto an existing file, so DELE goes first.
+        StoreFTP.files = {"/rcp/a.rcp": b"original"}
+
+        def refuse_onto_existing(self, fromname, toname):
+            if toname in StoreFTP.files:
+                raise error_perm("553 Target exists")
+            StoreFTP.files[toname] = StoreFTP.files.pop(fromname)
+
+        with patch.object(StoreFTP, "rename", refuse_onto_existing):
+            with self._client() as ftp:
+                ftp.put("/rcp/a.rcp", b"replacement", overwrite=True)
+        self.assertEqual(StoreFTP.files, {"/rcp/a.rcp": b"replacement"})
+
+    def test_overwrite_keeps_the_new_copy_when_rnto_fails_after_the_dele(self):
+        # The old target is gone by then: deleting the temp too would leave
+        # neither copy, so it stays and is named on the exception.
+        StoreFTP.files = {"/rcp/a.rcp": b"original"}
+
+        def refuse(self, fromname, toname):
+            raise error_perm("553 Rename refused")
+
+        with patch.object(StoreFTP, "rename", refuse):
+            with self._client() as ftp:
+                with self.assertRaises(error_perm) as caught:
+                    ftp.put("/rcp/a.rcp", b"replacement", overwrite=True)
+        temp = caught.exception.temp_path
+        self.assertEqual(StoreFTP.files, {temp: b"replacement"})
+        self.assertIn(f"temp file left on server: {temp}", caught.exception.__notes__)
+
+    def test_overwrite_that_cannot_delete_the_target_keeps_it_and_drops_the_temp(self):
+        StoreFTP.files = {"/rcp/a.rcp": b"original"}
+        real_delete = StoreFTP.delete
+
+        def refuse_target(self, path):
+            if path == "/rcp/a.rcp":
+                raise error_perm("550 Permission denied")
+            return real_delete(self, path)
+
+        with patch.object(StoreFTP, "delete", refuse_target):
+            with self._client() as ftp:
+                with self.assertRaises(error_perm):
+                    ftp.put("/rcp/a.rcp", b"replacement", overwrite=True)
+        self.assertEqual(StoreFTP.files, {"/rcp/a.rcp": b"original"})
+
+    def test_overwrite_with_a_lost_rnto_reply_is_transfer_uncertain(self):
+        StoreFTP.files = {"/rcp/a.rcp": b"original"}
+
+        def lost(self, fromname, toname):
+            raise EOFError()
+
+        with patch.object(StoreFTP, "rename", lost):
+            with self._client() as ftp:
+                with self.assertRaises(TransferUncertain) as caught:
+                    ftp.put("/rcp/a.rcp", b"replacement", overwrite=True)
+        self.assertEqual(StoreFTP.files, {caught.exception.temp_path: b"replacement"})
+
     def test_a_refused_rnto_removes_only_this_calls_temp_file(self):
         # Another writer's leftover temp sits beside ours; it is not ours to touch.
         StoreFTP.files = {"/rcp/a.rcp.0000.part": b"someone else", "/rcp/b.rcp": b"b"}

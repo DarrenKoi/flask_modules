@@ -133,6 +133,9 @@ class FakeFTP:
     def mkd(self, path):
         if path in FakeFTP.dirs:
             raise error_perm(f"550 {path}: File exists")
+        parent = path.rsplit("/", 1)[0]
+        if parent and parent not in FakeFTP.dirs:
+            raise error_perm(f"550 {parent}: No such directory")
         FakeFTP.dirs.add(path)
 
     def rmd(self, path):
@@ -511,9 +514,21 @@ class ProxyClientParityTests(unittest.TestCase):
 
     def test_mkdir_accepts_an_existing_directory_on_both(self):
         _, dirs = self.assertSameWrite(lambda ftp: ftp.mkdir("/in/new"))
-        self.assertEqual(dirs, {"/in/new"})
-        FakeFTP.dirs = {"/in/new"}
+        self.assertEqual(dirs, {"/in", "/in/new"})
+        FakeFTP.dirs = {"/in", "/in/new"}
         self.assertSameWrite(lambda ftp: ftp.mkdir("/in/new"))
+
+    def test_mkdir_honours_the_floor_on_both(self):
+        self.assertSameWrite(lambda ftp: ftp.mkdir("/in/new", floor="/in"), error_perm)
+        self.assertEqual(FakeFTP.dirs, set())
+        FakeFTP.dirs = {"/in"}
+        _, dirs = self.assertSameWrite(lambda ftp: ftp.mkdir("/in/new/sub", floor="/in"))
+        self.assertEqual(dirs, {"/in", "/in/new", "/in/new/sub"})
+
+    def test_put_with_overwrite_replaces_the_target_on_both(self):
+        FakeFTP.files = {"/in/a.bin": [b"old"]}
+        files, _ = self.assertSameWrite(lambda ftp: ftp.put("/in/a.bin", b"new", overwrite=True))
+        self.assertEqual(files, {"/in/a.bin": [b"new"]})
 
     def test_rmdir_removes_and_a_missing_directory_is_error_perm_on_both(self):
         FakeFTP.dirs = {"/in/old"}
