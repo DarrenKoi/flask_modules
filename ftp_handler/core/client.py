@@ -68,13 +68,14 @@ def _mkdir_levels(remote_dir: str, floor: str | None) -> tuple[list[str], int]:
     relative base, equal component by component, no ``..`` in either. Anything
     else raises ``ValueError`` before a single MKD -- compared by depth alone,
     ``..`` could climb above the floor and an unrelated floor would skip levels.
+    ``.`` components are dropped from both: ``/CLS/data/.`` is the floor itself.
     """
     root = "/" if remote_dir.startswith("/") else ""
-    parts = [p for p in remote_dir.split("/") if p]
+    parts = [p for p in remote_dir.split("/") if p not in ("", ".")]
     levels = [root + "/".join(parts[: i + 1]) for i in range(len(parts))]
     if floor is None:
         return levels, 0
-    floor_parts = [p for p in floor.split("/") if p]
+    floor_parts = [p for p in floor.split("/") if p not in ("", ".")]
     if (
         floor.startswith("/") != bool(root)
         or ".." in parts

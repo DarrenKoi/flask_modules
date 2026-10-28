@@ -315,6 +315,18 @@ class FtpClientTests(unittest.TestCase):
                             ftp.mkdir(remote_dir, floor=floor)
         self.assertEqual([e for e in FakeFTP.events if e[0] == "mkd"], [])
 
+    def test_mkdir_never_sends_the_floor_spelled_with_a_dot(self):
+        # "/CLS/data/." is the floor itself: a server would recreate a
+        # missing floor from that MKD.
+        FakeFTP.dirs = {"/CLS"}
+        with patch(FTP_PATCH_TARGET, FakeFTP):
+            with _client() as ftp:
+                with self.assertRaises(error_perm):
+                    ftp.mkdir("/CLS/data/./child", floor="/CLS/data")
+        self.assertEqual(
+            [e for e in FakeFTP.events if e[0] == "mkd"], [("mkd", "/CLS/data/child")]
+        )
+
     def test_mkdir_of_the_floor_itself_checks_it_is_a_directory(self):
         FakeFTP.dirs = {"/CLS", "/CLS/data"}
         with patch(FTP_PATCH_TARGET, FakeFTP):

@@ -87,7 +87,8 @@ _CHUNK = 64 * 1024
 # remove/mkdir/rmdir answer after a known number of FTP replies on the proxy,
 # each bounded by ``timeout`` there, so the HTTP wait for them can be finite:
 # banner, USER, PASS, then the command -- for mkdir, MKD + PWD + CWD + CWD per
-# level in the worst case (every level already there).
+# level in the worst case (every level already there), and at least the
+# PWD + CWD + CWD check when there is no level to create.
 _LOGIN_REPLIES = 3
 _MKDIR_REPLIES_PER_LEVEL = 4
 
@@ -299,8 +300,11 @@ class FtpClient:
             payload["data_b64"] = base64.b64encode(data).decode("ascii")
             wait = deadline
         else:
-            levels = len(_mkdir_levels(remote_path, None)[0]) if op == "makedirs" else 0
-            replies = _LOGIN_REPLIES + max(1, _MKDIR_REPLIES_PER_LEVEL * levels)
+            if op == "makedirs":
+                levels = len(_mkdir_levels(remote_path, None)[0])
+                replies = _LOGIN_REPLIES + _MKDIR_REPLIES_PER_LEVEL * max(1, levels)
+            else:
+                replies = _LOGIN_REPLIES + 1
             # _post adds one more timeout on top as slack.
             wait = replies * self.timeout
         body = self._json(self._post(URL_WRITE, payload, wait))

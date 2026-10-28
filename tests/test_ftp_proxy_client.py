@@ -531,6 +531,14 @@ class ProxyClientParityTests(unittest.TestCase):
         self.assertSameWrite(lambda ftp: ftp.mkdir("/in/../x", floor="/in"), ValueError)
         self.assertEqual(sent, [])
 
+    def test_a_root_mkdir_waits_for_its_directory_check(self):
+        # Nothing to create, but the CWD check still costs PWD, CWD, CWD
+        # after the three login replies.
+        with self._proxied() as ftp:
+            ftp.mkdir("/", floor="/")
+        _, read = _bridge.last_timeout
+        self.assertGreaterEqual(read, 6 * ftp.timeout)
+
     def test_mkdir_uses_an_op_a_pre_mkdir_p_proxy_refuses(self):
         # A proxy from before mkdir -p ignored floor and made one level, so
         # mkdir("/CLS/data", floor="/CLS/data") would recreate the floor.
