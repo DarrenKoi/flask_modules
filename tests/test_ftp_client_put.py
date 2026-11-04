@@ -277,5 +277,74 @@ class PutTests(unittest.TestCase):
         self.assertEqual(StoreFTP.files, {"/rcp/a.rcp": b"ours"})
 
 
+class ReplaceTests(unittest.TestCase):
+    """replace: temp + RNTO straight onto the target, no TargetExists, no DELE."""
+
+    def setUp(self) -> None:
+        StoreFTP.files = {}
+        StoreFTP.closed = 0
+        StoreFTP.block = 8192
+        StoreFTP.pause = 0.0
+        patcher = patch(FTP_PATCH_TARGET, StoreFTP)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _client(self) -> FtpClient:
+        return FtpClient(host="h1", user="u", password="p")
+
+    def test_replace_overwrites_an_existing_target_and_leaves_no_temp(self):
+        StoreFTP.files = {"/rcp/a.rcp": b"original"}
+        with self._client() as ftp:
+            ftp.replace("/rcp/a.rcp", b"replacement")
+        self.assertEqual(StoreFTP.files, {"/rcp/a.rcp": b"replacement"})
+
+    def test_replace_of_a_new_target_just_writes_it(self):
+        with self._client() as ftp:
+            ftp.replace("/rcp/new.rcp", b"body")
+        self.assertEqual(StoreFTP.files, {"/rcp/new.rcp": b"body"})
+
+    def test_replace_never_deletes_the_target(self):
+        StoreFTP.files = {"/rcp/a.rcp": b"original"}
+
+        def no_dele(self, path):
+            if path == "/rcp/a.rcp":
+                raise AssertionError("replace must not DELE the target")
+            del StoreFTP.files[path]
+
+        with patch.object(StoreFTP, "delete", no_dele):
+            with self._client() as ftp:
+                ftp.replace("/rcp/a.rcp", b"replacement")
+        self.assertEqual(StoreFTP.files, {"/rcp/a.rcp": b"replacement"})
+
+    def test_a_refused_rnto_drops_the_temp_and_keeps_the_old_target(self):
+        # The target was never touched: the tool keeps running on the old
+        # file, and the caller still holds the new bytes to retry with.
+        StoreFTP.files = {"/rcp/a.rcp": b"original"}
+
+        def refuse(self, fromname, toname):
+            raise error_perm("553 Target exists")
+
+        with patch.object(StoreFTP, "rename", refuse):
+            with self._client() as ftp:
+                with self.assertRaises(error_perm):
+                    ftp.replace("/rcp/a.rcp", b"replacement")
+        self.assertEqual(StoreFTP.files, {"/rcp/a.rcp": b"original"})
+
+    def test_a_lost_rnto_reply_keeps_the_temp_and_is_transfer_uncertain(self):
+        StoreFTP.files = {"/rcp/a.rcp": b"original"}
+
+        def lost(self, fromname, toname):
+            raise EOFError()
+
+        with patch.object(StoreFTP, "rename", lost):
+            with self._client() as ftp:
+                with self.assertRaises(TransferUncertain) as caught:
+                    ftp.replace("/rcp/a.rcp", b"replacement")
+        self.assertEqual(
+            StoreFTP.files,
+            {"/rcp/a.rcp": b"original", caught.exception.temp_path: b"replacement"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

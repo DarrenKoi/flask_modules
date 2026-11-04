@@ -554,6 +554,25 @@ class ProxyClientParityTests(unittest.TestCase):
         files, _ = self.assertSameWrite(lambda ftp: ftp.put("/in/a.bin", b"new", overwrite=True))
         self.assertEqual(files, {"/in/a.bin": [b"new"]})
 
+    def test_replace_overwrites_the_target_on_both(self):
+        FakeFTP.files = {"/in/a.bin": [b"old"]}
+        files, _ = self.assertSameWrite(lambda ftp: ftp.replace("/in/a.bin", b"new"))
+        self.assertEqual(files, {"/in/a.bin": [b"new"]})
+
+    def test_a_refused_replace_rename_keeps_the_old_target_on_both(self):
+        FakeFTP.files = {"/in/a.bin": [b"old"]}
+        FakeFTP.rename_error = error_perm("553 rename refused")
+        self.assertSameWrite(lambda ftp: ftp.replace("/in/a.bin", b"new"), error_perm)
+        self.assertEqual(FakeFTP.files, {"/in/a.bin": [b"old"]})
+
+    def test_a_lost_replace_rename_reply_keeps_the_temp_on_both(self):
+        FakeFTP.files = {"/in/a.bin": [b"old"]}
+        FakeFTP.rename_error = EOFError()
+        for (kind, exc), files, _ in self._both_writes(lambda ftp: ftp.replace("/in/a.bin", b"x")):
+            self.assertEqual(kind, "raised")
+            self.assertIsInstance(exc, TransferUncertain)
+            self.assertEqual(files, {"/in/a.bin": [b"old"], exc.temp_path: [b"x"]})
+
     def test_rmdir_removes_and_a_missing_directory_is_error_perm_on_both(self):
         FakeFTP.dirs = {"/in/old"}
         _, dirs = self.assertSameWrite(lambda ftp: ftp.rmdir("/in/old"))
@@ -634,7 +653,7 @@ class ProxyClientParityTests(unittest.TestCase):
 class ProxyClientSurfaceTests(unittest.TestCase):
     def test_methods_have_the_direct_clients_exact_signature(self):
         names = ("__init__", "home", "list_details", "download",
-                 "upload", "put", "remove", "mkdir", "rmdir")
+                 "upload", "put", "replace", "remove", "mkdir", "rmdir")
         for name in names:
             with self.subTest(name):
                 self.assertEqual(
